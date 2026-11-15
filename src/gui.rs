@@ -1069,13 +1069,33 @@ fn apply_ui_scale(ui: &AppWindow) {
     let css_w = phys.width as f32 / base;
     let k = if css_w >= 1920.0 { (12.0 + 0.003 * css_w) / 16.0 } else { 1.0 };
     let target = base * k;
+    // Диагностика масштаба: одна строка на изменение — по ней видно, что дало winit
+    // и что применили (в отчётах о «замороженном» интерфейсе это первое, что смотрят).
+    static LAST: std::sync::Mutex<(f32, f32)> = std::sync::Mutex::new((0.0, 0.0));
+    if let Ok(mut last) = LAST.lock() {
+        if (last.0 - base).abs() > 0.001 || (last.1 - k).abs() > 0.001 {
+            *last = (base, k);
+            log(format!(
+                "масштаб: окно {}×{} физ., база {base}, k {k}, dpr {target}",
+                phys.width, phys.height
+            ));
+        }
+    }
     ui.global::<App>().set_ui_scale(k);
     ui.global::<App>().set_dpr(target);
-    if (w.scale_factor() - target).abs() < 0.001 {
-        return;
+    #[cfg(windows)]
+    {
+        // Windows: окно подстраивается под DPI монитора (реальный масштаб меняется).
+        if (w.scale_factor() - target).abs() < 0.001 {
+            return;
+        }
+        w.dispatch_event(slint::platform::WindowEvent::ScaleFactorChanged { scale_factor: target });
+        w.dispatch_event(slint::platform::WindowEvent::Resized { size: phys.to_logical(target) });
     }
-    w.dispatch_event(slint::platform::WindowEvent::ScaleFactorChanged { scale_factor: target });
-    w.dispatch_event(slint::platform::WindowEvent::Resized { size: phys.to_logical(target) });
+    // Linux: масштабом окна владеет композитор (winit), синтетические события
+    // рассинхронизируют его с рендерером — UI-масштаб применяется только свойствами.
+    #[cfg(not(target_os = "windows"))]
+    {}
 }
 
 /// Чат поддержки, как `createSupportChatUrl` оригинала.
@@ -1108,6 +1128,9 @@ fn reveal(ui: &AppWindow) {
         return;
     }
     finish_reveal(ui.as_weak(), first, 0);
+    // После скрытия и повторного показа композитор может держать старый кадр:
+    // просим перерисовать, чтобы окно не выглядело «замороженным».
+    ui.window().request_redraw();
 }
 
 /// Режим работы: анимации в интерфейсе и размер кэша глифов Skia.
@@ -1142,17 +1165,15 @@ fn dpi_base(ui: &AppWindow, w: &slint::Window) -> f32 {
 
 /// Окно winit создаётся не сразу после `show()` (до запуска цикла событий и с OpenGL),
 /// поэтому масштаб и прочее применяются, когда у окна появится HWND.
-#[cfg_attr(not(target_os = "windows"), allow(clippy::only_used_in_recursion))]
 fn finish_reveal(weak: slint::Weak<AppWindow>, first: bool, tries: u32) {
     #[cfg(not(target_os = "windows"))]
     {
-        // Окно winit появляется позже `show()`; пробуем применить масштаб, пока
-        // окно не появится (дальше его тоже применяет on_window_resized).
+        // Окно winit появляется позже `show()`; один раз пробуем применить масштаб —
+        // дальше его применяет on_window_resized. Без петли: шторм вызовов на Linux
+        // рассинхронизировал рендерер (клики и обновления UI замирали).
+        let _ = (first, tries);
         if let Some(ui) = weak.upgrade() {
             apply_ui_scale(&ui);
-        }
-        if tries < 50 {
-            Timer::single_shot(Duration::from_millis(50), move || finish_reveal(weak, first, tries + 1));
         }
     }
     #[cfg(target_os = "windows")]
@@ -1252,27 +1273,33 @@ fn start_updates(ui: &AppWindow) {
     });
     ui.global::<App>().on_update_install(|| {
         let Some(r) = UPDATE.with(|u| u.borrow().clone()) else { return };
-        // В релизе нет exe — обновить можно только руками, ведём на страницу.
-        if r.exe.is_none() {
-            win::open_url(&r.page);
-            return;
-        }
-        with_ctx(|c| c.ui().global::<App>().set_update_busy(true));
-        std::thread::spawn(move || {
-            let res = crate::update::install(&r).and_then(|exe| crate::update::relaunch(&exe));
-            let _ = slint::invoke_from_event_loop(move || match res {
-                // Новая версия ждёт, пока мы закроемся.
-                Ok(()) => quit(),
-                Err(e) => {
-                    log(format!("обновление: {e}"));
-                    with_ctx(|c| {
-                        c.ui().global::<App>().set_update_busy(false);
-                        c.toast(format!("Не удалось обновить: {e}"));
-                    });
-                    win::open_url(&r.page);
-                }
+        // На Linux self-update нет: обновление — это новый deb, ведём на страницу релиза.
+        #[cfg(not(windows))]
+        win::open_url(&r.page);
+        #[cfg(windows)]
+        {
+            // В релизе нет exe — обновить можно только руками, ведём на страницу.
+            if r.exe.is_none() {
+                win::open_url(&r.page);
+                return;
+            }
+            with_ctx(|c| c.ui().global::<App>().set_update_busy(true));
+            std::thread::spawn(move || {
+                let res = crate::update::install(&r).and_then(|exe| crate::update::relaunch(&exe));
+                let _ = slint::invoke_from_event_loop(move || match res {
+                    // Новая версия ждёт, пока мы закроемся.
+                    Ok(()) => quit(),
+                    Err(e) => {
+                        log(format!("обновление: {e}"));
+                        with_ctx(|c| {
+                            c.ui().global::<App>().set_update_busy(false);
+                            c.toast(format!("Не удалось обновить: {e}"));
+                        });
+                        win::open_url(&r.page);
+                    }
+                });
             });
-        });
+        }
     });
 }
 
@@ -1995,7 +2022,8 @@ fn card_from_playlist(p: &Playlist) -> Card {
 }
 
 /// Скопировать текст в буфер обмена: Windows — `clip`, Linux — `wl-copy`/`xclip`.
-fn copy_text(text: &str) {
+/// Возвращает false, если ни один способ не сработал (тогда пользователю нужен честный тост).
+fn copy_text(text: &str) -> bool {
     use std::io::Write as _;
     #[cfg(windows)]
     {
@@ -2008,22 +2036,46 @@ fn copy_text(text: &str) {
             if let Some(mut stdin) = child.stdin.take() {
                 let _ = stdin.write_all(text.as_bytes());
             }
-            let _ = child.wait();
+            return child.wait().map(|s| s.success()).unwrap_or(false);
         }
+        false
     }
     #[cfg(not(target_os = "windows"))]
-    let tools: [&[&str]; 2] = [&["wl-copy"], &["xclip", "-selection", "clipboard"]];
-    #[cfg(not(target_os = "windows"))]
-    for tool in tools {
-        if let Ok(mut child) = std::process::Command::new(tool[0]).args(&tool[1..]).stdin(std::process::Stdio::piped()).spawn() {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            if child.wait().map(|s| s.success()).unwrap_or(false) {
-                return;
+    {
+        let tools: [&[&str]; 2] = [&["wl-copy"], &["xclip", "-selection", "clipboard"]];
+        for tool in tools {
+            match std::process::Command::new(tool[0]).args(&tool[1..]).stdin(std::process::Stdio::piped()).spawn() {
+                Ok(mut child) => {
+                    if let Some(mut stdin) = child.stdin.take() {
+                        let _ = stdin.write_all(text.as_bytes());
+                    }
+                    // Ждём с потолком: зависший инструмент буфера обмена не должен
+                    // подвешивать поток интерфейса.
+                    match wait_child(child, 1500) {
+                        Some(true) => return true,
+                        Some(false) => crate::config::log(format!("буфер обмена: {} завершился с ошибкой", tool[0])),
+                        None => crate::config::log(format!("буфер обмена: {} не ответил за 1.5 с", tool[0])),
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    crate::config::log(format!("буфер обмена: {} не найден", tool[0]));
+                }
+                Err(e) => crate::config::log(format!("буфер обмена: {} — {e}", tool[0])),
             }
         }
+        false
     }
+}
+
+/// Дождаться выхода процесса не дольше `ms`, не блокируя вызывающий поток.
+#[cfg(not(target_os = "windows"))]
+fn wait_child(child: std::process::Child, ms: u64) -> Option<bool> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut child = child;
+        let _ = tx.send(child.wait().map(|s| s.success()).unwrap_or(false));
+    });
+    rx.recv_timeout(std::time::Duration::from_millis(ms)).ok()
 }
 
 fn track_link(t: &Track) -> String {
@@ -2088,7 +2140,7 @@ impl Ctx {
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = w.upgrade() {
                         let app = ui.global::<App>();
-                        let chars: Vec<SharedString> = code.chars().map(|c| SharedString::from(c.to_uppercase().to_string())).collect();
+                        let chars: Vec<SharedString> = code.chars().map(SharedString::from).collect();
                         app.set_login_code_chars(ModelRc::from(Rc::new(VecModel::from(chars))));
                         app.set_login_code(code.into());
                         app.set_login_error(err.into());
@@ -2570,12 +2622,21 @@ impl Ctx {
             }
             "about" => win::open_url(env!("CARGO_PKG_REPOSITORY")),
             "discord" => {
-                let on = !app.get_discord_on();
-                app.set_discord_on(on);
-                self.discord.cfg.lock().unwrap().enabled = on;
-                let mut st = self.st.borrow_mut();
-                st.cfg.discord_enabled = on;
-                st.cfg.save();
+                #[cfg(not(target_os = "windows"))]
+                {
+                    // Rich Presence в этой сборке нет: переключатель не должен врать.
+                    app.set_discord_on(false);
+                    self.toast("Статус Discord доступен только в версии для Windows");
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    let on = !app.get_discord_on();
+                    app.set_discord_on(on);
+                    self.discord.cfg.lock().unwrap().enabled = on;
+                    let mut st = self.st.borrow_mut();
+                    st.cfg.discord_enabled = on;
+                    st.cfg.save();
+                }
             }
             "autostart" => {
                 let on = !app.get_autostart();
@@ -3518,7 +3579,27 @@ impl Ctx {
 }
 
 fn music_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into())).join("Music").join("Яндекс Музыка")
+    #[cfg(windows)]
+    {
+        return std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into())).join("Music").join("Яндекс Музыка");
+    }
+    // Linux: каталог музыки из xdg-user-dirs (МУЗЫКА/Музыка в зависимости от локали),
+    // иначе ~/Music. Раньше здесь читался %USERPROFILE% и файлы падали в текущий каталог.
+    #[cfg(not(windows))]
+    {
+        let xdg = std::process::Command::new("xdg-user-dir")
+            .arg("MUSIC")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|p| p.starts_with('/') && p != "/");
+        let base = xdg
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var("HOME").ok().map(|h| std::path::PathBuf::from(h).join("Music")))
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        base.join("Яндекс Музыка")
+    }
 }
 
 /// Расширение по первым байтам: mp3, AAC (ADTS), MP4 или FLAC.
@@ -3707,11 +3788,19 @@ fn register_extra(app: &App) {
             }
         })
     });
-    app.on_login_open(|| win::open_url("https://ya.ru/device"));
+    app.on_login_open(|| {
+        crate::config::log("клик: «Открыть ya.ru/device»");
+        win::open_url("https://ya.ru/device");
+    });
     app.on_login_copy(|| {
         with_ctx(|c| {
-            copy_text(&c.ui().global::<App>().get_login_code());
-            c.toast("Код скопирован");
+            let code = c.ui().global::<App>().get_login_code();
+            crate::config::log(format!("клик: «Скопировать код» ({code})"));
+            if copy_text(&code) {
+                c.toast("Код скопирован");
+            } else {
+                c.toast("Не удалось скопировать код");
+            }
         })
     });
     app.on_menu_playlist(|i| with_ctx(|c| c.menu_playlist(i.max(0) as usize)));

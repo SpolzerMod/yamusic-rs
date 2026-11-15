@@ -135,7 +135,11 @@ fn wake_running() {
 
 fn main() -> Result<(), slint::PlatformError> {
     // После обновления старая версия ещё закрывается: ждём её до 15 секунд.
+    // (Только Windows: на Linux обновление — это установка deb пакетным менеджером.)
+    #[cfg(windows)]
     let after_update = std::env::args().any(|a| a == update::AFTER_UPDATE);
+    #[cfg(not(target_os = "windows"))]
+    let after_update = false;
     let mut claimed = claim_instance();
     for _ in 0..60 {
         if claimed || !after_update {
@@ -153,6 +157,12 @@ fn main() -> Result<(), slint::PlatformError> {
     // даёт OpenGL 4.6, а сборка без Skia быстрее и легче. Режим работы («Плавный» или
     // «Лёгкий») меняет только анимации и кэши и переключается на лету (gui::apply_mode).
     slint::BackendSelector::new().backend_name("winit".into()).renderer_name(renderer_name().into()).select()?;
+    // Имя приложения для Wayland: по нему GNOME находит .desktop (значок в доке,
+    // подпись окна) и связывает окно с MPRIS-плеером.
+    #[cfg(not(target_os = "windows"))]
+    let _ = slint::set_xdg_app_id("yamusic-rs");
+    // Убрать exe прошлой версии после self-update — это только Windows.
+    #[cfg(windows)]
     update::cleanup();
     win::refresh_autostart();
     // `--hidden` — родное имя для Linux; `--tray` оставлен как алиас (автозапуск оригинала).

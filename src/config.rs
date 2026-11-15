@@ -50,7 +50,9 @@ impl Default for Config {
             token_plain: None,
             token_expires: None,
             volume: 0.6,
-            discord_enabled: true,
+            // Rich Presence использует именованный канал Windows: на Linux Discord-IPC
+            // другой, поэтому там интеграция выключена по умолчанию.
+            discord_enabled: cfg!(windows),
             discord_app_id: String::new(),
             theme: "system".into(),
             quality: 0,
@@ -65,7 +67,8 @@ impl Default for Config {
     }
 }
 
-/// %APPDATA%\yamusic-rs. Папка прежнего названия (yamusic-lite, ещё раньше yawave) переносится
+/// Windows — `%APPDATA%\yamusic-rs`, Linux — `$XDG_CONFIG_HOME/yamusic-rs` (~/.config).
+/// Папка прежнего названия (yamusic-lite, ещё раньше yawave) переносится
 /// молча, вместе с токеном и настройками. Если её держит запущенная старая версия, этот запуск
 /// работает со старой папкой, а перенос повторится в следующий раз.
 pub fn dir() -> PathBuf {
@@ -138,7 +141,8 @@ impl Config {
     }
 }
 
-/// Лог в %APPDATA%\yamusic-rs\log.txt.
+/// Лог в каталоге данных приложения: `%APPDATA%\yamusic-rs\log.txt` (Windows),
+/// `~/.config/yamusic-rs/log.txt` (Linux).
 pub fn log(msg: impl AsRef<str>) {
     let msg = msg.as_ref();
     #[cfg(debug_assertions)]

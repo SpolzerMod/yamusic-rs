@@ -152,6 +152,8 @@ async fn update_loop(p: MprisPlayer, rx: mpsc::Receiver<Snapshot>) {
     let mut last_volume = -1.0;
     let mut last_repeat = Repeat::default();
     let mut last_shuffle: Option<bool> = None;
+    let mut last_pos = -1.0;
+    let mut last_tick = std::time::Instant::now();
     loop {
         match rx.try_recv() {
             Ok(s) => {
@@ -163,6 +165,8 @@ async fn update_loop(p: MprisPlayer, rx: mpsc::Receiver<Snapshot>) {
                     let _ = p.set_metadata(metadata(&s.track, None)).await;
                     if was {
                         // Смена трека: контроллеры перечитывают позицию после Seeked.
+                        last_pos = 0.0;
+                        last_tick = std::time::Instant::now();
                         let _ = p.seeked(Time::from_millis(0)).await;
                     }
                     // Обложка качается в блокирующем пуле: update_loop на это время
@@ -180,9 +184,23 @@ async fn update_loop(p: MprisPlayer, rx: mpsc::Receiver<Snapshot>) {
                 }
                 // Position PropertiesChanged не шлёт (по спецификации), читается по запросу.
                 p.set_position(Time::from_millis((s.position * 1000.0) as i64));
+                // Позиция в MPRIS: `Position` по спецификации не шлётся в PropertiesChanged.
+                // Сигнал `Seeked` нужен на перемотке/переходе; чтобы кадр, пришедший с
+                // опозданием (тик 250 мс), не выглядел перемоткой, сравниваем с ожидаемым
+                // сдвигом: прошедшее время, пока играет.
+                let now = std::time::Instant::now();
+                let expected = last_pos + if s.playing { now.duration_since(last_tick).as_secs_f32() } else { 0.0 };
+                if (s.position - expected).abs() > 1.0 {
+                    let _ = p.seeked(Time::from_millis((s.position * 1000.0) as i64)).await;
+                    last_pos = s.position;
+                } else {
+                    last_pos = expected;
+                }
+                last_tick = now;
                 if (s.volume - last_volume).abs() > 0.001 {
                     last_volume = s.volume;
-                    let _ = p.set_volume(f64::from(s.volume)).await;                }
+                    let _ = p.set_volume(f64::from(s.volume)).await;
+                }
                 if s.repeat != last_repeat {
                     last_repeat = s.repeat;
                     let ls = match s.repeat {

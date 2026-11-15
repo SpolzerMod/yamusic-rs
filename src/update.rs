@@ -7,6 +7,7 @@
 
 #[cfg(windows)]
 use sha2::{Digest, Sha256};
+#[cfg(windows)]
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -17,7 +18,8 @@ pub const POLL: Duration = Duration::from_secs(30 * 60);
 #[cfg(windows)]
 const ASSET: &str = concat!(env!("CARGO_PKG_NAME"), ".exe");
 
-/// Аргумент, с которым обновлённый exe ждёт, пока закроется старый.
+/// Аргумент, с которым обновлённый exe ждёт, пока закроется старый (только Windows).
+#[cfg(windows)]
 pub const AFTER_UPDATE: &str = "--after-update";
 
 #[derive(Clone, Debug)]
@@ -26,6 +28,8 @@ pub struct Release {
     /// Страница релиза на GitHub.
     pub page: String,
     /// Exe: адрес, размер и SHA-256. Нет — обновить можно только руками.
+    /// Только Windows: под Linux self-update нет, кнопка ведёт на страницу релиза.
+    #[cfg(windows)]
     pub exe: Option<(String, u64, String)>,
 }
 
@@ -64,30 +68,25 @@ pub fn check() -> Result<Option<Release>, String> {
     if latest <= current {
         return Ok(None);
     }
+    // Под Linux обновление — установка нового deb: авто-замену не делаем,
+    // кнопка уведомления открывает страницу релиза.
+    #[cfg(windows)]
     let exe = v.get("assets").and_then(|a| a.as_array()).and_then(|assets| {
-        #[cfg(windows)]
-        {
-            let a = assets.iter().find(|a| a.get("name").and_then(|n| n.as_str()) == Some(ASSET))?;
-            let url = a.get("browser_download_url")?.as_str()?.to_string();
-            let size = a.get("size")?.as_u64()?;
-            let sha = a.get("digest")?.as_str()?.strip_prefix("sha256:")?.to_ascii_lowercase();
-            Some((url, size, sha))
-        }
-        // Под Linux обновление — установка нового deb: авто-замену не делаем,
-        // кнопка уведомления открывает страницу релиза.
-        #[cfg(not(windows))]
-        {
-            let _ = assets;
-            None
-        }
+        let a = assets.iter().find(|a| a.get("name").and_then(|n| n.as_str()) == Some(ASSET))?;
+        let url = a.get("browser_download_url")?.as_str()?.to_string();
+        let size = a.get("size")?.as_u64()?;
+        let sha = a.get("digest")?.as_str()?.strip_prefix("sha256:")?.to_ascii_lowercase();
+        Some((url, size, sha))
     });
     Ok(Some(Release {
         version: tag.trim_start_matches('v').to_string(),
         page: v.get("html_url").and_then(|u| u.as_str()).unwrap_or(env!("CARGO_PKG_REPOSITORY")).to_string(),
+        #[cfg(windows)]
         exe,
     }))
 }
 
+#[cfg(windows)]
 fn old_path(exe: &Path) -> PathBuf {
     exe.with_extension("old.exe")
 }
@@ -127,14 +126,8 @@ pub fn install(r: &Release) -> Result<PathBuf, String> {
     Ok(exe)
 }
 
-/// Под Linux self-update нет: deb ставится пакетным менеджером, кнопка уведомления
-/// просто открывает страницу релиза (см. gui.rs::start_updates).
-#[cfg(not(windows))]
-pub fn install(_r: &Release) -> Result<PathBuf, String> {
-    Err(crate::i18n::tr("Обновите пакет через системный менеджер пакетов"))
-}
-
 /// Запустить обновлённый exe. Он дождётся, пока этот процесс закроется.
+#[cfg(windows)]
 pub fn relaunch(exe: &Path) -> Result<(), String> {
     std::process::Command::new(exe)
         .arg(AFTER_UPDATE)
@@ -145,6 +138,7 @@ pub fn relaunch(exe: &Path) -> Result<(), String> {
 
 /// Убрать exe прошлой версии, оставшийся после обновления. Старый процесс может ещё
 /// завершаться и держать файл, поэтому пробуем несколько раз в фоне.
+#[cfg(windows)]
 pub fn cleanup() {
     let Ok(exe) = std::env::current_exe() else { return };
     let old = old_path(&exe);

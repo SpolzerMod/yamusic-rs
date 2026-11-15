@@ -115,7 +115,7 @@
 | **Windows 10** x64 | Должна работать: приложение использует те же API. Углы окна будут прямыми, потому что скругление есть только в Windows 11. Регулярно не проверяется, о проблемах пишите в [issues](https://github.com/SpolzerMod/yamusic-rs/issues). |
 | Windows на ARM | Должна запускаться через эмуляцию x64. Не проверялась. |
 | Windows 7 и 8.1 | Не поддерживаются: текущий Rust под них не собирает. |
-| **Linux** | Ветка `linux-port`: нативный deb-пакет, MPRIS-управление и медиа-клавиши (GNOME Shell), без трея. Сборка — `cargo deb`, CI в build.yml. |
+| **Linux** | Ветка `linux-port`: нативный deb-пакет, MPRIS-управление и медиа-клавиши (GNOME Shell), без трея. Сборка — `cargo deb`, CI в build.yml. Подробности: [README.linux.md](README.linux.md). |
 | macOS | Пока не планируется. |
 
 **Нужно ещё:**

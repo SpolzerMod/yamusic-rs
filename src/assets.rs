@@ -1,6 +1,7 @@
 //! Шрифты и иконки берутся из установленного официального приложения (app.asar).
 //! В репозитории их нет. Если приложение не установлено, те же файлы один раз скачиваются
-//! с веб-версии music.yandex.ru в %APPDATA%\yamusic-rs\assets и дальше читаются оттуда.
+//! с веб-версии music.yandex.ru в каталог данных приложения (`config::dir()/assets`,
+//! `%APPDATA%` в Windows и `~/.config` в Linux) и дальше читаются оттуда.
 
 use crate::config::log;
 use std::collections::HashMap;

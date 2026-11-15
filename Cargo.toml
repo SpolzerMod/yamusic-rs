@@ -48,8 +48,8 @@ features = [
 mpris-server = "=0.9.0"
 # Диалог выбора файла (xdg-desktop-portal) — обложка плейлиста.
 rfd = "0.15"
-# Локальный рантайм для MPRIS-потока.
-tokio = { version = "1", default-features = false, features = ["rt"] }
+# Локальный рантайм для MPRIS-потока: rt — спавн задач, sync — канал снапшотов.
+tokio = { version = "1", default-features = false, features = ["rt", "sync"] }
 
 [build-dependencies]
 slint-build = "1.18"
@@ -64,7 +64,10 @@ panic = "abort"
 [package.metadata.deb]
 maintainer = "SpolzerMod <https://github.com/SpolzerMod/yamusic-rs>"
 license-file = ["LICENSE", "2"]
-depends = "libc6 (>= 2.38), libstdc++6, libasound2, libegl1, libgl1, libwayland-client0, libwayland-egl1, libxkbcommon0, libfontconfig1, libfreetype6, libgcc-s1, xdg-utils"
+depends = "libc6 (>= 2.38), libstdc++6, libasound2, libegl1, libgl1, libwayland-client0, libwayland-egl1, libxkbcommon0, libfontconfig1, libfreetype6, libgcc-s1, wl-clipboard, xdg-utils"
+# xclip — запасной путь для буфера обмена под X11 (в Wayland-сессии хватает wl-clipboard);
+# xdg-user-dirs — чтобы скачивание шло в настоящий каталог музыки (иначе ~/Music).
+recommends = "xclip, xdg-user-dirs"
 section = "sound"
 priority = "optional"
 extended-description = """\

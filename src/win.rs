@@ -271,20 +271,27 @@ mod linux {
             .map(|p| p.display().to_string())
     }
 
-    /// Открыть ссылку в браузере по умолчанию. Дочерний `sh` ждём, чтобы не
-    /// копить зомби: он мгновенно выходит, а `xdg-open` переходит к init.
+    /// Открыть ссылку в браузере по умолчанию. Ребёнка не ждём в вызывающем потоке
+    /// (это поток интерфейса): на некоторых системах `xdg-open` живёт до закрытия
+    /// браузера. Ждём в фоне — так не остаётся зомби и не замирает окно.
     pub fn open_url(url: &str) {
-        if let Ok(mut child) = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(format!("exec xdg-open {} >/dev/null 2>&1", shell_quote(url)))
+        // Без `sh -c`: аргумент передаётся как есть, кавычки и экранирование не нужны.
+        match std::process::Command::new("xdg-open")
+            .arg(url)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
         {
-            let _ = child.wait();
+            Ok(mut child) => {
+                let url = url.to_string();
+                let _ = std::thread::Builder::new().name("open-url".into()).spawn(move || match child.wait() {
+                    Ok(s) if s.success() => {}
+                    Ok(s) => crate::config::log(format!("xdg-open {url}: код {}", s.code().unwrap_or(-1))),
+                    Err(e) => crate::config::log(format!("xdg-open {url}: {e}")),
+                });
+            }
+            Err(e) => crate::config::log(format!("xdg-open: {e}")),
         }
-    }
-
-    fn shell_quote(s: &str) -> String {
-        format!("'{}'", s.replace('\'', r"'\''"))
     }
 
     /// На Linux нечего отдавать ОС: память вернёт аллокатор/композитор.

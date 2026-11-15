@@ -76,6 +76,12 @@ jobs:
 
       - run: cargo clippy --release --all-targets -- -D warnings
       - run: cargo test --release
+
+      # Известные уязвимости в дереве зависимостей (RustSec). Отчёт в логе джобы.
+      - name: cargo audit
+        run: |
+          cargo install --locked cargo-audit
+          cargo audit
       - run: cargo install --locked cargo-deb
       - run: cargo deb
 

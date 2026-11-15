@@ -32,21 +32,43 @@
 
 ## B. Чек-лист код-ревью (grep-паттерны)
 
-- [ ] Telemetry/analytics: `telemetry|analytics|collect|metrics|beacon|fingerprint`.
-- [ ] Утечка токена: все `token`/`refresh_token` → только в `client.rs`-клиенты с guard; не в `log()`, не в Discord, не в MPRIS.
-- [ ] Исполнение данных с сервера: `Command::new` с аргументами из ответов, `eval`-подобного нет; SVG → парсер Slint (surface: парсинг `yandex_id`).
-- [ ] Скрытые каналы: необычные кодировки/base64-блобы, XOR/деобфускация, динамические URL.
-- [ ] Запись файлов: только `config::dir()` (config, log, mpris-cover), `~/.config/autostart`, сокет `$XDG_RUNTIME_DIR`. Ничего в системных каталогах.
-- [ ] Процессы: полный список spawn — `xdg-open`, `gsettings`, `wl-copy`/`xclip` (Linux), `clip` (Windows), `rc.exe` (build.rs). Никаких загрузчиков.
-- [ ] IPC: MPRIS-методы маппятся только на команды плеера (PlayPause/Next/Prev/Seek/Volume/Repeat/Shuffle/Quit/Raise); wake-сокет принимает только `"wake"`.
-- [ ] Обновлялка: только GitHub, только sha256-сверка (`update.rs::install`), на Linux — только открытие страницы; не подписывать и не запускать скачанное.
-- [ ] DPAPI-функционал (Windows) не задействован для чего-либо кроме токенов.
+- [x] Telemetry/analytics: `telemetry|analytics|collect|metrics|beacon|fingerprint` — совпадений нет
+      (только `GetSystemMetrics` из Win32).
+- [x] Утечка токена: единственная точка добавления заголовка — `api.rs::req`, он же проверяет адрес
+      через `token_allowed` (https + `yandex.ru`/`yandex.net`). `download-info` валидируется тем же
+      предикатом; mp3 качается по подписанной ссылке без `Authorization`. В логах токена нет
+      (логируются коды, версии, тексты ошибок).
+- [x] Исполнение данных с сервера: `Command::new` с аргументом из сети отсутствует — только
+      фиксированные `xdg-open`/`gsettings`/`wl-copy`/`clip`. Разбираемые данные: JSON API, HTML
+      лендинга, CSS/спрайт `id.yandex.ru` → SVG для `Image` (рендер femtovg/resvg, без скриптов).
+- [x] Скрытые каналы: base64 используется только для токена (`RAW`-маркер) и DPAPI-шифротекста;
+      динамические URL — подписанные ссылки на mp3 с хоста из `download-info` (проверяется
+      `token_allowed`), всё остальное — константы.
+- [x] Запись файлов: `config::dir()` (config.json 0600, log.txt, device, assets/, mpris-cover),
+      `~/.config/autostart`, `$XDG_RUNTIME_DIR/yamusic-rs.sock`, каталог музыки пользователя
+      (скачивание) и файлы, выбранные пользователем (правка тегов). Системные каталоги не пишутся.
+- [x] Процессы: `xdg-open`, `gsettings`, `wl-copy`/`xclip` (Linux), `clip` (Windows), `rc.exe`
+      (только build.rs). Загрузчиков и обёрток нет. `xdg-open` ждётся в фоновом потоке, чтобы
+      не подвешивать интерфейс.
+- [x] IPC: MPRIS-методы маппятся на `Cmd` плеера (PlayPause/Resume/Next/Prev/Seek/Volume/Repeat/
+      Shuffle), `Raise` показывает окно, `Quit` завершает процесс; wake-сокет читает 16 байт и
+      реагирует только на префикс `wake`.
+- [x] Обновлялка: `api.github.com`, только `tag_name`/`html_url`; на Linux `Release::exe` даже не
+      существует — кнопка открывает страницу релиза. Windows-ветка сверяет sha256 с digest
+      релиза перед заменой exe.
+- [x] DPAPI используется только в `secret.rs` для токена и refresh-токена; под Linux модуль
+      собран как base64 + маркер `RAW`, файл 0600.
 
 ## C. Автоматика
 
-- [ ] `cargo audit` (контейнер) — known CVEs в дереве зависимостей.
-- [ ] `cargo deny` (advisories/licenses) — в CI Linux-джобу.
-- [ ] Тест `token_allowed` продолжает падать на подмену доменов (regression-тест).
+- [x] `cargo audit` (контейнер): уязвимостей нет, 6 предупреждений `unmaintained` в транзитивных
+      крейтах (`bincode`, `pin-utils`, `ttf-parser`, `zbus_names`, `zvariant`, `zvariant_derive`).
+      Прямого влияния на безопасность нет, обновление — вместе с `mpris-server`/`slint`.
+- [x] Автоматика в CI: Linux-джоба `.github/workflows/build.yml` гоняет `cargo audit` перед
+      сборкой deb. `cargo deny` не добавляем: лишний конфиг ради тех же advisories, лицензии
+      проверяются вручную (GPL-3.0-only у проекта).
+- [x] Тест `token_allowed` (`client.rs::tests::hosts`) на месте: `evil.com`, `yandex.net.evil.com`,
+      `notyandex.ru`, `http://` — отклоняются, `cargo test` зелёный.
 
 ## D. Критерии прохождения
 
@@ -59,4 +81,17 @@
 ## Ход исполнения
 
 Ревью — отдельным проходом после стабилизации ветки `linux-port`; результаты фиксируются здесь
-же (галочки + найденные отклонения). Автоматика (cargo deny) добавляется в CI в той же ветке.
+же (галочки + найденные отклонения). Автоматика (cargo audit) добавлена в CI в той же ветке.
+
+### Найдено и исправлено по ходу аудита
+
+1. Копирование в буфер обмена под Linux не работало ни при каких условиях: спавнился `wl-copy`,
+   пакета `wl-clipboard` не было в зависимостях, ошибка проглатывалась, а тост врал «Код скопирован».
+   Теперь `wl-clipboard` в `Depends`, `xclip` в `Recommends`, ошибка видна в логе и в тосте.
+2. Кнопка «Скачать» под Linux складывала файлы в текущий каталог процесса: путь строился из
+   `%USERPROFILE%`, которого в Linux нет. Теперь `xdg-user-dir MUSIC` → `~/Music`.
+3. Открытие ссылки (`xdg-open`) ждалось в потоке интерфейса: при `BROWSER=firefox` окно могло
+   замереть до закрытия браузера. Теперь ожидание в фоновом потоке.
+4. Discord Rich Presence на Linux создавал поток, который раз в секунду стучался в именованный
+   канал Windows. Теперь поток не стартует, настройка по умолчанию выключена.
+5. Имя устройства уходило пустым (читался `%COMPUTERNAME%`). Теперь `$HOSTNAME` / `/etc/hostname`.
