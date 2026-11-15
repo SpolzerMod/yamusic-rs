@@ -1,1 +1,3 @@
 target/
+yamusic-rs/
+*.deb

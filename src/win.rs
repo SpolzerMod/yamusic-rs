@@ -310,11 +310,8 @@ mod linux {
     // ---------- автозапуск: ~/.config/autostart/yamusic-rs.desktop ----------
 
     fn autostart_file() -> Option<std::path::PathBuf> {
-        let cfg = std::env::var("XDG_CONFIG_HOME")
-            .map(std::path::PathBuf::from)
-            .or_else(|_| std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
-            .ok()?;
-        Some(cfg.join("autostart").join(format!("{APP_ID}.desktop")))
+        // ~/.config/autostart — родитель каталога данных приложения (config::dir).
+        crate::config::dir().parent().map(|p| p.join("autostart").join(format!("{APP_ID}.desktop")))
     }
 
     fn autostart_command() -> Option<String> {

@@ -61,13 +61,19 @@ fn claim_instance() -> bool {
     if wake_socket_alive() {
         return false;
     }
+    // Fallback-путь (без XDG_RUNTIME_DIR) — внутри каталога данных приложения,
+    // который ещё никто не создал: создаём, иначе bind молча не удастся.
+    let _ = std::fs::create_dir_all(crate::config::dir());
     let _ = std::fs::remove_file(instance_socket());
     match UnixListener::bind(instance_socket()) {
         Ok(l) => {
             *guard = Some(l);
             true
         }
-        Err(_) => false,
+        Err(e) => {
+            crate::config::log(format!("не занять сокет единственного экземпляра: {e}"));
+            false
+        }
     }
 }
 

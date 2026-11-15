@@ -71,10 +71,18 @@ impl Default for Config {
 pub fn dir() -> PathBuf {
     static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
-        let base = PathBuf::from(std::env::var("APPDATA").unwrap_or_else(|_| ".".into()));
-        let dir = base.join("yamusic-rs");
+        // Windows — %APPDATA%; Linux — XDG_CONFIG_HOME или ~/.config.
+        let base = std::env::var("APPDATA")
+            .or_else(|_| std::env::var("XDG_CONFIG_HOME"))
+            .or_else(|_| std::env::var("HOME").map(|h| format!("{h}/.config")))
+            .unwrap_or_else(|_| ".".into());
+        let dir = PathBuf::from(base).join("yamusic-rs");
         if !dir.exists() {
-            if let Some(old) = ["yamusic-lite", "yawave"].iter().map(|n| base.join(n)).find(|p| p.exists()) {
+            if let Some(old) = ["yamusic-lite", "yawave"]
+                .iter()
+                .map(|n| dir.parent().unwrap_or(&dir).join(n))
+                .find(|p: &PathBuf| p.exists())
+            {
                 if std::fs::rename(&old, &dir).is_err() {
                     return old;
                 }

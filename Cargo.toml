@@ -64,7 +64,7 @@ panic = "abort"
 [package.metadata.deb]
 maintainer = "SpolzerMod <https://github.com/SpolzerMod/yamusic-rs>"
 license-file = ["LICENSE", "2"]
-depends = "libc6 (>= 2.38), libstdc++6, libegl1, libgl1, libwayland-client0, libxkbcommon0, libfontconfig1, libfreetype6, libgcc-s1, xdg-utils"
+depends = "libc6 (>= 2.38), libstdc++6, libasound2, libegl1, libgl1, libwayland-client0, libwayland-egl1, libxkbcommon0, libfontconfig1, libfreetype6, libgcc-s1, xdg-utils"
 section = "sound"
 priority = "optional"
 extended-description = """\
