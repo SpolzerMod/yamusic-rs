@@ -308,6 +308,45 @@ EOF
 приложите к отчёту `log.txt` целиком и укажите сессию (`echo $XDG_SESSION_TYPE`), разрешение и
 масштаб, версию Mesa (`glxinfo -B` или `eglinfo`).
 
+## Прогресс воспроизведения в виджете GNOME
+
+В **штатном** виджете медиа (быстрые настройки и список уведомлений) GNOME показывает обложку,
+название, исполнителя и кнопки — полосы прогресса там нет и добавить её со стороны плеера нельзя:
+`gnome-shell` (`js/ui/mpris.js`) читает только `Metadata`, `PlaybackStatus`, `CanPlay`,
+`CanGoNext`/`CanGoPrevious` и `DesktopEntry`, а `Position` не использует вовсе. По спецификации
+MPRIS `Position` и не рассылается в `PropertiesChanged` — клиент читает его сам по запросу.
+
+Что приложение отдаёт контроллерам (этого достаточно любой полосе прогресса):
+
+| Свойство/сигнал | Значение |
+|---|---|
+| `Position` | текущая позиция, обновляется каждые 250 мс, читается по запросу |
+| `Metadata` → `mpris:length` | длительность трека (мкс) |
+| `Metadata` → `mpris:trackid` | путь D-Bus трека (`/org/yamusic/Track/…`) — нужен для `SetPosition` |
+| `Metadata` → `mpris:artUrl` | локальный файл обложки |
+| `Seeked` | перемотка и смена трека — по нему контроллеры синхронизируют позицию |
+| `CanSeek`, `Seek`, `SetPosition` | перемотка работает; «устаревший» `SetPosition` (трек уже сменился) игнорируется |
+
+Проверка в терминале:
+
+```bash
+busctl --user get-property org.mpris.MediaPlayer2.yamusic_rs \
+  /org/mpris/MediaPlayer2 org.mpris.MediaPlayer2.Player Position
+# повторите через пару секунд — значение растёт
+
+gdbus monitor --session --dest org.mpris.MediaPlayer2.yamusic_rs --object-path /org/mpris/MediaPlayer2
+# перемотайте трек — придёт сигнал Seeked
+```
+
+Если нужна полоса прогресса и перемотка прямо в уведомлении — это делает расширение GNOME Shell,
+а не приложение:
+
+| Расширение | Что даёт |
+|---|---|
+| [Media Seekbar](https://extensions.gnome.org/extension/10234/media-seekbar) | полоса с временем и перетаскиванием в медиа-сообщении |
+| [Media Progress](https://extensions.gnome.org/extension/6580/media-progress/) | интерактивная полоса в уведомлении |
+| improved-media-controls | полоса, shuffle/loop и подпись в верхней панели |
+
 ## Диагностика ввода (если кнопки «не нажимаются»)
 
 Флаг `YAMUSIC_INPUT_DEBUG=1` включает запись событий ввода в `log.txt`:

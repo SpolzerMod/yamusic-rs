@@ -8,7 +8,7 @@ use crate::player::Repeat;
 #[cfg(not(target_os = "windows"))]
 use crate::player::{Cmd, Player};
 #[cfg(not(target_os = "windows"))]
-use mpris_server::{LoopStatus, Metadata, PlaybackStatus, Player as MprisPlayer, Time};
+use mpris_server::{LoopStatus, Metadata, PlaybackStatus, Player as MprisPlayer, Time, TrackId};
 #[cfg(not(target_os = "windows"))]
 use std::path::PathBuf;
 #[cfg(not(target_os = "windows"))]
@@ -124,6 +124,7 @@ async fn server_task(player: Player, rx: mpsc::Receiver<Snapshot>) -> Result<(),
     let p_prev = player.clone();
     let p_seek = player.clone();
     let p_setpos = player.clone();
+    let p_setpos_check = player.clone();
     let p_volume = player.clone();
     let p_loop = player.clone();
     let p_shuffle = player.clone();
@@ -132,7 +133,13 @@ async fn server_task(player: Player, rx: mpsc::Receiver<Snapshot>) -> Result<(),
     p.connect_next(move |_| p_next.send(Cmd::Next));
     p.connect_previous(move |_| p_prev.send(Cmd::Prev));
     p.connect_seek(move |_, t| p_seek.send(Cmd::Seek(t.as_micros() as f32 / 1_000_000.0)));
-    p.connect_set_position(move |_, _, t| p_setpos.send(Cmd::Seek(t.as_micros() as f32 / 1_000_000.0)));
+    p.connect_set_position(move |_, id, t| {
+        // «Устаревший» запрос: клиент не знает, что трек уже сменился, — игнорируем.
+        if *id != track_path(p_setpos_check.state().track.as_ref()) {
+            return;
+        }
+        p_setpos.send(Cmd::Seek(t.as_micros() as f32 / 1_000_000.0));
+    });
     p.connect_set_volume(move |_, v| p_volume.send(Cmd::Volume(v as f32)));
     p.connect_set_loop_status(move |_, s| {
         let r = match s {
@@ -243,9 +250,19 @@ async fn update_loop(p: MprisPlayer, rx: mpsc::Receiver<Snapshot>, first: Snapsh
     }
 }
 
+/// Путь трека для MPRIS (`mpris:trackid`): по нему контроллеры (в том числе расширения
+/// GNOME, рисующие полосу прогресса) вызывают `SetPosition`. Спецификация требует это поле
+/// в каждый момент, поэтому без трека отдаём `NoTrack`.
+fn track_path(t: Option<&Track>) -> TrackId {
+    let Some(t) = t else { return TrackId::NO_TRACK };
+    let id: String = t.full_id().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+    TrackId::try_from(format!("/org/yamusic/Track/{id}")).unwrap_or(TrackId::NO_TRACK)
+}
+
 fn metadata(track: &Option<Track>, art: Option<PathBuf>) -> Metadata {
     let Some(t) = track else { return Metadata::new() };
     let mut md = Metadata::builder()
+        .trackid(track_path(Some(t)))
         .title(format!("{}{}", t.title, if t.version.is_empty() { String::new() } else { format!(" ({})", t.version) }))
         .artist(t.artists.split(", ").map(String::from).collect::<Vec<_>>())
         .album(t.album_title.clone())
@@ -273,4 +290,38 @@ fn cover_file(t: &Track) -> Option<PathBuf> {
     let path = dir.join(COVER_FILE);
     std::fs::write(&path, &bytes).ok()?;
     Some(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn track(id: &str, album: Option<&str>) -> Track {
+        Track {
+            id: id.into(),
+            album_id: album.map(String::from),
+            title: String::new(),
+            version: String::new(),
+            artists: String::new(),
+            artist_list: Vec::new(),
+            duration_ms: 0,
+            cover: None,
+            explicit: false,
+            lyrics: false,
+            color: None,
+            album_title: String::new(),
+            year: None,
+            position: None,
+        }
+    }
+
+    #[test]
+    fn trackid_is_a_valid_object_path() {
+        let p = track_path(Some(&track("12345", Some("678"))));
+        assert!(p.as_str().starts_with("/org/yamusic/Track/"));
+        assert!(p.as_str().chars().all(|c| c.is_ascii_alphanumeric() || c == '/' || c == '_'));
+        // Разные треки — разные пути, иначе SetPosition попадёт не в тот трек.
+        assert_ne!(track_path(Some(&track("1", None))), track_path(Some(&track("2", None))));
+        assert_eq!(track_path(None), TrackId::NO_TRACK);
+    }
 }
