@@ -89,6 +89,17 @@ fn run(player: Player, rx: mpsc::Receiver<Snapshot>) -> Result<(), String> {
 }
 
 async fn server_task(player: Player, rx: mpsc::Receiver<Snapshot>) -> Result<(), String> {
+    // До входа и до готового плейлиста трека нет, и медиа-виджет в системе показывал бы
+    // «неизвестного исполнителя». Поэтому имя на шине занимаем только на первом треке:
+    // до этого момента приложения в списке медиаплееров нет вовсе.
+    let first = loop {
+        match rx.try_recv() {
+            Ok(s) if s.track.is_some() => break s,
+            Ok(_) => {}
+            Err(mpsc::TryRecvError::Empty) => tokio::time::sleep(POLL).await,
+            Err(mpsc::TryRecvError::Disconnected) => return Ok(()),
+        }
+    };
     let p = MprisPlayer::builder(BUS_SUFFIX)
         .identity(env!("APP_NAME"))
         .desktop_entry("yamusic-rs")
@@ -141,12 +152,14 @@ async fn server_task(player: Player, rx: mpsc::Receiver<Snapshot>) -> Result<(),
 
     // Сервер живёт, пока жив процесс; цикл обновления свойств ждёт снапшоты.
     tokio::task::spawn_local(p.run());
-    update_loop(p, rx).await;
+    update_loop(p, rx, first).await;
     Ok(())
 }
 
 /// Обновление свойств: раз в POLL забираем снапшот и меняем только изменённое.
-async fn update_loop(p: MprisPlayer, rx: mpsc::Receiver<Snapshot>) {
+/// `first` — снапшот, на котором заняли имя на шине: применяем его до первого ожидания.
+async fn update_loop(p: MprisPlayer, rx: mpsc::Receiver<Snapshot>, first: Snapshot) {
+    let mut pending = Some(first);
     let mut last_track_id = String::new();
     let mut last_playing: Option<bool> = None;
     let mut last_volume = -1.0;
@@ -155,68 +168,77 @@ async fn update_loop(p: MprisPlayer, rx: mpsc::Receiver<Snapshot>) {
     let mut last_pos = -1.0;
     let mut last_tick = std::time::Instant::now();
     loop {
-        match rx.try_recv() {
-            Ok(s) => {
-                let track_id = s.track.as_ref().map(|t| t.full_id()).unwrap_or_default();
-                if track_id != last_track_id {
-                    let was = !last_track_id.is_empty();
-                    last_track_id = track_id;
-                    // Сначала metadata без обложки, чтобы виджет не ждал сеть.
-                    let _ = p.set_metadata(metadata(&s.track, None)).await;
-                    if was {
-                        // Смена трека: контроллеры перечитывают позицию после Seeked.
-                        last_pos = 0.0;
-                        last_tick = std::time::Instant::now();
-                        let _ = p.seeked(Time::from_millis(0)).await;
-                    }
-                    // Обложка качается в блокирующем пуле: update_loop на это время
-                    // припаркован, но D-Bus-задачи (p.run()) продолжают опрашиваться.
-                    let t = s.track.clone();
-                    let path = tokio::task::spawn_blocking(move || t.as_ref().and_then(cover_file)).await.ok().flatten();
-                    if let Some(path) = path {
-                        let _ = p.set_metadata(metadata(&s.track, Some(path))).await;
-                    }
+        let s = match pending.take() {
+            Some(s) => s,
+            None => match rx.try_recv() {
+                Ok(s) => s,
+                Err(mpsc::TryRecvError::Empty) => {
+                    tokio::time::sleep(POLL).await;
+                    continue;
                 }
-                if Some(s.playing) != last_playing {
-                    last_playing = Some(s.playing);
-                    let status = if s.playing { PlaybackStatus::Playing } else { PlaybackStatus::Paused };
-                    let _ = p.set_playback_status(status).await;
-                }
-                // Position PropertiesChanged не шлёт (по спецификации), читается по запросу.
-                p.set_position(Time::from_millis((s.position * 1000.0) as i64));
-                // Позиция в MPRIS: `Position` по спецификации не шлётся в PropertiesChanged.
-                // Сигнал `Seeked` нужен на перемотке/переходе; чтобы кадр, пришедший с
-                // опозданием (тик 250 мс), не выглядел перемоткой, сравниваем с ожидаемым
-                // сдвигом: прошедшее время, пока играет.
-                let now = std::time::Instant::now();
-                let expected = last_pos + if s.playing { now.duration_since(last_tick).as_secs_f32() } else { 0.0 };
-                if (s.position - expected).abs() > 1.0 {
-                    let _ = p.seeked(Time::from_millis((s.position * 1000.0) as i64)).await;
-                    last_pos = s.position;
-                } else {
-                    last_pos = expected;
-                }
-                last_tick = now;
-                if (s.volume - last_volume).abs() > 0.001 {
-                    last_volume = s.volume;
-                    let _ = p.set_volume(f64::from(s.volume)).await;
-                }
-                if s.repeat != last_repeat {
-                    last_repeat = s.repeat;
-                    let ls = match s.repeat {
-                        Repeat::One => LoopStatus::Track,
-                        Repeat::All => LoopStatus::Playlist,
-                        Repeat::Off => LoopStatus::None,
-                    };
-                    let _ = p.set_loop_status(ls).await;
-                }
-                if Some(s.shuffle) != last_shuffle {
-                    last_shuffle = Some(s.shuffle);
-                    let _ = p.set_shuffle(s.shuffle).await;
-                }
+                Err(mpsc::TryRecvError::Disconnected) => return,
+            },
+        };
+        let track_id = s.track.as_ref().map(|t| t.full_id()).unwrap_or_default();
+        if track_id != last_track_id {
+            let was = !last_track_id.is_empty();
+            last_track_id = track_id;
+            // Сначала metadata без обложки, чтобы виджет не ждал сеть. Без трека
+            // (выход из аккаунта) метаданные не сбрасываем: пустые поля GNOME показывает
+            // как «неизвестного исполнителя», лучше оставить последний трек.
+            if s.track.is_some() {
+                let _ = p.set_metadata(metadata(&s.track, None)).await;
             }
-            Err(mpsc::TryRecvError::Empty) => tokio::time::sleep(POLL).await,
-            Err(mpsc::TryRecvError::Disconnected) => return,
+            if was {
+                // Смена трека: контроллеры перечитывают позицию после Seeked.
+                last_pos = 0.0;
+                last_tick = std::time::Instant::now();
+                let _ = p.seeked(Time::from_millis(0)).await;
+            }
+            // Обложка качается в блокирующем пуле: update_loop на это время
+            // припаркован, но D-Bus-задачи (p.run()) продолжают опрашиваться.
+            let t = s.track.clone();
+            let path = tokio::task::spawn_blocking(move || t.as_ref().and_then(cover_file)).await.ok().flatten();
+            if let Some(path) = path {
+                let _ = p.set_metadata(metadata(&s.track, Some(path))).await;
+            }
+        }
+        if Some(s.playing) != last_playing {
+            last_playing = Some(s.playing);
+            let status = if s.playing { PlaybackStatus::Playing } else { PlaybackStatus::Paused };
+            let _ = p.set_playback_status(status).await;
+        }
+        // Position PropertiesChanged не шлёт (по спецификации), читается по запросу.
+        p.set_position(Time::from_millis((s.position * 1000.0) as i64));
+        // Позиция в MPRIS: `Position` по спецификации не шлётся в PropertiesChanged.
+        // Сигнал `Seeked` нужен на перемотке/переходе; чтобы кадр, пришедший с
+        // опозданием (тик 250 мс), не выглядел перемоткой, сравниваем с ожидаемым
+        // сдвигом: прошедшее время, пока играет.
+        let now = std::time::Instant::now();
+        let expected = last_pos + if s.playing { now.duration_since(last_tick).as_secs_f32() } else { 0.0 };
+        if (s.position - expected).abs() > 1.0 {
+            let _ = p.seeked(Time::from_millis((s.position * 1000.0) as i64)).await;
+            last_pos = s.position;
+        } else {
+            last_pos = expected;
+        }
+        last_tick = now;
+        if (s.volume - last_volume).abs() > 0.001 {
+            last_volume = s.volume;
+            let _ = p.set_volume(f64::from(s.volume)).await;
+        }
+        if s.repeat != last_repeat {
+            last_repeat = s.repeat;
+            let ls = match s.repeat {
+                Repeat::One => LoopStatus::Track,
+                Repeat::All => LoopStatus::Playlist,
+                Repeat::Off => LoopStatus::None,
+            };
+            let _ = p.set_loop_status(ls).await;
+        }
+        if Some(s.shuffle) != last_shuffle {
+            last_shuffle = Some(s.shuffle);
+            let _ = p.set_shuffle(s.shuffle).await;
         }
     }
 }
