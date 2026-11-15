@@ -37,7 +37,7 @@ mod resources {
         let res = out.join("app.res");
         let ok = std::process::Command::new(rc)
             .current_dir(&out)
-            .args(["/nologo", "/fo"])
+            .args(["/nologo", "/c65001", "/fo"])
             .arg(&res)
             .arg("app.rc")
             .status()
@@ -83,6 +83,10 @@ END
     }
 
     fn find_rc() -> Option<PathBuf> {
+        println!("cargo:rerun-if-env-changed=RC");
+        if let Some(rc) = std::env::var_os("RC").map(PathBuf::from).filter(|p| p.is_file()) {
+            return Some(rc);
+        }
         let kits = Path::new(r"C:\Program Files (x86)\Windows Kits\10\bin");
         let mut vers: Vec<PathBuf> = std::fs::read_dir(kits).ok()?.filter_map(|e| e.ok().map(|e| e.path())).collect();
         vers.sort();

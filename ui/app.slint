@@ -16,8 +16,10 @@ import { FullscreenPlayer } from "fullscreen.slint";
 import { TrackMenu, SoundSettings } from "popups.slint";
 import { T, App, Page, TrackItem, PinItem, CardItem, TopArtistItem, WheelEntry, ChartRow, LyricLine, MenuEntry } from "state.slint";
 import { LandingPage, ChartPage } from "landing.slint";
+import { DownloadsButton, DownloadsPanel } from "downloads.slint";
+import { DownloadRow } from "state.slint";
 
-export { Theme, Icons, App, T, Page, TrackItem, PinItem, CardItem, TopArtistItem, WheelEntry, ChartRow, LyricLine, MenuEntry }
+export { Theme, Icons, App, T, Page, TrackItem, PinItem, CardItem, TopArtistItem, WheelEntry, ChartRow, LyricLine, MenuEntry, DownloadRow }
 
 component CaptionButton inherits Rectangle {
     in property <int> kind; // 0 свернуть, 1 развернуть, 2 закрыть
@@ -251,6 +253,19 @@ export component AppWindow inherits Window {
         CaptionButton { kind: 0; clicked => { App.minimize(); } }
         CaptionButton { kind: 1; maximized: App.maximized; clicked => { App.toggle-maximize(); } }
         CaptionButton { kind: 2; clicked => { App.close(); } }
+    }
+
+    if !App.logged-out && (App.can-download || App.downloads.length > 0): DownloadsButton {
+        x: parent.width - 4 * 46px;
+        y: 0;
+    }
+    if App.downloads-open && !App.logged-out: Fade {
+        x: parent.width - downloads-panel.width - 12px;
+        y: 40px;
+        width: downloads-panel.width;
+        height: downloads-panel.height;
+        rise: 8px;
+        downloads-panel := DownloadsPanel { }
     }
 
     if !App.maximized: ResizeEdge { dir: 0; x: 8px; y: 0; width: parent.width - 16px - 3 * 46px; height: 4px; }

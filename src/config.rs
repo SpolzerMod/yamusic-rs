@@ -4,6 +4,60 @@ use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::PathBuf;
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum AudioFormat {
+    #[default]
+    Mp3,
+    Flac,
+}
+
+impl AudioFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Mp3 => "mp3",
+            Self::Flac => "flac",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Mp3 => "MP3",
+            Self::Flac => "FLAC",
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[serde(default)]
+pub struct DownloadOptions {
+    pub format: AudioFormat,
+    pub bitrate: u16,
+    pub cover_size: u32,
+}
+
+impl Default for DownloadOptions {
+    fn default() -> Self {
+        Self {
+            format: AudioFormat::Mp3,
+            bitrate: 320,
+            cover_size: 400,
+        }
+    }
+}
+
+impl DownloadOptions {
+    pub fn normalized(mut self) -> Self {
+        if ![192, 320].contains(&self.bitrate) {
+            self.bitrate = 320;
+        }
+        if ![400, 600, 800, 1000].contains(&self.cover_size) {
+            self.cover_size = 400;
+        }
+        self
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct Config {
@@ -38,6 +92,9 @@ pub struct Config {
     pub navbar_collapsed: bool,
     /// smooth — все анимации, lite — без анимаций и с урезанными кэшами.
     pub mode: String,
+    pub unofficial_settings: bool,
+    pub downloads_enabled: bool,
+    pub download: DownloadOptions,
 }
 
 impl Default for Config {
@@ -61,6 +118,9 @@ impl Default for Config {
             lang: "ru".into(),
             navbar_collapsed: false,
             mode: "smooth".into(),
+            unofficial_settings: false,
+            downloads_enabled: false,
+            download: DownloadOptions::default(),
         }
     }
 }
@@ -74,7 +134,11 @@ pub fn dir() -> PathBuf {
         let base = PathBuf::from(std::env::var("APPDATA").unwrap_or_else(|_| ".".into()));
         let dir = base.join("yamusic-rs");
         if !dir.exists() {
-            if let Some(old) = ["yamusic-lite", "yawave"].iter().map(|n| base.join(n)).find(|p| p.exists()) {
+            if let Some(old) = ["yamusic-lite", "yawave"]
+                .iter()
+                .map(|n| base.join(n))
+                .find(|p| p.exists())
+            {
                 if std::fs::rename(&old, &dir).is_err() {
                     return old;
                 }
@@ -91,6 +155,7 @@ impl Config {
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
+        c.download = c.download.normalized();
         c.token = c.token_sealed.as_deref().and_then(crate::secret::open);
         c.refresh_token = c.refresh_sealed.as_deref().and_then(crate::secret::open);
         if c.token.is_none() && c.token_sealed.is_some() {
@@ -109,10 +174,15 @@ impl Config {
     pub fn save(&self) {
         let _ = std::fs::create_dir_all(dir());
         let mut disk = self.clone();
+        disk.download = disk.download.normalized();
         disk.token_sealed = self.token.as_deref().and_then(crate::secret::seal);
         disk.refresh_sealed = self.refresh_token.as_deref().and_then(crate::secret::seal);
         // Без DPAPI (не Windows) — открытым текстом, как раньше.
-        disk.token_plain = if disk.token_sealed.is_none() { self.token.clone() } else { None };
+        disk.token_plain = if disk.token_sealed.is_none() {
+            self.token.clone()
+        } else {
+            None
+        };
         if let Ok(s) = serde_json::to_string_pretty(&disk) {
             let path = dir().join("config.json");
             let tmp = dir().join("config.json.tmp");
@@ -130,10 +200,17 @@ pub fn log(msg: impl AsRef<str>) {
     eprintln!("{msg}");
     let _ = std::fs::create_dir_all(dir());
     let path = dir().join("log.txt");
-    if std::fs::metadata(&path).map(|m| m.len() > 512 * 1024).unwrap_or(false) {
+    if std::fs::metadata(&path)
+        .map(|m| m.len() > 512 * 1024)
+        .unwrap_or(false)
+    {
         let _ = std::fs::remove_file(&path);
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let t = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -149,3 +226,70 @@ pub fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_config_gets_download_defaults() {
+        let config: Config = serde_json::from_str(r#"{"volume":0.4,"quality":2}"#).unwrap();
+        assert!(!config.unofficial_settings);
+        assert!(!config.downloads_enabled);
+        assert_eq!(
+            config.download,
+            DownloadOptions {
+                format: AudioFormat::Mp3,
+                bitrate: 320,
+                cover_size: 400
+            }
+        );
+        assert_eq!(config.quality, 2);
+    }
+
+    #[test]
+    fn download_options_roundtrip_and_partial_defaults() {
+        let config: Config = serde_json::from_str(r#"{"unofficial_settings":true,"downloads_enabled":true,"download":{"format":"flac","cover_size":800}}"#).unwrap();
+        assert_eq!(
+            config.download,
+            DownloadOptions {
+                format: AudioFormat::Flac,
+                bitrate: 320,
+                cover_size: 800
+            }
+        );
+        let saved = serde_json::to_string(&config).unwrap();
+        let restored: Config = serde_json::from_str(&saved).unwrap();
+        assert!(restored.unofficial_settings && restored.downloads_enabled);
+        assert_eq!(restored.download, config.download);
+        assert_eq!(restored.download.format.extension(), "flac");
+        assert_eq!(restored.download.format.label(), "FLAC");
+    }
+
+    #[test]
+    fn invalid_download_values_normalize_to_defaults() {
+        let options = DownloadOptions {
+            format: AudioFormat::Flac,
+            bitrate: 128,
+            cover_size: 500,
+        }
+        .normalized();
+        assert_eq!(
+            options,
+            DownloadOptions {
+                format: AudioFormat::Flac,
+                bitrate: 320,
+                cover_size: 400
+            }
+        );
+        for bitrate in [192, 320] {
+            for cover_size in [400, 600, 800, 1000] {
+                let options = DownloadOptions {
+                    format: AudioFormat::Mp3,
+                    bitrate,
+                    cover_size,
+                };
+                assert_eq!(options.normalized(), options);
+            }
+        }
+    }
+}

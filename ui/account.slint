@@ -329,6 +329,61 @@ export component SettingsPage inherits Rectangle {
                 clicked => { App.eq-open = true; }
             }
             VerticalLayout {
+                spacing: 24px;
+                SettingItem {
+                    title: T.t("Неофициальные настройки");
+                    desc: T.t("Дополнительные возможности приложения");
+                    toggle: true;
+                    on: App.unofficial-settings;
+                    clicked => { App.setting("unofficial"); }
+                }
+                if App.unofficial-settings: SettingItem {
+                    title: T.t("Скачивание треков");
+                    desc: T.t("Сохранять музыку с тегами и обложкой");
+                    toggle: true;
+                    on: App.downloads-enabled;
+                    clicked => { App.setting("downloads"); }
+                }
+                if App.can-download: VerticalLayout {
+                    spacing: 24px;
+                    VerticalLayout {
+                        spacing: 12px;
+                        Text {
+                            text: T.t("Формат аудиофайлов");
+                            font-size: 16px; font-weight: 700;
+                            color: Theme.controls-color-primary-text-enabled-variant;
+                        }
+                        ModeOption { title: "MP3"; desc: T.t("Сжатый формат"); selected: App.download-format == 0; clicked => { App.setting("download-format:mp3"); } }
+                        ModeOption { title: "FLAC"; desc: T.t("Без потерь"); selected: App.download-format == 1; clicked => { App.setting("download-format:flac"); } }
+                    }
+                    if App.download-format == 0: VerticalLayout {
+                        spacing: 12px;
+                        Text {
+                            text: T.t("Битрейт аудиофайлов");
+                            font-size: 16px; font-weight: 700;
+                            color: Theme.controls-color-primary-text-enabled-variant;
+                        }
+                        ModeOption { title: T.t("320 кбит/с"); desc: T.t("Высокое качество"); selected: App.download-bitrate == 320; clicked => { App.setting("download-bitrate:320"); } }
+                        ModeOption { title: T.t("192 кбит/с"); desc: T.t("Меньший размер файла"); selected: App.download-bitrate == 192; clicked => { App.setting("download-bitrate:192"); } }
+                    }
+                    VerticalLayout {
+                        spacing: 12px;
+                        Text {
+                            text: T.t("Размер обложки аудиофайла");
+                            font-size: 16px; font-weight: 700;
+                            color: Theme.controls-color-primary-text-enabled-variant;
+                        }
+                        HorizontalLayout {
+                            spacing: 8px; alignment: start;
+                            PillButton { text: "400×400"; primary: App.download-cover == 400; clicked => { App.setting("download-cover:400"); } }
+                            PillButton { text: "600×600"; primary: App.download-cover == 600; clicked => { App.setting("download-cover:600"); } }
+                            PillButton { text: "800×800"; primary: App.download-cover == 800; clicked => { App.setting("download-cover:800"); } }
+                            PillButton { text: "1000×1000"; primary: App.download-cover == 1000; clicked => { App.setting("download-cover:1000"); } }
+                        }
+                    }
+                }
+            }
+            VerticalLayout {
                 spacing: 16px;
                 Text {
                     height: 24px;

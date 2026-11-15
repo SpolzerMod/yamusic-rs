@@ -20,6 +20,12 @@ pub const MP3_SALT: &str = "XGRlBW9FXlekgbPrRHuSiA";
 /// Ключ подписи запросов get-file-info и текстов песен.
 pub const SIGN_KEY: &str = "p93jhgh689SBReK6ghtw62";
 
+/// WebNext get-file-info для скачивания; подпись отличается от потока и текстов.
+pub const DOWNLOAD_SIGN_KEY: &str = "7tvSmFbyf5hJnIHhCimDDD";
+pub const DOWNLOAD_API_BASE: &str = "https://api.music.yandex.ru";
+pub const DOWNLOAD_CLIENT: &str = "YandexMusicWebNext/1.0.0";
+pub const DOWNLOAD_REFERER: &str = "https://music.yandex.ru/";
+
 /// Заголовок клиента для старых методов (стрим, лайки, очередь).
 pub const ANDROID_CLIENT: &str = "YandexMusicAndroid/24023621";
 /// Версия десктопного клиента, если официальное приложение не установлено.
@@ -45,8 +51,12 @@ pub fn token_allowed(url: &reqwest::Url) -> bool {
     if url.scheme() != "https" {
         return false;
     }
-    let Some(host) = url.host_str() else { return false };
-    ["yandex.net", "yandex.ru"].iter().any(|d| host == *d || host.ends_with(&format!(".{d}")))
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    ["yandex.net", "yandex.ru"]
+        .iter()
+        .any(|d| host == *d || host.ends_with(&format!(".{d}")))
 }
 
 #[cfg(test)]

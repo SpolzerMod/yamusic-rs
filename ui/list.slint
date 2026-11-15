@@ -1,7 +1,7 @@
 // Альбом, плейлист и «Мне нравится»: шапка, список треков, редактирование плейлиста.
 
 import { Theme } from "theme.slint";
-import { Icons, Icon, Cover, Shimmer, NavArrows, ExplicitMark, Field, ArtistLinks } from "widgets.slint";
+import { Icons, Icon, Cover, Shimmer, NavArrows, ExplicitMark, Field, ArtistLinks, TrackDownloadButton } from "widgets.slint";
 import { T, App, TrackItem } from "state.slint";
 import { TrackRow } from "rows.slint";
 
@@ -319,7 +319,7 @@ export component ListPage inherits Rectangle {
                 icon: Icons.more-small;
                 clicked => { App.open-list-menu(self.absolute-position.x + self.width / 2, self.absolute-position.y + self.height); }
             }
-            if likes: HeaderButton { icon: Icons.download-small; clicked => { App.list-download(); } }
+            if App.can-download: HeaderButton { icon: Icons.download-small; clicked => { App.list-download(); } }
         }
         if playlist && App.list-own: Rectangle {
             x: parent.width - 45px - self.width;
@@ -416,7 +416,7 @@ export component ListPage inherits Rectangle {
                 property <TrackItem> item: App.tracks[idx];
                 property <bool> current: idx == App.list-current;
                 border-radius: Theme.radius-size-m;
-                property <bool> hot: ta.has-hover || more-ta.has-hover;
+                property <bool> hot: ta.has-hover || more-ta.has-hover || download.hot;
                 background: current || hot ? Theme.controls-color-secondary-default-disabled : transparent;
                 ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { App.play-list(idx); } }
                 if hot || current: Icon {
@@ -435,7 +435,7 @@ export component ListPage inherits Rectangle {
                 }
                 HorizontalLayout {
                     x: 36px;
-                    width: parent.width - 36px - 120px;
+                    width: max(0px, parent.width - 36px - (App.can-download ? 160px : 120px));
                     height: 20px;
                     spacing: 4px;
                     Text {
@@ -457,6 +457,12 @@ export component ListPage inherits Rectangle {
                     }
                     if item.explicit: ExplicitMark { y: 1px; }
                     Rectangle { horizontal-stretch: 1; }
+                }
+                download := TrackDownloadButton {
+                    x: parent.width - 135px;
+                    visible: App.can-download;
+                    enabled: item.available && App.can-download;
+                    clicked => { App.row-download("list", idx); }
                 }
                 Rectangle {
                     x: parent.width - 95px;

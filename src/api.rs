@@ -7,9 +7,12 @@ use reqwest::blocking::{Client, RequestBuilder};
 use reqwest::Method;
 use serde_json::{json, Value};
 use sha2::Sha256;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::io::{Read, Write};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::client::{token_allowed, ANDROID_CLIENT, API_BASE as BASE, MP3_SALT, SIGN_KEY};
+use crate::client::{DOWNLOAD_API_BASE, DOWNLOAD_CLIENT, DOWNLOAD_REFERER, DOWNLOAD_SIGN_KEY};
+use crate::config::{AudioFormat, DownloadOptions};
 
 pub const WAVE: &str = "user:onyourwave";
 
@@ -777,6 +780,65 @@ fn sign(msg: &str) -> Res<String> {
     Ok(base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes()))
 }
 
+fn download_quality(options: &DownloadOptions) -> (&'static str, &'static str) {
+    match options.format {
+        AudioFormat::Flac => ("lossless", "flac-mp4"),
+        AudioFormat::Mp3 if options.bitrate == 192 => ("nq", "mp3"),
+        AudioFormat::Mp3 => ("hq", "mp3"),
+    }
+}
+
+/// Проверяем выбранный вариант, прежде чем передавать файл обработчику формата.
+fn parse_download_info(value: &Value, options: &DownloadOptions) -> Res<String> {
+    let options = options.normalized();
+    let (quality, codec) = download_quality(&options);
+    let info = value.get("downloadInfo").ok_or("нет downloadInfo")?;
+    if let Some(preview) = info.get("preview") {
+        if preview.as_bool() != Some(false) {
+            return Err("Яндекс вернул фрагмент вместо полного трека".into());
+        }
+    }
+    if info.get("codec").is_some_and(|v| v.as_str() != Some(codec)) {
+        return Err(format!(
+            "выбранный формат {} недоступен",
+            options.format.label()
+        ));
+    }
+    if info
+        .get("quality")
+        .is_some_and(|v| v.as_str() != Some(quality))
+    {
+        return Err("Яндекс вернул другое качество аудио".into());
+    }
+    if options.format == AudioFormat::Mp3 {
+        if info
+            .get("bitrateInKbps")
+            .is_some_and(|v| v.as_u64() != Some(u64::from(options.bitrate)))
+        {
+            return Err(format!("битрейт {} кбит/с недоступен", options.bitrate));
+        }
+        if let Some(bitrate) = info.get("bitrate") {
+            let expected = u64::from(options.bitrate);
+            if !bitrate
+                .as_u64()
+                .is_some_and(|v| v == expected || v == expected * 1000)
+            {
+                return Err(format!("битрейт {} кбит/с недоступен", options.bitrate));
+            }
+        }
+    }
+    let url = info
+        .get("url")
+        .and_then(Value::as_str)
+        .filter(|u| !u.is_empty())
+        .or_else(|| info.get("urls")?.as_array()?.iter().find_map(Value::as_str))
+        .ok_or("нет url в downloadInfo")?;
+    if !reqwest::Url::parse(url).is_ok_and(|u| token_allowed(&u)) {
+        return Err("get-file-info: адрес не на сервере Яндекса".into());
+    }
+    Ok(url.to_string())
+}
+
 fn xml_tag<'a>(xml: &'a str, name: &str) -> Res<&'a str> {
     let open = format!("<{name}>");
     let close = format!("</{name}>");
@@ -839,6 +901,12 @@ impl Api {
 
     /// Запрос к API, возвращает поле `result`.
     fn send(&self, rb: RequestBuilder) -> Res<Value> {
+        let v = self.send_value(rb)?;
+        Ok(v.get("result").cloned().unwrap_or(Value::Null))
+    }
+
+    /// WebNext get-file-info возвращает downloadInfo прямо в корне ответа.
+    fn send_value(&self, rb: RequestBuilder) -> Res<Value> {
         let (status, text) = self.send_text(rb)?;
         let v: Value = serde_json::from_str(&text).map_err(|_| format!("HTTP {status}: {}", short(&text)))?;
         if !status.is_success() {
@@ -852,7 +920,7 @@ impl Api {
             }
             return Err(format!("HTTP {status}: {msg}"));
         }
-        Ok(v.get("result").cloned().unwrap_or(Value::Null))
+        Ok(v)
     }
 
     fn get(&self, path: &str, query: &[(&str, &str)]) -> Res<Value> {
@@ -1428,6 +1496,52 @@ impl Api {
 
     // ---------- аудио ----------
 
+    /// Ссылка на выбранный формат и битрейт независимо от качества воспроизведения.
+    /// При отсутствии варианта возвращается ошибка без подмены формата или качества.
+    pub fn download_url(&self, track_id: &str, options: &DownloadOptions) -> Res<String> {
+        self.download_response(self.download_request(track_id, options, now().as_secs())?, options)
+    }
+
+    fn download_response(&self, request: RequestBuilder, options: &DownloadOptions) -> Res<String> {
+        let value = self.send_value(request)?;
+        parse_download_info(value.get("result").unwrap_or(&value), options)
+    }
+
+    fn download_request(
+        &self,
+        track_id: &str,
+        options: &DownloadOptions,
+        timestamp: u64,
+    ) -> Res<RequestBuilder> {
+        let options = options.normalized();
+        let (quality, codec) = download_quality(&options);
+        let timestamp = timestamp.to_string();
+        let mut mac = Hmac::<Sha256>::new_from_slice(DOWNLOAD_SIGN_KEY.as_bytes())
+            .map_err(|e| e.to_string())?;
+        mac.update(format!("{timestamp}{track_id}{quality}{codec}raw").as_bytes());
+        let signature =
+            base64::engine::general_purpose::STANDARD_NO_PAD.encode(mac.finalize().into_bytes());
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "x-yandex-music-client",
+            reqwest::header::HeaderValue::from_static(DOWNLOAD_CLIENT),
+        );
+        Ok(self
+            .req(Method::GET, &format!("{DOWNLOAD_API_BASE}/get-file-info"))
+            .headers(headers)
+            .header("X-Yandex-Music-Without-Invocation-Info", "1")
+            .header("X-Requested-With", "XMLHttpRequest")
+            .header("Referer", DOWNLOAD_REFERER)
+            .query(&[
+                ("ts", timestamp.as_str()),
+                ("trackId", track_id),
+                ("quality", quality),
+                ("codecs", codec),
+                ("transports", "raw"),
+                ("sign", signature.as_str()),
+            ]))
+    }
+
     /// Прямая ссылка на аудио: сначала download-info (mp3 до 320), потом get-file-info.
     pub fn stream_url(&self, track_id: &str) -> Res<String> {
         match self.stream_url_legacy(track_id) {
@@ -1499,19 +1613,51 @@ let mp3 = || arr.iter().filter(|x| x.get("codec").and_then(|c| c.as_str()) == So
             .ok_or_else(|| "нет url в downloadInfo".into())
     }
 
-    /// Скачать файл потоком на диск, без чтения целиком в память. Ссылки уже подписаны — без токена.
-    pub fn download_to(&self, url: &str, path: &std::path::Path) -> Res<u64> {
-        let mut resp = self.http.get(url).send().map_err(|e| format!("сеть: {e}"))?;
+    /// Число записанных байт и размер ответа, если он известен. Промежуточные
+    /// обновления идут не чаще десяти раз в секунду; первое и последнее — всегда.
+    pub fn download_to_progress(
+        &self,
+        url: &str,
+        path: &std::path::Path,
+        mut progress: impl FnMut(u64, Option<u64>),
+    ) -> Res<u64> {
+        let mut resp = self
+            .http
+            .get(url)
+            .send()
+            .map_err(|e| format!("сеть: {e}"))?;
         if !resp.status().is_success() {
             return Err(format!("HTTP {}", resp.status()));
         }
         let expected = resp.content_length();
         let mut f = std::fs::File::create(path).map_err(|e| format!("файл: {e}"))?;
-        let n = std::io::copy(&mut resp, &mut f).map_err(|e| format!("загрузка прервалась: {e}"))?;
-        f.sync_all().map_err(|e| format!("файл: {e}"))?;
-        if expected.is_some_and(|e| e != n) {
-            return Err(format!("загрузка оборвалась: {n} из {} байт", expected.unwrap_or(0)));
+        progress(0, expected);
+        let mut last_update = Instant::now();
+        let mut n = 0u64;
+        let mut buffer = [0; 64 * 1024];
+        loop {
+            let count = resp
+                .read(&mut buffer)
+                .map_err(|e| format!("загрузка прервалась: {e}"))?;
+            if count == 0 {
+                break;
+            }
+            f.write_all(&buffer[..count])
+                .map_err(|e| format!("файл: {e}"))?;
+            n += count as u64;
+            if last_update.elapsed() >= Duration::from_millis(100) {
+                progress(n, expected);
+                last_update = Instant::now();
+            }
         }
+        if expected.is_some_and(|e| e != n) {
+            return Err(format!(
+                "загрузка оборвалась: {n} из {} байт",
+                expected.unwrap_or(0)
+            ));
+        }
+        f.sync_all().map_err(|e| format!("файл: {e}"))?;
+        progress(n, expected);
         Ok(n)
     }
 
@@ -1528,6 +1674,190 @@ let mp3 = || arr.iter().filter(|x| x.get("codec").and_then(|c| c.as_str()) == So
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn download_http_accepts_top_level_and_wrapped_responses() {
+        for body in [
+            r#"{"downloadInfo":{"url":"https://storage.mds.yandex.net/audio.mp3","codec":"mp3","quality":"hq"}}"#,
+            r#"{"result":{"downloadInfo":{"url":"https://storage.mds.yandex.net/audio.mp3","codec":"mp3","quality":"hq"}}}"#,
+        ] {
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            let (url, server) = serve_download(response.into_bytes());
+            let api = Api::new("");
+            let result = api.download_response(api.req(Method::GET, &url), &DownloadOptions::default());
+            server.join().unwrap();
+            assert_eq!(result.unwrap(), "https://storage.mds.yandex.net/audio.mp3");
+        }
+    }
+
+    #[test]
+    fn download_request_uses_independent_quality_and_web_signature() {
+        let api = Api::new("test-token");
+        let request = api
+            .download_request("123", &DownloadOptions::default(), 1_700_000_000)
+            .unwrap()
+            .build()
+            .unwrap();
+        let query: std::collections::HashMap<_, _> =
+            request.url().query_pairs().into_owned().collect();
+        assert_eq!(query["trackId"], "123");
+        assert_eq!(query["quality"], "hq");
+        assert_eq!(query["codecs"], "mp3");
+        assert_eq!(query["transports"], "raw");
+        assert_eq!(query["sign"], "pzPxQhrVLlP4myO7PocfrQ09Q9uMhI81/cM8IxKKqzA");
+        assert_eq!(request.headers()["authorization"], "OAuth test-token");
+        assert_eq!(
+            request.headers()["x-yandex-music-client"],
+            "YandexMusicWebNext/1.0.0"
+        );
+        assert_eq!(
+            request.headers()["x-yandex-music-without-invocation-info"],
+            "1"
+        );
+        assert_eq!(request.headers()["referer"], "https://music.yandex.ru/");
+        let options = DownloadOptions {
+            bitrate: 192,
+            ..DownloadOptions::default()
+        };
+        let request = api
+            .download_request("123", &options, 1_700_000_000)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(request
+            .url()
+            .query_pairs()
+            .any(|(key, value)| key == "quality" && value == "nq"));
+        assert!(request.url().query_pairs().any(|(key, value)| key == "sign" && value == "5OmeK3exF9lHMAYWpLSXKfcikVBeT1AjGn7lYlj9TZ8"));
+        let options = DownloadOptions {
+            format: AudioFormat::Flac,
+            ..options
+        };
+        let request = api
+            .download_request("123", &options, 1_700_000_000)
+            .unwrap()
+            .build()
+            .unwrap();
+        let query: std::collections::HashMap<_, _> =
+            request.url().query_pairs().into_owned().collect();
+        assert_eq!(query["quality"], "lossless");
+        assert_eq!(query["codecs"], "flac-mp4");
+        assert_eq!(query["sign"], "coYpD4WtBk0L5afuCq+DZ+XK6YWXihYTS0Na1tC6M+k");
+    }
+
+    #[test]
+    fn download_info_rejects_quality_format_and_preview_substitution() {
+        let options = DownloadOptions::default();
+        let url = "https://storage.mds.yandex.net/file";
+        assert_eq!(parse_download_info(&json!({"downloadInfo":{"url":url,"codec":"mp3","quality":"nq","bitrate":192}}), &DownloadOptions { bitrate: 192, ..options }).unwrap(), url);
+        assert_eq!(
+            parse_download_info(
+                &json!({"downloadInfo":{"url":url,"codec":"mp3","bitrateInKbps":320}}),
+                &options
+            )
+            .unwrap(),
+            url
+        );
+        assert_eq!(
+            parse_download_info(&json!({"downloadInfo":{"urls":[url]}}), &options).unwrap(),
+            url
+        );
+        for info in [
+            json!({"url":url,"codec":"aac"}),
+            json!({"url":url,"bitrateInKbps":192}),
+            json!({"url":url,"quality":"lq"}),
+            json!({"url":url,"bitrateInKbps":"320"}),
+            json!({"url":url,"preview":true}),
+            json!({"url":"https://example.com/file"}),
+            json!({"url":"http://storage.mds.yandex.net/file"}),
+            json!({"codec":"mp3"}),
+        ] {
+            assert!(parse_download_info(&json!({"downloadInfo":info}), &options).is_err());
+        }
+        let flac = DownloadOptions {
+            format: AudioFormat::Flac,
+            ..options
+        };
+        assert!(
+            parse_download_info(&json!({"downloadInfo":{"url":url,"codec":"mp3"}}), &flac).is_err()
+        );
+        assert!(parse_download_info(
+            &json!({"downloadInfo":{"url":url,"codec":"flac-mp4","quality":"lossless"}}),
+            &flac
+        )
+        .is_ok());
+    }
+
+    fn serve_download(response: Vec<u8>) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/file", listener.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let count = socket.read(&mut buffer).unwrap();
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..count]);
+            }
+            assert!(!String::from_utf8_lossy(&request)
+                .to_lowercase()
+                .contains("authorization:"));
+            socket.write_all(&response).unwrap();
+        });
+        (url, worker)
+    }
+
+    fn download_test_path() -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        std::env::temp_dir().join(format!(
+            "yamusic-download-{}-{}.part",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ))
+    }
+
+    #[test]
+    fn download_stream_reports_known_and_unknown_lengths() {
+        for (response, expected_total) in [
+            (b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nabcdef".to_vec(), Some(6)),
+            (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n".to_vec(), None),
+        ] {
+            let (url, server) = serve_download(response);
+            let path = download_test_path();
+            let mut progress = Vec::new();
+            let bytes = Api::new("not-sent").download_to_progress(&url, &path, |bytes, total| progress.push((bytes, total))).unwrap();
+            server.join().unwrap();
+            assert_eq!(bytes, 6);
+            assert_eq!(std::fs::read(&path).unwrap(), b"abcdef");
+            assert_eq!(progress.first(), Some(&(0, expected_total)));
+            assert_eq!(progress.last(), Some(&(6, expected_total)));
+            assert!(progress.len() <= 3);
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn download_stream_rejects_http_error_and_truncation() {
+        for response in [
+            b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nshort".to_vec(),
+        ] {
+            let (url, server) = serve_download(response);
+            let path = download_test_path();
+            assert!(Api::new("")
+                .download_to_progress(&url, &path, |_, _| {})
+                .is_err());
+            server.join().unwrap();
+            let _ = std::fs::remove_file(path);
+        }
+    }
 
     #[test]
     fn lrc() {

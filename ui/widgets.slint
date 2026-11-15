@@ -1,7 +1,7 @@
 // Общие элементы: иконки из sprite.svg, кнопки, обложки, поле ввода, заглушки загрузки.
 
 import { Theme } from "theme.slint";
-import { App } from "state.slint";
+import { App, T } from "state.slint";
 
 // Картинки задаёт Rust при запуске из спрайта официального приложения.
 export global Icons {
@@ -157,6 +157,32 @@ export component IconButton inherits Rectangle {
         enabled: enabled;
         mouse-cursor: MouseCursor.pointer;
         clicked => { root.clicked(); }
+    }
+}
+
+// Скачивание в строке: та же область нажатия 40×40 и размер значка 20, что у лайка.
+export component TrackDownloadButton inherits Rectangle {
+    in property <bool> enabled: true;
+    in property <brush> tint: Theme.controls-color-primary-text-enabled;
+    in property <brush> hover-color: Theme.controls-color-primary-text-enabled-variant;
+    out property <bool> hot: hit.has-hover;
+    callback clicked();
+    width: 40px;
+    height: 40px;
+    accessible-role: button;
+    accessible-label: T.t("Скачать");
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    Path {
+        x: 10px; y: 10px; width: 20px; height: 20px;
+        viewbox-width: 20; viewbox-height: 20;
+        commands: "M 10 2 V 12 M 6 8 L 10 12 L 14 8 M 3 14 V 18 H 17 V 14";
+        stroke: !root.enabled ? Theme.controls-color-primary-default-disabled : root.hot ? root.hover-color : root.tint;
+        stroke-width: 1.5px;
+    }
+    hit := TouchArea {
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
+        // Не передавать нажатие строке даже у неактивной видимой кнопки.
+        clicked => { if root.enabled { root.clicked(); } }
     }
 }
 

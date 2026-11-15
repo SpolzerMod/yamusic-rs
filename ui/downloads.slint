@@ -1,0 +1,83 @@
+// Очередь скачивания: самостоятельная панель, привязанная к значку в шапке.
+import { Theme } from "theme.slint";
+import { App, T } from "state.slint";
+
+export component DownloadsButton inherits Rectangle {
+    width: 46px;
+    height: 32px;
+    background: App.downloads-open || hit.has-hover ? Theme.controls-color-secondary-default-hovered : transparent;
+    Path {
+        x: 13px; y: 6px; width: 20px; height: 20px;
+        viewbox-width: 20; viewbox-height: 20;
+        commands: "M 10 2 V 12 M 6 8 L 10 12 L 14 8 M 3 14 V 18 H 17 V 14";
+        stroke: Theme.controls-color-primary-text-enabled-variant;
+        stroke-width: 1.5px;
+    }
+    if App.downloads-active > 0: Rectangle {
+        x: 28px; y: 1px; width: 16px; height: 13px; border-radius: 7px;
+        background: Theme.controls-color-primary-default-enabled;
+        Text { text: App.downloads-active > 99 ? "99+" : App.downloads-active; font-size: 9px; font-weight: 700; color: #000; }
+    }
+    hit := TouchArea { mouse-cursor: pointer; clicked => { App.downloads-open = !App.downloads-open; } }
+}
+
+export component DownloadsPanel inherits Rectangle {
+    width: 380px;
+    height: min(360px, 24px + max(1, App.downloads.length) * 44px);
+    border-radius: Theme.radius-size-l;
+    border-width: 1px;
+    border-color: Theme.controls-color-secondary-outline-selected;
+    background: Theme.background-color-primary-enabled-popover;
+    drop-shadow-blur: 20px;
+    drop-shadow-offset-y: 4px;
+    drop-shadow-color: #0000003d;
+    // Перехватываем нажатия только в пределах панели, без затемнения всего окна.
+    TouchArea { }
+    if App.downloads.length == 0: Text {
+        x: 12px; y: 22px; width: parent.width - 24px;
+        text: T.t("Очередь пуста");
+        font-size: 13px; color: Theme.controls-color-primary-text-enabled;
+    }
+    if App.downloads.length > 0: Flickable {
+        x: 12px; y: 12px; width: parent.width - 24px; height: parent.height - 24px;
+        content-height: App.downloads.length * 44px;
+        for row[index] in App.downloads: Rectangle {
+            x: 0; y: index * 44px; width: parent.width; height: 40px;
+            Text {
+                x: 0; y: 0; width: parent.width - 44px; height: 20px;
+                text: row.artist == "" ? row.title : row.artist + " — " + row.title;
+                overflow: elide;
+                font-size: 13px; font-weight: 500;
+                color: Theme.controls-color-primary-text-enabled-variant;
+            }
+            Rectangle {
+                x: 0; y: 25px; width: parent.width - 44px; height: 3px; border-radius: 2px;
+                background: Theme.controls-color-secondary-default-enabled;
+                Rectangle {
+                    x: 0; width: parent.width * (row.failed ? 1 : row.progress); height: parent.height;
+                    border-radius: 2px;
+                    background: row.failed ? Theme.message-color-error-text-enabled : Theme.controls-color-primary-default-enabled;
+                }
+            }
+            Rectangle {
+                x: parent.width - 32px; y: -2px; width: 32px; height: 32px;
+                accessible-role: button;
+                accessible-label: T.t("Показать в Проводнике") + ": " + row.title;
+                accessible-action-default => { if row.finished && !row.failed { App.download-open-file(row.id); } }
+                Path {
+                    x: 6px; y: 6px; width: 20px; height: 20px;
+                    viewbox-width: 20; viewbox-height: 20;
+                    commands: "M 2 5 H 8 L 10 7 H 18 V 16 H 2 Z M 2 5 V 3 H 8 L 10 5 H 17 V 7";
+                    fill: transparent;
+                    stroke: folder-hit.has-hover ? Theme.controls-color-primary-text-enabled-variant : Theme.controls-color-primary-text-enabled;
+                    stroke-width: 1.5px;
+                    opacity: row.finished && !row.failed ? 1 : 0.3;
+                }
+                folder-hit := TouchArea {
+                    mouse-cursor: row.finished && !row.failed ? MouseCursor.pointer : MouseCursor.default;
+                    clicked => { if row.finished && !row.failed { App.download-open-file(row.id); } }
+                }
+            }
+        }
+    }
+}

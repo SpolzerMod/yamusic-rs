@@ -105,6 +105,20 @@ export struct MenuEntry {
     submenu: bool,
 }
 
+export struct DownloadRow {
+    id: string,
+    title: string,
+    artist: string,
+    format: string,
+    status: string,
+    detail: string,
+    progress: float,
+    known: bool,
+    transferring: bool,
+    failed: bool,
+    finished: bool,
+}
+
 export struct WheelEntry {
     name: string,
     description: string,
@@ -132,6 +146,20 @@ export global T {
 }
 
 export global App {
+    in property <bool> unofficial-settings;
+    in property <bool> downloads-enabled;
+    in property <bool> can-download: unofficial-settings && downloads-enabled;
+    in property <int> download-format;
+    in property <int> download-bitrate: 320;
+    in property <int> download-cover: 400;
+    in-out property <bool> downloads-open;
+    in property <[DownloadRow]> downloads;
+    in property <int> downloads-active;
+    in property <int> downloads-finished;
+    in property <float> downloads-progress;
+    callback download-retry(string);
+    callback download-open-file(string);
+    callback downloads-clear();
     in-out property <Page> page: Page.wave;
     in property <bool> maximized;
     in property <string> toast;
@@ -428,6 +456,7 @@ export global App {
     callback list-like();
     callback open-list-menu(length, length);
     callback row-menu(string, int, length, length);
+    callback row-download(string, int);
     callback artist-play-track(int);
     callback artist-like-track(int);
     callback artist-familiar();

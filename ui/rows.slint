@@ -1,7 +1,7 @@
 // Строки: трек, заголовок блока, вкладка, позиция чарта.
 
 import { Theme } from "theme.slint";
-import { Icons, Icon, Cover, ArtistLinks, ExplicitMark } from "widgets.slint";
+import { Icons, Icon, Cover, ArtistLinks, ExplicitMark, TrackDownloadButton } from "widgets.slint";
 import { App, TrackItem, ChartRow } from "state.slint";
 
 // Строка трека: обложка 40, название и исполнитель 14/500, лайк 40 и длительность справа.
@@ -11,7 +11,7 @@ export component TrackRow inherits Rectangle {
     // Откуда строка и её номер: по ним Rust находит трек для ссылок на альбом и исполнителя.
     in property <string> block;
     in property <int> index;
-    // Свой плейлист: при наведении корзина левее лайка.
+    // Свой плейлист: при наведении корзина левее кнопок скачивания и лайка.
     in property <bool> removable;
     callback play();
     callback like();
@@ -19,7 +19,8 @@ export component TrackRow inherits Rectangle {
     height: 56px;
     border-radius: Theme.radius-size-m;
     // При наведении вместо длительности — «…» с меню трека, как в оригинале.
-    out property <bool> hot: ta.has-hover || like-ta.has-hover || more-ta.has-hover || bucket-ta.has-hover;
+    out property <bool> hot: ta.has-hover || like-ta.has-hover || more-ta.has-hover || bucket-ta.has-hover || download.hot;
+    property <length> actions-x: like.x - (App.can-download ? 40px : 0px) - (root.removable ? 56px : 0px);
     background: current || hot ? Theme.controls-color-secondary-default-disabled : transparent;
     ta := TouchArea {
         mouse-cursor: MouseCursor.pointer;
@@ -41,7 +42,7 @@ export component TrackRow inherits Rectangle {
         x: 52px;
         y: 9px;
         height: 16px;
-        width: like.x - self.x - 8px;
+        width: max(0px, root.actions-x - self.x - 8px);
         spacing: 4px;
         Text {
             text: item.title;
@@ -78,7 +79,7 @@ export component TrackRow inherits Rectangle {
     if item.artist-names.length == 0 || root.block == "": Text {
         x: 52px;
         y: 30px;
-        width: like.x - self.x - 8px;
+        width: max(0px, root.actions-x - self.x - 8px);
         text: item.artists;
         overflow: elide;
         font-size: Theme.font-size-label-m;
@@ -89,9 +90,16 @@ export component TrackRow inherits Rectangle {
         x: 52px;
         y: 29px;
         height: 18px;
-        width: min(self.content-width, like.x - self.x - 8px);
+        width: max(0px, min(self.content-width, root.actions-x - self.x - 8px));
         names: item.artist-names;
         clicked(i) => { App.row-open-artist(root.block, root.index, i); }
+    }
+    download := TrackDownloadButton {
+        x: like.x - 40px;
+        y: 8px;
+        visible: App.can-download;
+        enabled: item.available && root.block != "" && App.can-download;
+        clicked => { App.row-download(root.block, root.index); }
     }
     like := Rectangle {
         x: parent.width - 105px;
@@ -109,7 +117,7 @@ export component TrackRow inherits Rectangle {
         }
     }
     Rectangle {
-        x: like.x - 56px;
+        x: like.x - (App.can-download ? 96px : 56px);
         y: 8px;
         width: 40px;
         height: 40px;

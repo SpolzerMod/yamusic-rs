@@ -21,6 +21,31 @@ pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// Открыть Проводник и выделить готовый файл. Вызывать вне потока интерфейса.
+pub fn show_file_in_folder(path: &std::path::Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED};
+    use windows_sys::Win32::UI::Shell::{SHOpenFolderAndSelectItems, SHParseDisplayName};
+    if !path.is_file() { return Err("Скачанный файл не найден".into()); }
+    let name: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    unsafe {
+        let initialized = CoInitializeEx(null_mut(), COINIT_APARTMENTTHREADED as u32);
+        if initialized < 0 { return Err(format!("Не удалось открыть Проводник: {initialized:#x}")); }
+        let mut item = null_mut();
+        let parsed = SHParseDisplayName(name.as_ptr(), null_mut(), &mut item, 0, null_mut());
+        let mut result = if parsed < 0 { parsed } else { SHOpenFolderAndSelectItems(item, 0, null(), 0) };
+        if result >= 0 {
+            // Новое окно Explorer создаёт список файлов асинхронно. Повторяем выделение,
+            // когда представление появилось, чтобы первый клик выделял файл и в Windows 11.
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            result = SHOpenFolderAndSelectItems(item, 0, null(), 0);
+        }
+        if !item.is_null() { CoTaskMemFree(item.cast()); }
+        CoUninitialize();
+        if result < 0 { Err(format!("Не удалось выделить файл в Проводнике: {result:#x}")) } else { Ok(()) }
+    }
+}
+
 pub fn is_visible(hwnd: isize) -> bool {
     unsafe { IsWindowVisible(h(hwnd)) != 0 }
 }

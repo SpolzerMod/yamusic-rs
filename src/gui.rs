@@ -77,7 +77,6 @@ struct State {
     vibe_key: Option<(bool, Option<[u8; 3]>)>,
     /// Анимация пятна: таймер есть, только пока волна играет на экране.
     trailer: Option<Trailer>,
-    downloading: bool,
 }
 
 /// Трейлер: треки звучат по 12,5 с с середины, потом следующий.
@@ -101,6 +100,8 @@ struct Ctx {
     discord: Arc<crate::discord::Discord>,
     images: Images,
     tracks: Rc<VecModel<TrackItem>>,
+    downloads: crate::downloads::Manager,
+    download_version: Cell<u64>,
     st: RefCell<State>,
 }
 
@@ -1411,6 +1412,11 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     ui.global::<T>().set_lang(cfg.lang.clone().into());
     ui.global::<T>().on_tr(|s: SharedString| SharedString::from(crate::i18n::tr(s.as_str())));
     app.set_nav_collapsed(cfg.navbar_collapsed);
+    app.set_unofficial_settings(cfg.unofficial_settings);
+    app.set_downloads_enabled(cfg.downloads_enabled);
+    app.set_download_format(i32::from(cfg.download.format == crate::config::AudioFormat::Flac));
+    app.set_download_bitrate(cfg.download.bitrate as i32);
+    app.set_download_cover(cfg.download.cover_size as i32);
 
     let discord = crate::discord::Discord::spawn(
         player.clone(),
@@ -1425,6 +1431,8 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         discord,
         images: Images::new(lite),
         tracks,
+        downloads: crate::downloads::Manager::new(),
+        download_version: Cell::new(u64::MAX),
         st: RefCell::new(State {
             cfg,
             dark,
@@ -1477,7 +1485,6 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             blob_requested: false,
             vibe_key: None,
             trailer: None,
-            downloading: false,
         }),
     });
     CTX.with(|c| *c.borrow_mut() = Some(ctx.clone()));
@@ -1756,6 +1763,8 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
 
     let tick = Timer::default();
     tick.start(TimerMode::Repeated, Duration::from_millis(250), || with_ctx(|c| c.sync_player()));
+    let download_tick = Timer::default();
+    download_tick.start(TimerMode::Repeated, Duration::from_millis(150), || with_ctx(|c| c.sync_downloads()));
     // Строки текста переключаются точнее, чем раз в 250 мс.
     let lyric_tick = Timer::default();
     lyric_tick.start(TimerMode::Repeated, Duration::from_millis(50), || {
@@ -2379,10 +2388,12 @@ impl Ctx {
             self.menu_entry("like", if liked { "Удалить из «Мне нравится»" } else { "Нравится" }, if liked { icons.get_m_liked() } else { icons.get_m_like() }, false),
             self.menu_entry("trailer", "Трейлер", icons.get_m_trailer(), false),
             self.menu_entry("vibe", "Моя волна по треку", icons.get_m_vibe(), false),
-            self.menu_entry("download", "Скачать", icons.get_m_download(), false),
             self.menu_entry("next", "Играть следующим", icons.get_m_play_next(), false),
             self.menu_entry("last", "Добавить в конец очереди", icons.get_m_play_last(), false),
         ];
+        if ui.global::<App>().get_can_download() {
+            items.insert(3, self.menu_entry("download", "Скачать", icons.get_m_download(), false));
+        }
         if current {
             items.push(self.menu_entry("dislike", "Не нравится", icons.get_m_dislike(), false));
         }
@@ -2446,6 +2457,26 @@ impl Ctx {
         let ui = self.ui();
         let app = ui.global::<App>();
         match id {
+            "unofficial" | "downloads" | "download-format:mp3" | "download-format:flac" |
+            "download-bitrate:192" | "download-bitrate:320" |
+            "download-cover:400" | "download-cover:600" | "download-cover:800" | "download-cover:1000" => {
+                let mut st = self.st.borrow_mut();
+                match id {
+                    "unofficial" => st.cfg.unofficial_settings = !st.cfg.unofficial_settings,
+                    "downloads" => st.cfg.downloads_enabled = !st.cfg.downloads_enabled,
+                    "download-format:mp3" => st.cfg.download.format = crate::config::AudioFormat::Mp3,
+                    "download-format:flac" => st.cfg.download.format = crate::config::AudioFormat::Flac,
+                    _ if id.starts_with("download-bitrate:") => st.cfg.download.bitrate = id[17..].parse().unwrap_or(320),
+                    _ if id.starts_with("download-cover:") => st.cfg.download.cover_size = id[15..].parse().unwrap_or(400),
+                    _ => {}
+                }
+                st.cfg.save();
+                app.set_unofficial_settings(st.cfg.unofficial_settings);
+                app.set_downloads_enabled(st.cfg.downloads_enabled);
+                app.set_download_format(i32::from(st.cfg.download.format == crate::config::AudioFormat::Flac));
+                app.set_download_bitrate(st.cfg.download.bitrate as i32);
+                app.set_download_cover(st.cfg.download.cover_size as i32);
+            }
             "clear" => {
                 self.images.clear();
                 win::release_memory();
@@ -2825,7 +2856,6 @@ impl Ctx {
             return;
         }
         let Some(t) = self.st.borrow().menu_track.clone() else { return };
-        let net = self.st.borrow().net.clone();
         match id {
             "like" => self.like(t),
             "trailer" => self.play_trailer(format!("tracks/{}", t.id)),
@@ -2834,16 +2864,7 @@ impl Ctx {
                 self.start();
             }
             "download" => {
-                let Some(net) = net else { return };
-                let api = net.api.clone();
-                self.toast(format!("Скачиваем «{}»", t.title));
-                std::thread::spawn(move || {
-                    let res = save_track(&api, &music_dir(), &t);
-                    net.say(match res {
-                        Ok(p) => format!("Сохранено: {}", p.display()),
-                        Err(e) => format!("Не удалось скачать: {e}"),
-                    });
-                });
+                self.download_tracks(String::new(), vec![t]);
             }
             "next" => {
                 self.player.send(Cmd::Enqueue { track: t, next: true });
@@ -3280,6 +3301,8 @@ impl Ctx {
     fn row_track(&self, block: &str, i: usize) -> Option<Track> {
         match block {
             "list" => self.view_track(i),
+            "queue" => self.player.state().upcoming.get(i).cloned(),
+            "current" => self.player.state().track,
             "ar-popular" => self.st.borrow().artist_tracks.get(i).cloned(),
             "chart" => self.st.borrow().chart.get(i).cloned(),
             "results" => self.st.borrow().results.get(i).cloned(),
@@ -3380,149 +3403,98 @@ impl Ctx {
         }
     }
 
-    /// Скачать список в «Музыка/Яндекс Музыка/<название>», по одному треку, с прогрессом.
+    /// Одиночные треки и списки используют одну очередь.
     fn download_tracks(self: &Rc<Self>, folder: String, tracks: Vec<Track>) {
-        if tracks.is_empty() {
+        if tracks.is_empty() { return; }
+        let st = self.st.borrow();
+        if !st.cfg.unofficial_settings || !st.cfg.downloads_enabled {
+            drop(st);
+            self.toast("Включите скачивание в неофициальных настройках");
             return;
         }
-        if self.st.borrow().downloading {
-            self.toast("Скачивание уже идёт");
-            return;
-        }
-        let Some(net) = self.st.borrow().net.clone() else { return };
-        self.st.borrow_mut().downloading = true;
-        self.toast(format!("Скачиваем {}", tracks_word(tracks.len() as u64)));
-        let api = net.api.clone();
-        std::thread::spawn(move || {
-            let dir = music_dir().join(file_name(&folder));
-            let total = tracks.len();
-            let (mut ok, mut failed) = (0, 0);
-            for (i, t) in tracks.iter().enumerate() {
-                if saved_already(&dir, t) {
-                    ok += 1;
-                    continue;
-                }
-                match save_track(&api, &dir, t) {
-                    Ok(_) => ok += 1,
-                    Err(e) => {
-                        failed += 1;
-                        log(format!("скачивание {}: {e}", t.id));
-                    }
-                }
-                if (i + 1) % 10 == 0 && i + 1 < total {
-                    net.say(format!("Скачано {} из {total}", i + 1));
-                }
-            }
-            net.say(if failed == 0 {
-                format!("Скачано {ok} из {total}: {}", dir.display())
-            } else {
-                format!("Скачано {ok} из {total}, не удалось {failed}: {}", dir.display())
-            });
-            let _ = slint::invoke_from_event_loop(|| with_ctx(|c| c.st.borrow_mut().downloading = false));
-        });
+        let Some(net) = st.net.clone() else { return };
+        let options = st.cfg.download;
+        drop(st);
+        let directory = if folder.is_empty() { music_dir() } else { music_dir().join(file_name(&folder)) };
+        let added = self.downloads.enqueue(net.api.clone(), directory, tracks, options);
+        self.ui().global::<App>().set_downloads_open(true);
+        self.toast(if added == 0 { "Треки уже в очереди".into() } else { format!("Добавлено в очередь: {added}") });
+        self.sync_downloads();
     }
+
+    fn sync_downloads(&self) {
+        use crate::downloads::Status;
+        if self.download_version.get() == self.downloads.version() { return; }
+        let snapshot = self.downloads.snapshot();
+        self.download_version.set(snapshot.version);
+        let total = snapshot.jobs.len();
+        let finished = snapshot.jobs.iter().filter(|j| !j.status.active()).count();
+        let active = total - finished;
+        let progress = |j: &crate::downloads::Job| -> f32 {
+            match j.status {
+                Status::Completed | Status::Failed => 1.0,
+                Status::Processing => 0.99,
+                Status::Downloading => j.total.filter(|t| *t > 0).map(|t| (j.received as f64 / t as f64).min(0.98) as f32).unwrap_or(0.0),
+                _ => 0.0,
+            }
+        };
+        let overall = if total == 0 { 0.0 } else { snapshot.jobs.iter().map(progress).sum::<f32>() / total as f32 };
+        let rows = snapshot.jobs.iter().map(|j| {
+            let pct = j.total.filter(|t| *t > 0).map(|t| ((j.received as f64 / t as f64) * 100.0).min(100.0) as u32);
+            let status = match j.status {
+                Status::Queued => "В очереди".into(),
+                Status::Resolving => "Получаем ссылку".into(),
+                Status::Downloading => pct.map(|p| format!("Скачивание · {p}%")).unwrap_or_else(|| "Скачивание".into()),
+                Status::Processing => "Записываем теги и обложку".into(),
+                Status::Completed => "Готово".into(),
+                Status::Failed => "Ошибка скачивания".into(),
+            };
+            let detail = if j.status == Status::Failed || j.status == Status::Completed { j.detail.clone() }
+                else if j.received > 0 { match j.total { Some(t) => format!("{:.1} / {:.1} МБ", j.received as f64 / 1_048_576.0, t as f64 / 1_048_576.0), None => format!("{:.1} МБ получено", j.received as f64 / 1_048_576.0) } }
+                else { String::new() };
+            DownloadRow {
+                id: j.id.to_string().into(), title: j.title.clone().into(), artist: j.artist.clone().into(),
+                format: if j.options.format == crate::config::AudioFormat::Flac { "FLAC · lossless".into() } else { format!("MP3 · {} кбит/с", j.options.bitrate).into() },
+                status: crate::i18n::tr(&status).into(), detail: detail.into(), progress: if j.status == Status::Failed { 0.0 } else { progress(j) },
+                known: j.total.is_some(), transferring: j.status == Status::Downloading,
+                failed: j.status == Status::Failed, finished: !j.status.active(),
+            }
+        }).collect::<Vec<_>>();
+        let ui = self.ui();
+        let app = ui.global::<App>();
+        app.set_downloads(ModelRc::from(Rc::new(VecModel::from(rows))));
+        app.set_downloads_active(active as i32);
+        app.set_downloads_finished(finished as i32);
+        app.set_downloads_progress(overall);
+    }
+
 }
 
 fn music_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into())).join("Music").join("Яндекс Музыка")
 }
 
-/// Расширение по первым байтам: mp3, AAC (ADTS), MP4 или FLAC.
-fn audio_ext(b: &[u8]) -> &'static str {
-    match b {
-        [b'I', b'D', b'3', ..] => "mp3",
-        [_, _, _, _, b'f', b't', b'y', b'p', ..] => "m4a",
-        [b'f', b'L', b'a', b'C', ..] => "flac",
-        [0xFF, x, ..] if x & 0xF6 == 0xF0 => "aac",
-        _ => "mp3",
-    }
-}
-
-fn track_file_stem(t: &Track) -> String {
-    file_name_max(&format!("{} — {}", t.artists, t.title), 120)
-}
-
-/// Трек уже скачан: готовый файл (не `.part`) с ненулевым размером.
-fn saved_already(dir: &std::path::Path, t: &Track) -> bool {
-    let stem = track_file_stem(t);
-    ["mp3", "m4a", "aac", "flac"]
-        .iter()
-        .any(|e| std::fs::metadata(dir.join(format!("{stem}.{e}"))).is_ok_and(|m| m.len() > 0))
-}
-
-/// Скачать трек: сначала в `.part`, теги — в mp3, и только после этого переименовать в
-/// готовое имя. Обрыв оставит лишь `.part`, который следующая попытка перезапишет.
-fn save_track(api: &Api, dir: &std::path::Path, t: &Track) -> Result<std::path::PathBuf, String> {
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let stem = track_file_stem(t);
-    let part = dir.join(format!("{stem}.part"));
-    let mut last = String::new();
-    for attempt in 0..3 {
-        if attempt > 0 {
-            std::thread::sleep(Duration::from_secs(2 * attempt));
-        }
-        match api.stream_url(&t.id).and_then(|u| api.download_to(&u, &part)) {
-            Ok(n) if n > 0 => {
-                last.clear();
-                break;
-            }
-            Ok(_) => last = "пустой файл".into(),
-            Err(e) => last = e,
-        }
-    }
-    if !last.is_empty() {
-        let _ = std::fs::remove_file(&part);
-        return Err(last);
-    }
-    let finish = || -> Result<std::path::PathBuf, String> {
-        let mut head = [0u8; 16];
-        {
-            use std::io::Read as _;
-            let mut f = std::fs::File::open(&part).map_err(|e| e.to_string())?;
-            let n = f.read(&mut head).map_err(|e| e.to_string())?;
-            if n < head.len() {
-                return Err("файл слишком короткий".into());
-            }
-        }
-        let ext = audio_ext(&head);
-        let path = dir.join(format!("{stem}.{ext}"));
-        if ext == "mp3" {
-            let cover = t.cover_url(400).and_then(|u| api.fetch_bytes(&u).ok());
-            let tag = crate::tags::id3(&crate::tags::Tags {
-                title: &if t.version.is_empty() { t.title.clone() } else { format!("{} ({})", t.title, t.version) },
-                artist: &t.artists,
-                album: &t.album_title,
-                year: t.year,
-                track: t.position,
-                cover: cover.as_deref(),
-            });
-            let tagged = dir.join(format!("{stem}.tagged.part"));
-            {
-                use std::io::{Read as _, Seek as _, Write as _};
-                let mut src = std::fs::File::open(&part).map_err(|e| e.to_string())?;
-                let mut probe = vec![0u8; 10];
-                let _ = src.read(&mut probe);
-                let skip = crate::tags::existing_id3_len(&probe) as u64;
-                src.seek(std::io::SeekFrom::Start(skip)).map_err(|e| e.to_string())?;
-                let mut out = std::fs::File::create(&tagged).map_err(|e| e.to_string())?;
-                out.write_all(&tag).map_err(|e| e.to_string())?;
-                std::io::copy(&mut src, &mut out).map_err(|e| e.to_string())?;
-                out.sync_all().map_err(|e| e.to_string())?;
-            }
-            let _ = std::fs::remove_file(&part);
-            std::fs::rename(&tagged, &path).map_err(|e| e.to_string())?;
-        } else {
-            std::fs::rename(&part, &path).map_err(|e| e.to_string())?;
-        }
-        Ok(path)
-    };
-    finish().inspect_err(|_| {
-        let _ = std::fs::remove_file(&part);
-    })
-}
-
 /// Колбэки новых экранов: поиск, исполнитель, полноэкранный плеер, меню, настройки звука.
 fn register_extra(app: &App) {
+    app.on_download_open_file(|id| with_ctx(|c| {
+        let Some(path) = id.parse().ok().and_then(|id| c.downloads.completed_path(id)) else { return };
+        std::thread::spawn(move || {
+            if let Err(error) = win::show_file_in_folder(&path) {
+                let _ = slint::invoke_from_event_loop(move || with_ctx(|c| c.toast(error)));
+            }
+        });
+    }));
+    app.on_download_retry(|id| with_ctx(|c| { if let Ok(id) = id.parse() { c.downloads.retry(id); c.sync_downloads(); } }));
+    app.on_downloads_clear(|| with_ctx(|c| { c.downloads.clear_finished(); c.sync_downloads(); }));
+    app.on_row_download(|block, i| {
+        with_ctx(|c| {
+            if let Ok(index) = usize::try_from(i) {
+                if let Some(track) = c.row_track(&block, index) {
+                    c.download_tracks(String::new(), vec![track]);
+                }
+            }
+        });
+    });
     app.on_open_fullscreen(|m| with_ctx(|c| c.open_fullscreen(m)));
     app.on_open_track_menu(|x, y| with_ctx(|c| c.open_track_menu(x, y)));
     app.on_open_list_menu(|x, y| with_ctx(|c| c.open_list_menu(x, y)));
