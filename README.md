@@ -115,7 +115,7 @@
 | **Windows 10** x64 | Должна работать: приложение использует те же API. Углы окна будут прямыми, потому что скругление есть только в Windows 11. Регулярно не проверяется, о проблемах пишите в [issues](https://github.com/SpolzerMod/yamusic-rs/issues). |
 | Windows на ARM | Должна запускаться через эмуляцию x64. Не проверялась. |
 | Windows 7 и 8.1 | Не поддерживаются: текущий Rust под них не собирает. |
-| **Linux** | В планах. Сборки AppImage будут выходить пре-релизами, тестировать будем вместе с пользователями. |
+| **Linux** | Ветка `linux-port`: нативный deb-пакет, MPRIS-управление и медиа-клавиши (GNOME Shell), без трея. Сборка — `cargo deb`, CI в build.yml. |
 | macOS | Пока не планируется. |
 
 **Нужно ещё:**
@@ -330,7 +330,7 @@ uses about 65 MB in one process.
   and run it; there is no installer. Sign in with the code shown at [ya.ru/device](https://ya.ru/device).
   The app updates itself from GitHub releases.
 - **Requirements:** Windows 11 (Windows 10 should work but is not tested regularly), a Yandex account,
-  and Yandex Plus for full-length tracks. Linux builds are planned; macOS is not.
+  and Yandex Plus for full-length tracks. Linux support lives in the `linux-port` branch: a native deb package with MPRIS controls; the tray is replaced by the GNOME media widget. macOS is not supported.
 - **Privacy:** the token is encrypted with Windows DPAPI and only sent over HTTPS to `yandex.ru` /
   `yandex.net`. Besides Yandex, the app only talks to `api.github.com` (update checks) and the local
   Discord client (optional status). There is no telemetry.
