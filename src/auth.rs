@@ -22,7 +22,9 @@ pub enum Poll {
     /// Пользователь ещё не ввёл код.
     Pending,
     Done(Token),
-    /// Код истёк или вход отклонён — нужен новый код.
+    /// Срок действия кода кончился — нужен новый (не ошибка сети и не отказ).
+    Expired,
+    /// Вход отклонён по другой причине.
     Failed(String),
 }
 
@@ -114,11 +116,19 @@ pub fn poll(device_code: &str) -> Poll {
     if let Some(t) = token_from(&v) {
         return Poll::Done(t);
     }
-    match v.get("error").and_then(|e| e.as_str()) {
+    let code = v.get("error").and_then(|e| e.as_str());
+    let desc = v.get("error_description").and_then(|e| e.as_str()).unwrap_or("");
+    // Истечение кода сервер описывает по-разному, поэтому смотрим и код ошибки, и текст.
+    let expired = |s: &str| {
+        let s = s.to_ascii_lowercase();
+        s.contains("expired") || s.contains("истёк") || s.contains("устарел")
+    };
+    if code.is_some_and(expired) || expired(desc) {
+        return Poll::Expired;
+    }
+    match code {
         Some("authorization_pending") | Some("slow_down") => Poll::Pending,
-        _ => Poll::Failed(
-            v.get("error_description").and_then(|e| e.as_str()).unwrap_or("вход не удался").to_string(),
-        ),
+        _ => Poll::Failed(if desc.is_empty() { "вход не удался".to_string() } else { desc.to_string() }),
     }
 }
 

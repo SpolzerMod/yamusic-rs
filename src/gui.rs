@@ -110,6 +110,10 @@ thread_local! {
     static CTX: RefCell<Option<Rc<Ctx>>> = const { RefCell::new(None) };
 }
 
+/// Сколько раз подряд код входа продлевался автоматически. Сбрасывается, когда
+/// пользователь сам нажимает «Получить новый код» или когда вход завершился.
+static LOGIN_RENEW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 /// Включена ли диагностика ввода (`YAMUSIC_INPUT_DEBUG=1 yamusic-rs`): в log.txt
 /// попадают координаты курсора, масштаб, фокус и отметки о дошедших кликах.
 fn input_debug() -> bool {
@@ -2227,10 +2231,15 @@ impl Ctx {
             };
             let dc = match crate::auth::device_code() {
                 Ok(dc) => dc,
-                Err(e) => return set(String::new(), format!("Не удалось получить код: {e}")),
+                Err(e) => {
+                    crate::config::log(format!("вход: код не получен — {e}"));
+                    return set(String::new(), format!("Не удалось получить код: {e}"));
+                }
             };
+            crate::config::log(format!("вход: код {} действует {} с", dc.user_code, dc.expires_in));
             set(dc.user_code.clone(), String::new());
             let deadline = Instant::now() + Duration::from_secs(dc.expires_in);
+            let mut expired = false;
             while alive() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_secs(dc.interval));
                 if !alive() {
@@ -2238,14 +2247,38 @@ impl Ctx {
                 }
                 match crate::auth::poll(&dc.device_code) {
                     crate::auth::Poll::Pending => continue,
-                    crate::auth::Poll::Failed(e) => return set(String::new(), format!("Вход не удался: {e}")),
+                    // Код живёт 5 минут, и сервер сам сообщает, что он истёк.
+                    crate::auth::Poll::Expired => {
+                        expired = true;
+                        break;
+                    }
+                    crate::auth::Poll::Failed(e) => {
+                        crate::config::log(format!("вход: отказ — {e}"));
+                        return set(String::new(), format!("Вход не удался: {e}"));
+                    }
                     crate::auth::Poll::Done(t) => {
+                        crate::config::log("вход: код подтверждён");
+                        LOGIN_RENEW.store(0, Ordering::Relaxed);
                         let _ = slint::invoke_from_event_loop(move || with_ctx(|c| c.login_done(t)));
                         return;
                     }
                 }
             }
-            if alive() {
+            if !alive() {
+                return;
+            }
+            expired = expired || Instant::now() >= deadline;
+            // Кнопка «Получить новый код» не должна быть единственным путём: если клик
+            // по ней не дошёл, экран входа оставался мёртвым. Продлеваем код сами
+            // (не больше 6 раз подряд — дальше решает пользователь), а кнопку оставляем
+            // для случая ошибки сети.
+            let renew = LOGIN_RENEW.fetch_add(1, Ordering::Relaxed);
+            if expired && dc.expires_in >= 30 && renew < 6 {
+                crate::config::log(format!("вход: код истёк, запрашиваем новый ({})", renew + 1));
+                set(String::new(), "Код обновляется…".into());
+                let _ = slint::invoke_from_event_loop(move || with_ctx(|c| c.login_start()));
+            } else {
+                crate::config::log("вход: код устарел");
                 set(String::new(), "Код устарел".into());
             }
         });
@@ -3860,7 +3893,13 @@ fn register_extra(app: &App) {
         })
     });
     app.on_menu_action(|id| with_ctx(|c| c.menu_action(&id)));
-    app.on_login_start(|| with_ctx(|c| c.login_start()));
+    app.on_login_start(|| {
+        if input_debug() {
+            log("ввод: клик «Получить новый код»");
+        }
+        LOGIN_RENEW.store(0, Ordering::Relaxed);
+        with_ctx(|c| c.login_start());
+    });
     app.on_list_open_artist(|i| {
         with_ctx(|c| {
             let Some(data) = c.list() else { return };
