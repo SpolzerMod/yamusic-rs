@@ -11,7 +11,8 @@ pub struct ListData {
     pub kind: ListKind,
     pub title: String,
     pub covers: Vec<String>,
-    pub tracks: Vec<Track>,
+    /// Общий буфер треков: store, UI и плеер ссылаются на один Arc без полных копий.
+    pub tracks: Arc<Vec<Track>>,
     pub playlist: Option<Playlist>,
     pub album: Option<Album>,
 }
@@ -141,7 +142,7 @@ fn fetch(api: &Api, uid: &str, key: &str) -> Res<Data> {
                 kind: ListKind::Album,
                 title: a.title.clone(),
                 covers: a.cover.iter().cloned().collect(),
-                tracks,
+                tracks: Arc::new(tracks),
                 playlist: None,
                 album: Some(a),
             })
@@ -153,7 +154,7 @@ fn fetch(api: &Api, uid: &str, key: &str) -> Res<Data> {
                     kind: ListKind::Playlist,
                     title: p.title.clone(),
                     covers: p.covers.clone(),
-                    tracks,
+                    tracks: Arc::new(tracks),
                     playlist: Some(p),
                     album: None,
                 })
@@ -164,7 +165,7 @@ fn fetch(api: &Api, uid: &str, key: &str) -> Res<Data> {
                 kind: ListKind::Likes,
                 title: "Мне нравится".into(),
                 covers: api.likes_cover(uid).into_iter().collect(),
-                tracks,
+                tracks: Arc::new(tracks),
                 playlist: None,
                 album: None,
             })
@@ -271,7 +272,7 @@ impl Net {
                 let start = start.and_then(|s| tracks.iter().position(|t| t.id == s)).unwrap_or(0);
                 player.send(Cmd::PlayList {
                     source: Source::List { kind: ListKind::Artist, id, title: name },
-                    tracks,
+                    tracks: Arc::new(tracks),
                     start,
                     after: After::Loop,
                 });
