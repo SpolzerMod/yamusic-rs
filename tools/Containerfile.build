@@ -16,3 +16,4 @@ RUN apt-get update \
         file \
     && rm -rf /var/lib/apt/lists/*
 RUN rustup component add clippy
+RUN cargo install --locked cargo-deb

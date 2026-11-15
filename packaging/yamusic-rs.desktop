@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Яндекс Музыка RS
+Comment=Неофициальный клиент Яндекс Музыки на Rust
+Comment[en]=Unofficial Yandex Music client written in Rust
+Exec=yamusic-rs
+Icon=yamusic-rs
+Terminal=false
+Categories=Audio;Music;Player;AudioVideo;
+Keywords=music;yandex;музыка;яндекс;
+StartupWMClass=yamusic-rs
