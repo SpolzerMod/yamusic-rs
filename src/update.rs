@@ -5,6 +5,7 @@
 //! его переименовать. Старый файл (`*.old.exe`) удаляется при следующем запуске.
 //! Если папка недоступна для записи, кнопка открывает страницу релиза.
 
+#[cfg(windows)]
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -13,6 +14,7 @@ use std::time::Duration;
 pub const POLL: Duration = Duration::from_secs(30 * 60);
 
 /// Имя exe в релизе.
+#[cfg(windows)]
 const ASSET: &str = concat!(env!("CARGO_PKG_NAME"), ".exe");
 
 /// Аргумент, с которым обновлённый exe ждёт, пока закроется старый.
@@ -63,11 +65,21 @@ pub fn check() -> Result<Option<Release>, String> {
         return Ok(None);
     }
     let exe = v.get("assets").and_then(|a| a.as_array()).and_then(|assets| {
-        let a = assets.iter().find(|a| a.get("name").and_then(|n| n.as_str()) == Some(ASSET))?;
-        let url = a.get("browser_download_url")?.as_str()?.to_string();
-        let size = a.get("size")?.as_u64()?;
-        let sha = a.get("digest")?.as_str()?.strip_prefix("sha256:")?.to_ascii_lowercase();
-        Some((url, size, sha))
+        #[cfg(windows)]
+        {
+            let a = assets.iter().find(|a| a.get("name").and_then(|n| n.as_str()) == Some(ASSET))?;
+            let url = a.get("browser_download_url")?.as_str()?.to_string();
+            let size = a.get("size")?.as_u64()?;
+            let sha = a.get("digest")?.as_str()?.strip_prefix("sha256:")?.to_ascii_lowercase();
+            Some((url, size, sha))
+        }
+        // Под Linux обновление — установка нового deb: авто-замену не делаем,
+        // кнопка уведомления открывает страницу релиза.
+        #[cfg(not(windows))]
+        {
+            let _ = assets;
+            None
+        }
     });
     Ok(Some(Release {
         version: tag.trim_start_matches('v').to_string(),
@@ -82,6 +94,7 @@ fn old_path(exe: &Path) -> PathBuf {
 
 /// Скачать новый exe, проверить и поставить на место запущенного. Долго: звать из фонового
 /// потока. После успеха нужно запустить [`relaunch`] и закрыться.
+#[cfg(windows)]
 pub fn install(r: &Release) -> Result<PathBuf, String> {
     let (url, size, sha) = r.exe.as_ref().ok_or("у релиза нет exe")?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -112,6 +125,13 @@ pub fn install(r: &Release) -> Result<PathBuf, String> {
         return Err(format!("не удалось заменить exe: {e}"));
     }
     Ok(exe)
+}
+
+/// Под Linux self-update нет: deb ставится пакетным менеджером, кнопка уведомления
+/// просто открывает страницу релиза (см. gui.rs::start_updates).
+#[cfg(not(windows))]
+pub fn install(_r: &Release) -> Result<PathBuf, String> {
+    Err(crate::i18n::tr("Обновите пакет через системный менеджер пакетов"))
 }
 
 /// Запустить обновлённый exe. Он дождётся, пока этот процесс закроется.
@@ -153,7 +173,7 @@ mod tests {
         assert_eq!(parse_version("latest"), None);
     }
 
-    #[test]
+    #[cfg(all(test, windows))]
     fn paths() {
         assert_eq!(old_path(Path::new(r"C:\a\yamusic-rs.exe")), Path::new(r"C:\a\yamusic-rs.old.exe"));
         assert_eq!(ASSET, "yamusic-rs.exe");

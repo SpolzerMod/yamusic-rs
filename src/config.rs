@@ -117,6 +117,13 @@ impl Config {
             let path = dir().join("config.json");
             let tmp = dir().join("config.json.tmp");
             if std::fs::write(&tmp, s).is_ok() {
+                // Токен в конфиге секретный: под Linux не даём читать его другим
+                // пользователям (0600, как у ssh-ключей).
+                #[cfg(not(windows))]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+                }
                 let _ = std::fs::rename(&tmp, &path);
             }
         }

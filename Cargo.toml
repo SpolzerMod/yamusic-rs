@@ -8,8 +8,7 @@ description = "Яндекс Музыка RS — неофициальный кл�
 repository = "https://github.com/SpolzerMod/yamusic-rs"
 
 [dependencies]
-skia-safe = { version = "0.153.3", default-features = false }
-slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-skia", "unstable-fontique-011", "unstable-winit-030"] }
+slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-femtovg", "unstable-fontique-011", "unstable-winit-030"] }
 rodio = { version = "0.20", default-features = false, features = ["symphonia-mp3", "symphonia-aac", "symphonia-isomp4"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "gzip"] }
 serde = { version = "1", features = ["derive"] }
@@ -21,7 +20,11 @@ base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 miniz_oxide = "0.8"
 
-[dependencies.windows-sys]
+[target.'cfg(windows)'.dependencies]
+# Кэш глифов Skia (gui.rs::apply_mode).
+skia-safe = { version = "0.153.3", default-features = false }
+
+[target.'cfg(windows)'.dependencies.windows-sys]
 version = "0.59"
 features = [
   "Win32_Foundation",
@@ -40,6 +43,14 @@ features = [
   "Win32_UI_Controls_Dialogs",
 ]
 
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+# MPRIS 2 (виджет медиа в GNOME Shell, системные медиа-клавиши). 0.10+ не собираются — пинну 0.9.
+mpris-server = "=0.9.0"
+# Диалог выбора файла (xdg-desktop-portal) — обложка плейлиста.
+rfd = "0.15"
+# Локальный рантайм для MPRIS-потока.
+tokio = { version = "1", default-features = false, features = ["rt"] }
+
 [build-dependencies]
 slint-build = "1.18"
 
@@ -49,3 +60,23 @@ lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
+
+[package.metadata.deb]
+maintainer = "SpolzerMod <https://github.com/SpolzerMod/yamusic-rs>"
+license-file = ["LICENSE", "2"]
+depends = "libc6 (>= 2.38), libstdc++6, libegl1, libgl1, libwayland-client0, libxkbcommon0, libfontconfig1, libfreetype6, libgcc-s1, xdg-utils"
+section = "sound"
+priority = "optional"
+extended-description = """\
+Неофициальный клиент Яндекс Музыки на Rust. Нативное окно (Slint + femtovg), \
+MPRIS-управление и системные медиа-клавиши, автозапуск, эквалайзер, тексты песен."""
+assets = [
+  ["target/release/yamusic-rs", "usr/bin/", "755"],
+  ["packaging/yamusic-rs.desktop", "usr/share/applications/", "644"],
+  ["packaging/icons/16.png", "usr/share/icons/hicolor/16x16/apps/yamusic-rs.png", "644"],
+  ["packaging/icons/32.png", "usr/share/icons/hicolor/32x32/apps/yamusic-rs.png", "644"],
+  ["packaging/icons/48.png", "usr/share/icons/hicolor/48x48/apps/yamusic-rs.png", "644"],
+  ["packaging/icons/64.png", "usr/share/icons/hicolor/64x64/apps/yamusic-rs.png", "644"],
+  ["packaging/icons/128.png", "usr/share/icons/hicolor/128x128/apps/yamusic-rs.png", "644"],
+  ["packaging/icons/256.png", "usr/share/icons/hicolor/256x256/apps/yamusic-rs.png", "644"],
+]

@@ -1,0 +1,18 @@
+# Образ для локальной сборки yamusic-rs под Linux (Rust 1.92, как требует Cargo.toml).
+# System-зависимости slint/winit/rodio под Ubuntu/Debian:
+#   alsa (rodio/cpal), fontconfig+freetype (slint fontique), xkbcommon+wayland+x11 (winit).
+FROM docker.io/library/rust:1.92-bookworm
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        pkg-config \
+        libasound2-dev \
+        libfontconfig1-dev \
+        libfreetype6-dev \
+        libxkbcommon-dev \
+        libwayland-dev \
+        libx11-dev \
+        libx11-xcb-dev \
+        libxkbcommon-x11-dev \
+        file \
+    && rm -rf /var/lib/apt/lists/*
+RUN rustup component add clippy

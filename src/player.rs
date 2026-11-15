@@ -770,7 +770,7 @@ impl Engine {
         let fresh: Vec<Track> = b
             .tracks
             .iter()
-            .filter(|t| !queued(t) && !(check_history && self.history.iter().any(|h| h.id == t.id)))
+            .filter(|t| !(queued(t) || check_history && self.history.iter().any(|h| h.id == t.id)))
             .cloned()
             .collect();
         let tracks = if !fresh.is_empty() || b.tracks.iter().all(&queued) {

@@ -352,7 +352,7 @@ impl Ctx {
             _ => def.title.clone(),
         };
         let desc = if def.kind == "SPECIAL" { banner.subtitle.clone() } else { def.desc.clone() };
-        let more = def.more || (b.target.is_some() && def.kind != "CHART_TRACKS") || def.kind == "CHART_TRACKS";
+        let more = def.more || b.target.is_some() || def.kind == "CHART_TRACKS";
         let row = LBlock {
             kind: kind.into(),
             title: crate::i18n::tr(&title).into(),

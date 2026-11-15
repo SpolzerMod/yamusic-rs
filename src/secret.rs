@@ -3,6 +3,7 @@
 
 use base64::Engine as _;
 
+#[cfg(windows)]
 /// Дополнительная «соль» DPAPI: другие программы того же пользователя без неё не расшифруют.
 /// Старое имя оставлено намеренно: с другой солью сохранённые токены перестанут читаться.
 const ENTROPY: &[u8] = b"yamusic-lite token v1";
@@ -52,8 +53,11 @@ pub fn seal(plain: &str) -> Option<String> {
     }
     #[cfg(not(windows))]
     {
-        let _ = plain;
-        None
+        // Без DPAPI: маркер «RAW» + открытый текст. Файл конфига создаётся с 0600
+        // (config::save), читаем только наш пользователь.
+        let mut raw = b"RAW".to_vec();
+        raw.extend_from_slice(plain.as_bytes());
+        Some(base64::engine::general_purpose::STANDARD.encode(raw))
     }
 }
 
@@ -66,8 +70,7 @@ pub fn open(sealed: &str) -> Option<String> {
     }
     #[cfg(not(windows))]
     {
-        let _ = raw;
-        None
+        raw.strip_prefix(b"RAW").and_then(|b| String::from_utf8(b.to_vec()).ok())
     }
 }
 

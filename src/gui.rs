@@ -17,7 +17,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 struct State {
@@ -99,6 +99,8 @@ struct Ctx {
     lite: Cell<bool>,
     player: Player,
     discord: Arc<crate::discord::Discord>,
+    /// Состояние для MPRIS (на Windows — заглушка).
+    mpris: crate::mpris::Mpris,
     images: Images,
     tracks: Rc<VecModel<TrackItem>>,
     st: RefCell<State>,
@@ -1063,7 +1065,7 @@ fn apply_ui_scale(ui: &AppWindow) {
     if phys.width == 0 || phys.height == 0 {
         return;
     }
-    let base = std::env::var("SLINT_SCALE_FACTOR").ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or_else(|| win::dpi_scale(hwnd(ui)));
+    let base = std::env::var("SLINT_SCALE_FACTOR").ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or_else(|| dpi_base(ui, w));
     let css_w = phys.width as f32 / base;
     let k = if css_w >= 1920.0 { (12.0 + 0.003 * css_w) / 16.0 } else { 1.0 };
     let target = base * k;
@@ -1085,6 +1087,19 @@ fn quit() {
     let _ = slint::quit_event_loop();
 }
 
+/// Окно для внешних «покажи меня» (wake-сокет второго запуска, MPRIS Raise).
+static WAKE_UI: OnceLock<slint::Weak<AppWindow>> = OnceLock::new();
+
+/// Показать окно из любого потока. Пока окно ещё не создано — просто ничего не делает.
+pub fn wake() -> Result<(), slint::EventLoopError> {
+    let Some(weak) = WAKE_UI.get().cloned() else { return Ok(()) };
+    slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            reveal(&ui);
+        }
+    })
+}
+
 /// Показать окно: при запуске в трей оно ещё не создано, после закрытия в трей — спрятано.
 fn reveal(ui: &AppWindow) {
     let first = hwnd(ui) == 0;
@@ -1100,38 +1115,84 @@ fn apply_mode(ui: &AppWindow, lite: bool) {
     ui.global::<App>().set_motion(!lite);
     // Кэш глифов по умолчанию 2 МБ. В «Плавном» крупный текст песни и анимация масштаба
     // строки его вытесняют, и тогда весь текст растеризуется заново в каждом кадре.
+    #[cfg(windows)]
     skia_safe::graphics::set_font_cache_limit(if lite { 2 << 20 } else { 16 << 20 });
+    #[cfg(not(target_os = "windows"))]
+    {
+        // femtovg не теряет текст на кэшах: лимит не нужен, флаг просто помечает режим.
+        let _ = lite;
+        let _ = ui;
+    }
+}
+
+/// База масштаба: Windows — DPI монитора окна, Linux — фактор окна от winit
+/// (дробный масштаб Wayland композитора уже учтён в нём).
+fn dpi_base(ui: &AppWindow, w: &slint::Window) -> f32 {
+    #[cfg(windows)]
+    {
+        let _ = w;
+        win::dpi_scale(hwnd(ui))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = ui;
+        w.scale_factor()
+    }
 }
 
 /// Окно winit создаётся не сразу после `show()` (до запуска цикла событий и с OpenGL),
 /// поэтому масштаб и прочее применяются, когда у окна появится HWND.
+#[cfg_attr(not(target_os = "windows"), allow(clippy::only_used_in_recursion))]
 fn finish_reveal(weak: slint::Weak<AppWindow>, first: bool, tries: u32) {
-    let Some(ui) = weak.upgrade() else { return };
-    let h = hwnd(&ui);
-    if h == 0 {
-        if tries < 100 {
-            Timer::single_shot(Duration::from_millis(20), move || finish_reveal(weak, first, tries + 1));
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Окно winit появляется позже `show()`; пробуем применить масштаб, пока
+        // окно не появится (дальше его тоже применяет on_window_resized).
+        if let Some(ui) = weak.upgrade() {
+            apply_ui_scale(&ui);
         }
-        return;
+        if tries < 50 {
+            Timer::single_shot(Duration::from_millis(50), move || finish_reveal(weak, first, tries + 1));
+        }
     }
-    if first {
-        apply_ui_scale(&ui);
-        win::round_corners(h);
-        let _ = std::fs::write(crate::config::dir().join("hwnd"), h.to_string());
-        win::set_icon(h);
+    #[cfg(target_os = "windows")]
+    {
+        let Some(ui) = weak.upgrade() else { return };
+        let h = hwnd(&ui);
+        if h == 0 {
+            if tries < 100 {
+                Timer::single_shot(Duration::from_millis(20), move || finish_reveal(weak, first, tries + 1));
+            }
+            return;
+        }
+        if first {
+            apply_ui_scale(&ui);
+            win::round_corners(h);
+            let _ = std::fs::write(crate::config::dir().join("hwnd"), h.to_string());
+            win::set_icon(h);
+        }
+        win::show(h);
+        win::force_foreground(h);
     }
-    win::show(h);
-    win::force_foreground(h);
 }
 
 fn hwnd(ui: &AppWindow) -> isize {
-    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    ui.window()
-        .with_winit_window(|w| match w.window_handle().map(|h| h.as_raw()) {
-            Ok(RawWindowHandle::Win32(h)) => h.hwnd.get(),
-            _ => 0,
-        })
-        .unwrap_or(0)
+    #[cfg(windows)]
+    {
+        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        ui.window()
+            .with_winit_window(|w| match w.window_handle().map(|h| h.as_raw()) {
+                Ok(RawWindowHandle::Win32(h)) => h.hwnd.get(),
+                _ => 0,
+            })
+            .unwrap_or(0)
+    }
+    // На Linux оконными функциями ведает композитор: hwnd ни для чего не нужен.
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = ui;
+        0
+    }
 }
 
 fn notifier() -> Arc<dyn Fn() + Send + Sync> {
@@ -1386,6 +1447,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     }
 
     let ui = AppWindow::new()?;
+    let _ = WAKE_UI.set(ui.as_weak());
     ui.global::<Theme>().set_dark(true);
     let lite = cfg.mode == "lite";
     apply_mode(&ui, lite);
@@ -1418,11 +1480,14 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     );
     app.set_discord_on(cfg.discord_enabled);
     app.set_autostart(win::autostart_enabled());
+    // MPRIS-виджет GNOME Shell и медиа-клавиши (Windows: no-op-заглушка).
+    let mpris = crate::mpris::spawn(player.clone());
     let ctx = Rc::new(Ctx {
         ui: ui.as_weak(),
         lite: Cell::new(lite),
         player: player.clone(),
         discord,
+        mpris,
         images: Images::new(lite),
         tracks,
         st: RefCell::new(State {
@@ -1676,18 +1741,17 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             ui.window().set_minimized(true);
         }
     });
-    // Как у оригинала на Windows: пока играет трек, окно прячется в трей, иначе приложение закрывается.
+    // Как у оригинала на Windows: пока играет трек, окно прячется, иначе приложение закрывается.
+    // Спрятанное окно не завершает процесс: MPRIS и медиа-клавиши продолжают управлять плеером,
+    // повторный запуск (wake-сокет) показывает окно снова.
     let weak = ui.as_weak();
     let p = player.clone();
     app.on_close(move || {
         if p.state().playing {
             if let Some(ui) = weak.upgrade() {
-                let h = hwnd(&ui);
-                if h != 0 {
-                    win::hide(h);
-                    win::trim_memory();
-                    return;
-                }
+                let _ = ui.window().hide();
+                win::trim_memory();
+                return;
             }
         }
         quit();
@@ -1755,7 +1819,21 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     });
 
     let tick = Timer::default();
-    tick.start(TimerMode::Repeated, Duration::from_millis(250), || with_ctx(|c| c.sync_player()));
+    tick.start(TimerMode::Repeated, Duration::from_millis(250), move || {
+        with_ctx(|c| {
+            c.sync_player();
+            // MPRIS видит состояние плеера с точностью тика; внутри решает, что менять.
+            let s = c.player.state();
+            c.mpris.sync(crate::mpris::Snapshot {
+                playing: s.playing,
+                volume: s.volume,
+                position: s.position,
+                repeat: s.repeat,
+                shuffle: s.shuffle,
+                track: s.track.clone(),
+            });
+        });
+    });
     // Строки текста переключаются точнее, чем раз в 250 мс.
     let lyric_tick = Timer::default();
     lyric_tick.start(TimerMode::Repeated, Duration::from_millis(50), || {
@@ -1916,19 +1994,35 @@ fn card_from_playlist(p: &Playlist) -> Card {
     }
 }
 
-/// Скопировать текст в буфер обмена Windows.
+/// Скопировать текст в буфер обмена: Windows — `clip`, Linux — `wl-copy`/`xclip`.
 fn copy_text(text: &str) {
     use std::io::Write as _;
-    use std::os::windows::process::CommandExt;
-    if let Ok(mut child) = std::process::Command::new("clip")
-        .creation_flags(0x0800_0000)
-        .stdin(std::process::Stdio::piped())
-        .spawn()
+    #[cfg(windows)]
     {
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(text.as_bytes());
+        use std::os::windows::process::CommandExt;
+        if let Ok(mut child) = std::process::Command::new("clip")
+            .creation_flags(0x0800_0000)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            let _ = child.wait();
         }
-        let _ = child.wait();
+    }
+    #[cfg(not(target_os = "windows"))]
+    let tools: [&[&str]; 2] = [&["wl-copy"], &["xclip", "-selection", "clipboard"]];
+    #[cfg(not(target_os = "windows"))]
+    for tool in tools {
+        if let Ok(mut child) = std::process::Command::new(tool[0]).args(&tool[1..]).stdin(std::process::Stdio::piped()).spawn() {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            if child.wait().map(|s| s.success()).unwrap_or(false) {
+                return;
+            }
+        }
     }
 }
 
