@@ -6,6 +6,7 @@
 //! Если папка недоступна для записи, кнопка открывает страницу релиза.
 
 use sha2::{Digest, Sha256};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -96,22 +97,37 @@ fn old_path(exe: &Path) -> PathBuf {
 pub fn install(r: &Release) -> Result<PathBuf, String> {
     let (url, size, sha) = r.exe.as_ref().ok_or("у релиза нет exe")?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let bytes = client()?
+    let new = exe.with_extension("new.exe");
+    let mut resp = client()?
         .get(url)
         .timeout(Duration::from_secs(600))
         .send()
         .and_then(|r| r.error_for_status())
-        .and_then(|r| r.bytes())
         .map_err(|e| format!("загрузка: {e}"))?;
-    if bytes.len() as u64 != *size {
+    let mut f = std::fs::File::create(&new).map_err(|e| format!("нет доступа к папке {}: {e}", exe.parent().unwrap_or(&exe).display()))?;
+    // Стримим чанками на диск с инкрементальным SHA-256 — не держим весь exe в памяти.
+    let mut hasher = Sha256::new();
+    let mut n: u64 = 0;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let k = resp.read(&mut buf).map_err(|e| format!("загрузка: {e}"))?;
+        if k == 0 {
+            break;
+        }
+        hasher.update(&buf[..k]);
+        f.write_all(&buf[..k]).map_err(|e| format!("запись: {e}"))?;
+        n += k as u64;
+    }
+    drop(f);
+    if n != *size {
+        let _ = std::fs::remove_file(&new);
         return Err("файл скачался не целиком".into());
     }
-    let got: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+    let got: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
     if &got != sha {
+        let _ = std::fs::remove_file(&new);
         return Err("контрольная сумма не совпала".into());
     }
-    let new = exe.with_extension("new.exe");
-    std::fs::write(&new, &bytes).map_err(|e| format!("нет доступа к папке {}: {e}", exe.parent().unwrap_or(&exe).display()))?;
     let old = old_path(&exe);
     let _ = std::fs::remove_file(&old);
     if let Err(e) = std::fs::rename(&exe, &old) {
