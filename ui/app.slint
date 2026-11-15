@@ -48,7 +48,14 @@ component CaptionButton inherits Rectangle {
         stroke: ink; stroke-width: 1px;
         viewbox-width: 10; viewbox-height: 10;
     }
-    ta := TouchArea { clicked => { root.clicked(); } }
+    ta := TouchArea {
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down && App.input-debug {
+                App.input-note("CaptionButton — нажато: " + (kind == 0 ? "свернуть" : kind == 1 ? "развернуть/восстановить" : "закрыть"));
+            }
+        }
+        clicked => { root.clicked(); }
+    }
 }
 
 component ResizeEdge inherits TouchArea {

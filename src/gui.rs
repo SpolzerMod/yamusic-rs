@@ -1090,6 +1090,9 @@ fn apply_ui_scale(ui: &AppWindow) {
     }
     ui.global::<App>().set_ui_scale(k);
     ui.global::<App>().set_dpr(target);
+    // Композитор мог сам развернуть или восстановить окно (Super+↑, перетаскивание к краю
+    // экрана, двойной клик по заголовку средствами GNOME): иконка должна это отражать.
+    ui.global::<App>().set_maximized(w.is_maximized());
     #[cfg(windows)]
     {
         // Windows: окно подстраивается под DPI монитора (реальный масштаб меняется).
@@ -1791,6 +1794,9 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     });
     let weak = ui.as_weak();
     app.on_toggle_maximize(move || {
+        if input_debug() {
+            log("ввод: клик «развернуть/восстановить»");
+        }
         if let Some(ui) = weak.upgrade() {
             let m = !ui.window().is_maximized();
             ui.window().set_maximized(m);
@@ -1799,6 +1805,9 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     });
     let weak = ui.as_weak();
     app.on_minimize(move || {
+        if input_debug() {
+            log("ввод: клик «свернуть»");
+        }
         if let Some(ui) = weak.upgrade() {
             ui.window().set_minimized(true);
         }
@@ -1809,6 +1818,9 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     let weak = ui.as_weak();
     let p = player.clone();
     app.on_close(move || {
+        if input_debug() {
+            log(format!("ввод: клик «закрыть» (играет: {})", p.state().playing));
+        }
         if p.state().playing {
             if let Some(ui) = weak.upgrade() {
                 let _ = ui.window().hide();
