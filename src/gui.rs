@@ -110,6 +110,13 @@ thread_local! {
     static CTX: RefCell<Option<Rc<Ctx>>> = const { RefCell::new(None) };
 }
 
+/// Включена ли диагностика ввода (`YAMUSIC_INPUT_DEBUG=1 yamusic-rs`): в log.txt
+/// попадают координаты курсора, масштаб, фокус и отметки о дошедших кликах.
+fn input_debug() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("YAMUSIC_INPUT_DEBUG").is_ok_and(|v| v != "0"))
+}
+
 fn with_ctx(f: impl FnOnce(&Rc<Ctx>)) {
     let c = CTX.with(|c| c.borrow().clone());
     if let Some(c) = c {
@@ -1500,6 +1507,11 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     ui.global::<T>().set_lang(cfg.lang.clone().into());
     ui.global::<T>().on_tr(|s: SharedString| SharedString::from(crate::i18n::tr(s.as_str())));
     app.set_nav_collapsed(cfg.navbar_collapsed);
+    // Диагностика ввода: кнопки интерфейса сообщают о нажатиях (см. input_debug).
+    app.set_input_debug(input_debug());
+    if input_debug() {
+        app.on_input_note(|note: SharedString| log(format!("ввод: нажатие — {note}")));
+    }
 
     let discord = crate::discord::Discord::spawn(
         player.clone(),
@@ -1581,6 +1593,9 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
 
     let p = player.clone();
     app.on_play_pause(move || {
+        if input_debug() {
+            log("ввод: клик «плей/пауза»");
+        }
         let started = CTX.with(|c| c.borrow().as_ref().map(|c| c.st.borrow().started)).unwrap_or(true);
         if p.state().track.is_none() {
             p.send(Cmd::Wave(Source::Wave));
@@ -1592,9 +1607,19 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         }
     });
     let p = player.clone();
-    app.on_next(move || p.send(Cmd::Next));
+    app.on_next(move || {
+        if input_debug() {
+            log("ввод: клик «следующий трек»");
+        }
+        p.send(Cmd::Next);
+    });
     let p = player.clone();
-    app.on_prev(move || p.send(Cmd::Prev));
+    app.on_prev(move || {
+        if input_debug() {
+            log("ввод: клик «предыдущий трек»");
+        }
+        p.send(Cmd::Prev);
+    });
     let p = player.clone();
     app.on_seek(move |s| p.send(Cmd::Seek(s)));
     let p = player.clone();
@@ -1627,7 +1652,12 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     });
     app.on_format_time(|s| mmss(s).into());
 
-    app.on_navigate(|page| with_ctx(|c| c.navigate(page, None, true)));
+    app.on_navigate(|page| {
+        if input_debug() {
+            log(format!("ввод: переход на страницу {page:?}"));
+        }
+        with_ctx(|c| c.navigate(page, None, true));
+    });
     app.on_open_pin(|i| with_ctx(|c| c.open_pin(i as usize)));
     app.on_open_likes(|| with_ctx(|c| c.navigate(Page::List, Some("likes".into()), true)));
     app.on_open_playlist(|i| {
@@ -1718,7 +1748,12 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     app.on_play_wheel(|i| with_ctx(|c| c.play_wheel(i as usize)));
     app.on_go_back(|| with_ctx(|c| c.go_back()));
     app.on_go_forward(|| with_ctx(|c| c.go_forward()));
-    app.on_play_list(|i| with_ctx(|c| c.play_list(i as usize)));
+    app.on_play_list(|i| {
+        if input_debug() {
+            log(format!("ввод: клик по треку №{i}"));
+        }
+        with_ctx(|c| c.play_list(i as usize));
+    });
     app.on_like_track(|i| {
         with_ctx(|c| {
             let Some(t) = c.view_track(i as usize) else { return };
@@ -1829,9 +1864,40 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         },
     );
 
-    ui.window().on_winit_window_event(|_, ev| {
+    // Диагностика ввода: `YAMUSIC_INPUT_DEBUG=1 yamusic-rs` пишет в log.txt физические
+    // координаты курсора, логические (как их видит Slint), масштаб окна, фокус и размер.
+    // По этой строке видно, доходит ли нажатие до окна и туда ли оно попадает.
+    let mut cursor: Option<(f64, f64)> = None;
+    let mut last_move_log = std::time::Instant::now() - Duration::from_secs(1);
+    let weak_scale = ui.as_weak();
+    ui.window().on_winit_window_event(move |_, ev| {
         use slint::winit_030::EventResult;
         use winit::event::{ElementState, MouseButton, WindowEvent};
+        if input_debug() {
+            let scale = || weak_scale.upgrade().map(|ui| f64::from(ui.window().scale_factor())).unwrap_or(0.0);
+            match ev {
+                WindowEvent::CursorMoved { position, .. } => {
+                    cursor = Some((position.x, position.y));
+                    if last_move_log.elapsed() >= Duration::from_millis(250) {
+                        last_move_log = std::time::Instant::now();
+                        let (k, (x, y)) = (scale(), (position.x, position.y));
+                        log(format!("ввод: курсор {x:.0},{y:.0} физ. = {:.0},{:.0} лог. (k {k})", x / k, y / k));
+                    }
+                }
+                WindowEvent::MouseInput { state, button, .. } => {
+                    let (k, pos) = (scale(), cursor);
+                    let logical = pos.map(|(x, y)| (x / k, y / k));
+                    log(format!(
+                        "ввод: {state:?} {button:?} физ. {pos:?} лог. {} (k {k})",
+                        logical.map(|(x, y)| format!("{x:.0},{y:.0}")).unwrap_or_else(|| "?".into())
+                    ));
+                }
+                WindowEvent::Focused(f) => log(format!("ввод: фокус {f}")),
+                WindowEvent::ScaleFactorChanged { scale_factor, .. } => log(format!("ввод: масштаб окна {scale_factor}")),
+                WindowEvent::Resized(size) => log(format!("ввод: размер окна {}×{} (k {})", size.width, size.height, scale())),
+                _ => {}
+            }
+        }
         match ev {
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Back, .. } => {
                 with_ctx(|c| c.go_back());
@@ -3721,7 +3787,12 @@ fn register_extra(app: &App) {
     app.on_list_change_cover(|| with_ctx(|c| c.list_change_cover()));
     app.on_list_remove_track(|i| with_ctx(|c| c.list_remove_track(i.max(0) as usize)));
     app.on_account_action(|id| with_ctx(|c| c.account_action(&id)));
-    app.on_setting(|id| with_ctx(|c| c.setting(&id)));
+    app.on_setting(|id| {
+        if input_debug() {
+            log(format!("ввод: клик по настройке «{id}»"));
+        }
+        with_ctx(|c| c.setting(&id));
+    });
     app.on_open_grid(|block, title| {
         with_ctx(|c| {
             // Полки исполнителя запоминают его id: страница должна открываться и из истории.

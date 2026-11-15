@@ -156,7 +156,13 @@ export component IconButton inherits Rectangle {
     ta := TouchArea {
         enabled: enabled;
         mouse-cursor: MouseCursor.pointer;
-        clicked => { root.clicked(); }
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down && App.input-debug { App.input-note("IconButton — нажато"); }
+        }
+        clicked => {
+            if App.input-debug { App.input-note("IconButton — клик"); }
+            root.clicked();
+        }
     }
 }
 
@@ -177,7 +183,13 @@ export component CircleButton inherits Rectangle {
     Icon { source: icon; size: icon-size; colorize: icon-color; }
     ta := TouchArea {
         mouse-cursor: MouseCursor.pointer;
-        clicked => { root.clicked(); }
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down && App.input-debug { App.input-note("CircleButton — нажато"); }
+        }
+        clicked => {
+            if App.input-debug { App.input-note("CircleButton — клик"); }
+            root.clicked();
+        }
     }
 }
 
@@ -213,7 +225,13 @@ export component PillButton inherits Rectangle {
     }
     ta := TouchArea {
         mouse-cursor: MouseCursor.pointer;
-        clicked => { root.clicked(); }
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down && App.input-debug { App.input-note("PillButton — нажато: " + root.text); }
+        }
+        clicked => {
+            if App.input-debug { App.input-note("PillButton — клик: " + root.text); }
+            root.clicked();
+        }
     }
 }
 

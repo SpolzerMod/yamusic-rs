@@ -142,6 +142,9 @@ export global App {
     // Установщик скачивается.
     in property <bool> update-busy;
     callback update-install();
+    // Диагностика ввода (YAMUSIC_INPUT_DEBUG=1): кнопки сообщают о нажатиях в лог.
+    in property <bool> input-debug;
+    callback input-note(string);
     // Подсказка у значка «!»: текст дисклеймера рядом с курсором.
     in property <string> hint-text: "Возрастное ограничение 18+";
     in-out property <bool> hint-open;
