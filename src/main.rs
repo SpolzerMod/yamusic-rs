@@ -160,7 +160,10 @@ fn main() -> Result<(), slint::PlatformError> {
     // Имя приложения для Wayland: по нему GNOME находит .desktop (значок в доке,
     // подпись окна) и связывает окно с MPRIS-плеером.
     #[cfg(not(target_os = "windows"))]
-    let _ = slint::set_xdg_app_id("yamusic-rs");
+    match slint::set_xdg_app_id("yamusic-rs") {
+        Ok(()) => crate::config::log("окно: app-id yamusic-rs"),
+        Err(e) => crate::config::log(format!("окно: app-id не задан — {e}")),
+    }
     // Убрать exe прошлой версии после self-update — это только Windows.
     #[cfg(windows)]
     update::cleanup();

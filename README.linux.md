@@ -308,6 +308,28 @@ EOF
 приложите к отчёту `log.txt` целиком и укажите сессию (`echo $XDG_SESSION_TYPE`), разрешение и
 масштаб, версию Mesa (`glxinfo -B` или `eglinfo`).
 
+## Значок приложения в доке, alt-tab и уведомлениях
+
+Откуда GNOME берёт значок:
+
+| Окружение | Источник | Что делает приложение |
+|---|---|---|
+| Wayland (обычный запуск) | `.desktop` по `app_id` окна → `Icon=yamusic-rs` → тема `hicolor` | при старте вызывает `slint::set_xdg_app_id("yamusic-rs")` (проверено по `WAYLAND_DEBUG=1`: уходит `xdg_toplevel.set_app_id("yamusic-rs")`) |
+| X11 / XWayland | `_NET_WM_ICON` окна, иначе `.desktop` по `WM_CLASS` | в окно ставится PNG 256×256 из `packaging/icons/` (свой декодер `image`, без зависимости от темы) |
+| Медиа-виджет (MPRIS) | `DesktopEntry` из MPRIS + `.desktop` | MPRIS объявляет `desktop_entry("yamusic-rs")` |
+
+Пакет ставит `yamusic-rs.desktop` и PNG 16/32/48/64/128/256 в `/usr/share/icons/hicolor/*/apps/`.
+Если в доке виден «стандартный» значок, проверьте:
+
+```bash
+dpkg -L yamusic-rs | grep -E 'icons|applications'
+ls -l /usr/share/applications/yamusic-rs.desktop
+gsettings get org.gnome.desktop.interface icon-theme   # тема должна наследовать hicolor
+```
+
+Значок окна по умолчанию в GNOME — это признак того, что `.desktop` не найден по `app_id`
+(сборка без `slint::set_xdg_app_id` или запуск бинарника не из пакета).
+
 ## Прогресс воспроизведения в виджете GNOME
 
 В **штатном** виджете медиа (быстрые настройки и список уведомлений) GNOME показывает обложку,

@@ -46,6 +46,9 @@
       идёт через `xclip`, когда `wl-copy` недоступен.
 - [ ] 4.7 Клики и обновление кадра под Wayland — проверить руками после исправления
       масштаба (убраны синтетические `ScaleFactorChanged`/`Resized`).
+- [x] 4.14 Значок приложения: Wayland получает `xdg_toplevel.set_app_id("yamusic-rs")` (проверено
+      `WAYLAND_DEBUG=1`), `yamusic-rs.desktop` + hicolor 16–256 в пакете; для X11/XWayland окно
+      отдаёт `_NET_WM_ICON` (PNG 256×256, декодируется своим `image`).
 - [x] 4.13 Прогресс в медиа-виджете: штатный виджет GNOME полосу прогресса не рисует (проверено
       по `js/ui/mpris.js`: `Position` не читается). Приложение отдаёт всё нужное контроллерам:
       `Position` (250 мс), `mpris:length`, `mpris:trackid` (добавлено), `Seeked`, `CanSeek`,
