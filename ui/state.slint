@@ -378,8 +378,10 @@ export global App {
     in property <bool> motion: true;
     // Статус «Слушает» в профиле Discord и что с ним сейчас.
     in property <bool> discord-on;
+    // Есть ли в этой ОС статус Discord; на macOS его нет, и пункт настроек скрыт.
+    in property <bool> discord-supported: true;
     in property <string> discord-status;
-    // Запуск вместе с Windows (сразу в трее).
+    // Запуск при старте системы (сразу в трее или в меню-баре).
     in property <bool> autostart;
 
     // Вход по коду устройства.

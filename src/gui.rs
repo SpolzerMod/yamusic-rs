@@ -1117,6 +1117,7 @@ fn finish_reveal(weak: slint::Weak<AppWindow>, first: bool, tries: u32) {
     if first {
         apply_ui_scale(&ui);
         win::round_corners(h);
+        #[cfg(windows)]
         let _ = std::fs::write(crate::config::dir().join("hwnd"), h.to_string());
         win::set_icon(h);
     }
@@ -1129,6 +1130,8 @@ fn hwnd(ui: &AppWindow) -> isize {
     ui.window()
         .with_winit_window(|w| match w.window_handle().map(|h| h.as_raw()) {
             Ok(RawWindowHandle::Win32(h)) => h.hwnd.get(),
+            #[cfg(target_os = "macos")]
+            Ok(RawWindowHandle::AppKit(h)) => h.ns_view.as_ptr() as isize,
             _ => 0,
         })
         .unwrap_or(0)
@@ -1416,7 +1419,11 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         player.clone(),
         crate::discord::DiscordCfg { enabled: cfg.discord_enabled, app_id: cfg.discord_app_id.clone() },
     );
+    #[cfg(target_os = "macos")]
+    crate::tray::now_playing(player.clone());
     app.set_discord_on(cfg.discord_enabled);
+    #[cfg(target_os = "macos")]
+    app.set_discord_supported(false);
     app.set_autostart(win::autostart_enabled());
     app.set_download_dir(music_dir(&cfg).display().to_string().into());
     let ctx = Rc::new(Ctx {
@@ -1960,6 +1967,7 @@ fn card_from_playlist(p: &Playlist) -> Card {
 }
 
 /// Скопировать текст в буфер обмена Windows.
+#[cfg(windows)]
 fn copy_text(text: &str) {
     use std::io::Write as _;
     use std::os::windows::process::CommandExt;
@@ -1968,6 +1976,18 @@ fn copy_text(text: &str) {
         .stdin(std::process::Stdio::piped())
         .spawn()
     {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        let _ = child.wait();
+    }
+}
+
+/// Скопировать текст в буфер обмена macOS.
+#[cfg(target_os = "macos")]
+fn copy_text(text: &str) {
+    use std::io::Write as _;
+    if let Ok(mut child) = std::process::Command::new("pbcopy").stdin(std::process::Stdio::piped()).spawn() {
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(text.as_bytes());
         }
@@ -3494,7 +3514,7 @@ fn music_dir(cfg: &Config) -> std::path::PathBuf {
     if !cfg.download_dir.is_empty() {
         return cfg.download_dir.clone().into();
     }
-    std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into())).join("Music").join("Яндекс Музыка")
+    std::path::PathBuf::from(std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).unwrap_or_else(|_| ".".into())).join("Music").join("Яндекс Музыка")
 }
 
 /// Расширение по первым байтам: mp3, AAC (ADTS), MP4 или FLAC.

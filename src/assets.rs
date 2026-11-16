@@ -14,9 +14,25 @@ pub struct Asar {
     index: serde_json::Value,
 }
 
+#[cfg(windows)]
 pub fn asar_path() -> PathBuf {
     let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
     PathBuf::from(local).join("Programs").join("YandexMusic").join("resources").join("app.asar")
+}
+
+/// На macOS официальное приложение — «Yandex Music.app» (или «Яндекс Музыка.app») в /Applications
+/// либо ~/Applications; точное имя бывает разным, поэтому его ищем по названию.
+#[cfg(target_os = "macos")]
+pub fn asar_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let found = ["/Applications".to_string(), format!("{home}/Applications")].into_iter().find_map(|dir| {
+        std::fs::read_dir(dir).ok()?.filter_map(|e| e.ok()).find_map(|e| {
+            let name = e.file_name().to_string_lossy().to_lowercase();
+            let ours = name.ends_with(".app") && (name.starts_with("yandex") || name.starts_with("яндекс")) && (name.contains("music") || name.contains("музык"));
+            ours.then(|| e.path().join("Contents/Resources/app.asar")).filter(|p| p.exists())
+        })
+    });
+    found.unwrap_or_default()
 }
 
 impl Asar {

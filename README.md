@@ -105,7 +105,7 @@
 и файл можно заменить вручную.
 
 **Удаление.**
-1. Выключите в настройках «Запускать вместе с Windows», если включали.
+1. Выключите в настройках «Запускать при старте системы», если включали.
 2. Удалите `yamusic-rs.exe`.
 3. Удалите папку `%APPDATA%\yamusic-rs` с настройками, входом и кэшем.
 
@@ -120,7 +120,7 @@
 | Windows на ARM | Должна запускаться через эмуляцию x64. Не проверялась. |
 | Windows 7 и 8.1 | Не поддерживаются: текущий Rust под них не собирает. |
 | **Linux** | В планах. Сборки AppImage будут выходить пре-релизами, тестировать будем вместе с пользователями. |
-| macOS | Пока не планируется. |
+| **macOS** 11+ | Сборка `yamusic-rs-macos-universal.zip` в релизе, один `.app` для Apple Silicon и Intel. Приложение не подписано у Apple: при первом запуске macOS его заблокирует, разрешите запуск в «Системные настройки → Конфиденциальность и безопасность → Всё равно открыть». Токен хранится в Связке ключей. Обновляется вручную, статуса в Discord нет. |
 
 **Нужно ещё:**
 - аккаунт Яндекса. Без Плюса сервер отдаёт только 30-секундные отрывки;
@@ -252,6 +252,9 @@ cargo build --release
 Готовый файл: `target\release\yamusic-rs.exe`. Первая сборка занимает 5–10 минут, в основном
 из-за Skia и LTO.
 
+На macOS нужны Xcode Command Line Tools (`xcode-select --install`). `tools/bundle_macos.sh` собирает
+`target/release/bundle/Яндекс Музыка RS.app`, с ключом `--universal` — сразу для Apple Silicon и Intel.
+
 Если `skia-bindings` не может скачать готовые бинарники Skia (корпоративный прокси, ошибка curl),
 скачайте архив для своей платформы с [rust-skia/skia-binaries](https://github.com/rust-skia/skia-binaries/releases)
 и укажите путь в переменной окружения:
@@ -334,7 +337,8 @@ uses about 65 MB in one process.
   and run it; there is no installer. Sign in with the code shown at [ya.ru/device](https://ya.ru/device).
   The app updates itself from GitHub releases.
 - **Requirements:** Windows 11 (Windows 10 should work but is not tested regularly), a Yandex account,
-  and Yandex Plus for full-length tracks. Linux builds are planned; macOS is not.
+  and Yandex Plus for full-length tracks. A universal macOS build (Apple Silicon and Intel) is in the
+  releases; Linux builds are planned.
 - **Privacy:** the token is encrypted with Windows DPAPI and only sent over HTTPS to `yandex.ru` /
   `yandex.net`. Besides Yandex, the app only talks to `api.github.com` (update checks) and the local
   Discord client (optional status). There is no telemetry.

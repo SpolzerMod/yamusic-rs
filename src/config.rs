@@ -68,13 +68,18 @@ impl Default for Config {
     }
 }
 
-/// %APPDATA%\yamusic-rs. Папка прежнего названия (yamusic-lite, ещё раньше yawave) переносится
-/// молча, вместе с токеном и настройками. Если её держит запущенная старая версия, этот запуск
-/// работает со старой папкой, а перенос повторится в следующий раз.
+/// %APPDATA%\yamusic-rs (на macOS ~/Library/Application Support/yamusic-rs). Папка прежнего
+/// названия (yamusic-lite, ещё раньше yawave) переносится молча, вместе с токеном и настройками.
+/// Если её держит запущенная старая версия, этот запуск работает со старой папкой, а перенос
+/// повторится в следующий раз.
 pub fn dir() -> PathBuf {
     static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
+        #[cfg(windows)]
         let base = PathBuf::from(std::env::var("APPDATA").unwrap_or_else(|_| ".".into()));
+        // На macOS — ~/Library/Application Support.
+        #[cfg(target_os = "macos")]
+        let base = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join("Library").join("Application Support");
         let dir = base.join("yamusic-rs");
         if !dir.exists() {
             if let Some(old) = ["yamusic-lite", "yawave"].iter().map(|n| base.join(n)).find(|p| p.exists()) {
@@ -112,10 +117,20 @@ impl Config {
     pub fn save(&self) {
         let _ = std::fs::create_dir_all(dir());
         let mut disk = self.clone();
-        disk.token_sealed = self.token.as_deref().and_then(crate::secret::seal);
-        disk.refresh_sealed = self.refresh_token.as_deref().and_then(crate::secret::seal);
-        // Без DPAPI (не Windows) — открытым текстом, как раньше.
-        disk.token_plain = if disk.token_sealed.is_none() { self.token.clone() } else { None };
+        disk.token_sealed = self.token.as_deref().and_then(|t| crate::secret::seal("token", t));
+        disk.refresh_sealed = self.refresh_token.as_deref().and_then(|t| crate::secret::seal("refresh", t));
+        // Вышли из аккаунта — запись в связке ключей (macOS) больше не нужна.
+        if self.token.is_none() {
+            crate::secret::forget("token");
+        }
+        if self.refresh_token.is_none() {
+            crate::secret::forget("refresh");
+        }
+        // Не вышло зашифровать — токен на диск не пишем совсем: при следующем запуске войти заново.
+        disk.token_plain = None;
+        if self.token.is_some() && disk.token_sealed.is_none() {
+            log("токен не удалось зашифровать — он не сохранён, при следующем запуске нужно войти заново");
+        }
         if let Ok(s) = serde_json::to_string_pretty(&disk) {
             let path = dir().join("config.json");
             let tmp = dir().join("config.json.tmp");

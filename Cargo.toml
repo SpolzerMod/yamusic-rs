@@ -21,7 +21,7 @@ base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 miniz_oxide = "0.8"
 
-[dependencies.windows-sys]
+[target.'cfg(windows)'.dependencies.windows-sys]
 version = "0.59"
 features = [
   "Win32_Foundation",
@@ -41,6 +41,14 @@ features = [
   "Win32_UI_Shell_Common",
   "Win32_System_Com",
 ]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSAppearance", "NSOpenPanel", "NSPanel", "NSResponder", "NSRunningApplication", "NSScreen", "NSSavePanel", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSAppleEventDescriptor", "NSAppleEventManager", "NSArray", "NSGeometry", "NSObject", "NSString", "NSURL"] }
+tray-icon = { version = "0.26", default-features = false }
+souvlaki = { version = "0.9", default-features = false }
+security-framework = "3"
 
 [build-dependencies]
 slint-build = "1.18"

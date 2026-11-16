@@ -363,7 +363,7 @@ export component SettingsPage inherits Rectangle {
                 on: App.less-ai;
                 clicked => { App.setting("less-ai"); }
             }
-            SettingItem {
+            if App.discord-supported: SettingItem {
                 title: T.t("Статус в Discord");
                 desc: App.discord-on && App.discord-status != "" ? App.discord-status : T.t("Показывать в профиле Discord, что вы слушаете");
                 toggle: true;
@@ -371,8 +371,8 @@ export component SettingsPage inherits Rectangle {
                 clicked => { App.setting("discord"); }
             }
             SettingItem {
-                title: T.t("Запускать вместе с Windows");
-                desc: T.t("Приложение откроется в трее, без окна");
+                title: T.t("Запускать при старте системы");
+                desc: T.t("Приложение запустится свёрнутым, без окна");
                 toggle: true;
                 on: App.autostart;
                 clicked => { App.setting("autostart"); }

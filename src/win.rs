@@ -182,6 +182,10 @@ pub fn work_area(hwnd: isize) -> (i32, i32, i32, i32) {
 }
 
 pub fn open_url(url: &str) {
+    if !crate::client::is_https(url) {
+        crate::config::log(format!("ссылка не открыта, не https: {}", url.split(':').next().unwrap_or("")));
+        return;
+    }
     let op = wide("open");
     let u = wide(url);
     unsafe {

@@ -49,9 +49,24 @@ pub fn token_allowed(url: &reqwest::Url) -> bool {
     ["yandex.net", "yandex.ru"].iter().any(|d| host == *d || host.ends_with(&format!(".{d}")))
 }
 
+/// В браузер открываем только https: ссылки приходят и от сервера (баннеры, концерты), а
+/// `file:`, `ms-settings:` и прочие схемы запускают на компьютере что-то совсем другое.
+pub fn is_https(url: &str) -> bool {
+    reqwest::Url::parse(url).is_ok_and(|u| u.scheme() == "https")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_only_https() {
+        assert!(is_https("https://ya.ru/device"));
+        assert!(is_https("https://music.yandex.ru/legal/recommendations/ru/#music"));
+        for bad in ["http://ya.ru", "file:///etc/passwd", "ms-settings:privacy", "javascript:alert(1)", "httpx://ya.ru", "", "ya.ru"] {
+            assert!(!is_https(bad), "{bad}");
+        }
+    }
 
     #[test]
     fn hosts() {

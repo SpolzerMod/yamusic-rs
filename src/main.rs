@@ -14,18 +14,31 @@ mod gui;
 mod i18n;
 mod images;
 mod landing;
+#[cfg(target_os = "macos")]
+mod mac;
 mod net;
 mod palette;
 mod player;
 mod secret;
 mod tags;
+#[cfg(windows)]
 mod tray;
+#[cfg(target_os = "macos")]
+mod tray_mac;
 mod update;
+#[cfg(windows)]
 mod win;
 mod yandex_id;
 
+// На macOS те же имена, что у Windows-модулей: остальной код их не различает.
+#[cfg(target_os = "macos")]
+use mac as win;
+#[cfg(target_os = "macos")]
+use tray_mac as tray;
+
 /// Занять мьютекс единственного экземпляра. Если он уже чей-то — отпустить свою ссылку,
 /// чтобы мьютекс исчез вместе с тем процессом.
+#[cfg(windows)]
 fn claim_instance() -> bool {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
     use windows_sys::Win32::System::Threading::CreateMutexW;
@@ -37,6 +50,25 @@ fn claim_instance() -> bool {
             return false;
         }
         true
+    }
+}
+
+/// Занять блокировку единственного экземпляра: flock на файле в папке данных. Файл держится
+/// открытым, пока работает процесс, а при его завершении система снимает блокировку сама.
+#[cfg(target_os = "macos")]
+fn claim_instance() -> bool {
+    static LOCK: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
+    let _ = std::fs::create_dir_all(config::dir());
+    let Ok(f) = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(config::dir().join("instance.lock")) else {
+        return true;
+    };
+    match f.try_lock() {
+        Ok(()) => {
+            let _ = LOCK.set(f);
+            true
+        }
+        Err(std::fs::TryLockError::WouldBlock) => false,
+        Err(_) => true,
     }
 }
 
@@ -56,7 +88,10 @@ fn main() -> Result<(), slint::PlatformError> {
         if tray::wake_existing() {
             return Ok(());
         }
+        // Дескриптор окна из файла годится только на Windows: на macOS это адрес в чужом процессе.
+        #[cfg(windows)]
         let h: isize = std::fs::read_to_string(config::dir().join("hwnd")).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+        #[cfg(windows)]
         if h != 0 && win::is_window(h) {
             win::show(h);
             win::force_foreground(h);
