@@ -192,6 +192,7 @@ impl Ctx {
     fn toast(self: &Rc<Self>, msg: impl Into<String>) {
         let ui = self.ui();
         ui.global::<App>().set_toast_has_cover(false);
+        ui.global::<App>().set_toast_action(SharedString::new());
         ui.global::<App>().set_toast(crate::i18n::tr(&msg.into()).into());
         let t = Timer::default();
         let weak = self.ui.clone();
@@ -201,6 +202,32 @@ impl Ctx {
             }
         });
         self.st.borrow_mut().toast_timer = Some(t);
+    }
+
+    /// Тост с кнопкой действия (живёт дольше, чтобы успеть нажать).
+    fn toast_action(self: &Rc<Self>, msg: impl Into<String>, action: &str) {
+        let ui = self.ui();
+        ui.global::<App>().set_toast_has_cover(false);
+        ui.global::<App>().set_toast(crate::i18n::tr(&msg.into()).into());
+        ui.global::<App>().set_toast_action(action.into());
+        let t = Timer::default();
+        let weak = self.ui.clone();
+        t.start(TimerMode::SingleShot, Duration::from_secs(10), move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.global::<App>().set_toast(SharedString::new());
+                ui.global::<App>().set_toast_action(SharedString::new());
+            }
+        });
+        self.st.borrow_mut().toast_timer = Some(t);
+    }
+
+    /// Перезапуск: новый процесс ждёт освобождения single-instance
+    /// (AFTER_UPDATE), поэтому spawn до exit безопасен и на Windows, и на macOS.
+    fn restart_app(self: &Rc<Self>) {
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = crate::update::relaunch(&exe);
+        }
+        std::process::exit(0);
     }
 
     fn sync_player(self: &Rc<Self>) {
@@ -1180,6 +1207,17 @@ fn finish_reveal(weak: slint::Weak<AppWindow>, first: bool, tries: u32) {
     }
 }
 
+/// macOS: NSView окна winit для платформенных вызовов (видимость светофора).
+#[cfg(target_os = "macos")]
+fn mac_view(w: &slint::Window) -> *mut std::ffi::c_void {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    w.with_winit_window(|ww| match ww.window_handle().map(|h| h.as_raw()) {
+        Ok(RawWindowHandle::AppKit(h)) => h.ns_view.as_ptr(),
+        _ => std::ptr::null_mut(),
+    })
+    .unwrap_or(std::ptr::null_mut())
+}
+
 fn hwnd(ui: &AppWindow) -> isize {
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     ui.window()
@@ -1477,12 +1515,16 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     app.set_nav_collapsed(cfg.navbar_collapsed);
     // macOS: нативный «светофор» вместо виндовых кнопок, сдвиг навбара вниз.
     app.set_mac(cfg!(target_os = "macos"));
+    app.set_windows(cfg!(target_os = "windows"));
+    // Запас сверху под светофор Finder-inset: только macOS, иначе вёрстка как была.
+    app.set_chrome_top(if cfg!(target_os = "macos") { 24.0 } else { 0.0 });
 
     let discord = crate::discord::Discord::spawn(
         player.clone(),
         crate::discord::DiscordCfg { enabled: cfg.discord_enabled, app_id: cfg.discord_app_id.clone() },
     );
     app.set_discord_on(cfg.discord_enabled);
+    app.set_gpu(cfg.gpu);
     app.set_autostart(win::autostart_enabled());
     app.set_download_dir(music_dir(&cfg).display().to_string().into());
     let ctx = Rc::new(Ctx {
@@ -1694,6 +1736,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     app.on_play_wheel(|i| with_ctx(|c| c.play_wheel(i as usize)));
     app.on_go_back(|| with_ctx(|c| c.go_back()));
     app.on_go_forward(|| with_ctx(|c| c.go_forward()));
+    app.on_toast_action_clicked(|| with_ctx(|c| c.restart_app()));
     app.on_play_list(|i| with_ctx(|c| c.play_list(i as usize)));
     app.on_like_track(|i| {
         with_ctx(|c| {
@@ -1732,6 +1775,8 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         if !app.get_mini() {
             normal.set(Some((w.position(), w.size(), w.is_maximized())));
             app.set_mini(true);
+            #[cfg(target_os = "macos")]
+            crate::mac::set_traffic_lights_hidden(mac_view(w), true);
             app.set_maximized(false);
             w.set_maximized(false);
             // Slint обновит ограничения размера только на следующем кадре, а Windows без этого не даст ужать окно.
@@ -1748,6 +1793,8 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         } else {
             mini_pos.set(Some(w.position()));
             app.set_mini(false);
+            #[cfg(target_os = "macos")]
+            crate::mac::set_traffic_lights_hidden(mac_view(w), false);
             w.with_winit_window(|ww| ww.set_min_inner_size(Some(LogicalSize::new(960.0, 640.0))));
             match normal.take() {
                 Some((pos, size, max)) => {
@@ -2636,6 +2683,22 @@ impl Ctx {
                 st.cfg.discord_enabled = on;
                 st.cfg.save();
             }
+            "gpu" => {
+                let on = !app.get_gpu();
+                let mut st = self.st.borrow_mut();
+                st.cfg.gpu = on;
+                st.cfg.save();
+                drop(st);
+                app.set_gpu(on);
+                self.toast_action(
+                    if on {
+                        "GPU-ускорение включится после перезапуска"
+                    } else {
+                        "GPU-ускорение выключится после перезапуска"
+                    },
+                    "Перезапустить",
+                );
+            }
             "autostart" => {
                 let on = !app.get_autostart();
                 if win::set_autostart(on) {
@@ -3422,7 +3485,12 @@ impl Ctx {
                 drop(st);
                 app.set_blob(Image::default());
             }
-            _ => {}
+            // Settings/Grid и прочие: borrow обязательно отпустить до хвоста
+            // функции (там ещё один borrow_mut) — иначе RefCell panic при
+            // уходе со страницы (краш «назад из настроек»).
+            _ => {
+                drop(st);
+            }
         }
         // Ушли со страницы: не держим её блоки/поиск в кэше сети и клоны треков в состоянии.
         if let Some(net) = net {

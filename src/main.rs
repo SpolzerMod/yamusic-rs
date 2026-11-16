@@ -53,6 +53,11 @@ fn claim_instance() -> bool {
 }
 
 fn main() -> Result<(), slint::PlatformError> {
+    // В release stderr теряется: панику пишем в лог (сообщение + место),
+    // чтобы краши можно было разбирать по log.txt без crash report'ов.
+    std::panic::set_hook(Box::new(|info| {
+        config::log(format!("PANIC: {info}"));
+    }));
     // После обновления старая версия ещё закрывается: ждём её до 15 секунд.
     let after_update = std::env::args().any(|a| a == update::AFTER_UPDATE);
     let mut claimed = claim_instance();
@@ -75,10 +80,28 @@ fn main() -> Result<(), slint::PlatformError> {
         }
         return Ok(());
     }
-    // Skia без видеокарты: память не зависит от драйвера (с OpenGL или D3D окно занимает
-    // в 2–3 раза больше). Режим работы («Плавный» или «Лёгкий») меняет только анимации
-    // и кэши и переключается на лету (gui::apply_mode).
-    slint::BackendSelector::new().backend_name("winit".into()).renderer_name("skia-software".into()).select()?;
+    // Дефолт — CPU (skia-software): так задумал автор (память и совместимость
+    // не зависят от драйвера). GPU (Skia через wgpu: macOS — Metal, Windows —
+    // DX12/Vulkan) включается в настройках; замер на macOS дал CPU 25.1% → 4.3%,
+    // RSS 178 → 137 МБ, но на слабых машинах решение остаётся за пользователем.
+    // Env YAMUSIC_RENDERER перекрывает конфиг; при ошибке выбора GPU — fallback.
+    let want = std::env::var("YAMUSIC_RENDERER").unwrap_or_default();
+    let gpu_on = config::Config::load().gpu;
+    let renderer = match want.as_str() {
+        "skia-software" | "skia" | "skia-opengl" | "skia-wgpu" => want.clone(),
+        _ => if gpu_on { "skia-wgpu".to_string() } else { "skia-software".to_string() },
+    };
+    config::log(format!("renderer: {renderer}"));
+    let selected = slint::BackendSelector::new()
+        .backend_name("winit".into())
+        .renderer_name(renderer.clone())
+        .select();
+    if selected.is_err() && renderer != "skia-software" {
+        config::log(format!("renderer {renderer} недоступен, fallback на skia-software"));
+        slint::BackendSelector::new().backend_name("winit".into()).renderer_name("skia-software".into()).select()?;
+    } else {
+        selected?;
+    }
     update::cleanup();
     win::refresh_autostart();
     // На macOS трея нет: --tray игнорируем, иначе окно спрячется без возможности вернуть.

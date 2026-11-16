@@ -136,9 +136,19 @@ export global App {
     in property <bool> maximized;
     // macOS: нативный «светофор» вместо виндовых кнопок окна (src/mac.rs).
     in property <bool> mac;
+    // Windows-only опции (автозапуск в трее): на macOS/Linux скрываем.
+    in property <bool> windows;
+    // GPU-рендер интерфейса: opt-in в настройках, применится после перезапуска.
+    in property <bool> gpu;
+    // macOS: запас сверху под светофор с Finder-inset (кнопки y19–33); страницы
+    // сдвинуты на эту величину, градиенты шапок растянуты вверх. Иначе 0.
+    in property <length> chrome-top;
     in property <string> toast;
     in property <image> toast-cover;
     in property <bool> toast-has-cover;
+    // Кнопка действия в тосте (например «Перезапустить» после смены рендера).
+    in property <string> toast-action;
+    callback toast-action-clicked();
     // Новая версия на GitHub (src/update.rs): пусто — обновлений нет.
     in property <string> update-version;
     // Установщик скачивается.
