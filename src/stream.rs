@@ -15,6 +15,9 @@ use std::sync::{Arc, Mutex};
 
 /// Размер куска: хватает на несколько секунд звука, качается быстро.
 const CHUNK: u64 = 256 * 1024;
+/// Кусок предзагрузки для перемотки — вдвое меньше CHUNK: холодная перемотка
+/// ждёт меньше сети, а дальше обычный префетч (AHEAD) продолжает докачку.
+const PRIME: u64 = 128 * 1024;
 /// За сколько до конца куска начинаем качать следующий (~2.7 с звука при 192 кбит/с).
 const AHEAD: u64 = 64 * 1024;
 
@@ -72,7 +75,7 @@ impl Shared {
                 return Ok(());
             }
         }
-        let end = (start + CHUNK - 1).min(self.len - 1);
+        let end = (start + PRIME - 1).min(self.len - 1);
         let bytes = fetch_range(&self.client, &self.url, start, end)?;
         *self.primed.lock().unwrap() = Some(Chunk { start, bytes });
         Ok(())

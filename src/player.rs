@@ -632,6 +632,11 @@ impl Engine {
                     return;
                 }
                 let pos = sec.max(0.0);
+                // UI показывает цель сразу, не дожидаясь докачки и фейда:
+                // иначе ползунок отскакивает к старой позиции и прыгает.
+                // После применения seek sync() подтвердит её из get_pos().
+                self.sh().position = pos;
+                (self.notify)();
                 if let Some(shared) = self.current_shared.clone() {
                     let dur = self.sh().duration;
                     let len = shared.len;
