@@ -9,6 +9,7 @@ use crate::stream::HttpStream;
 // rodio 0.22: Sink переименован в Player, OutputStream — в MixerDeviceSink.
 use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player as Sink};
 use std::collections::{HashSet, VecDeque};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -132,6 +133,8 @@ pub struct Player {
     shared: Arc<Mutex<Shared>>,
     likes: Likes,
     pub eq: Arc<EqParams>,
+    /// Цель последнего запроса перемотки: движок отбрасывает устаревшие запросы.
+    latest_seek: Arc<AtomicU32>,
 }
 
 impl Player {
@@ -140,15 +143,19 @@ impl Player {
         let shared = Arc::new(Mutex::new(Shared { volume: 0.6, ..Default::default() }));
         let likes: Likes = Default::default();
         let eq: Arc<EqParams> = Default::default();
-        let p = Player { tx: tx.clone(), shared: shared.clone(), likes: likes.clone(), eq: eq.clone() };
+        let latest_seek = Arc::new(AtomicU32::new(0));
+        let p = Player { tx: tx.clone(), shared: shared.clone(), likes: likes.clone(), eq: eq.clone(), latest_seek: latest_seek.clone() };
         thread::Builder::new()
             .name("audio".into())
-            .spawn(move || Engine::new(tx, shared, likes, notify, eq).run(rx))
+            .spawn(move || Engine::new(tx, shared, likes, notify, eq, latest_seek).run(rx))
             .expect("audio thread");
         p
     }
 
     pub fn send(&self, c: Cmd) {
+        if let Cmd::Seek(s) = c {
+            self.latest_seek.store(s.max(0.0).to_bits(), Ordering::Relaxed);
+        }
         let _ = self.tx.send(Msg::Cmd(c));
     }
 
@@ -198,6 +205,11 @@ struct Engine {
     audio: Option<(MixerDeviceSink, Sink)>,
     /// Состояние микро-фейда на стыке перемотки (общее с аудиопотоком).
     fade: Arc<FadeState>,
+    /// Цель последнего запроса перемотки (общее с обёрткой Player).
+    latest_seek: Arc<AtomicU32>,
+    /// Цель перемотки, ещё не применённой к звуку: sync() держит её в UI,
+    /// чтобы ползунок не отскакивал к старой позиции и к целям очереди seek'ов.
+    seek_pending: Option<f32>,
     api: Option<Api>,
     uid: String,
     source: Source,
@@ -233,7 +245,7 @@ struct Engine {
 }
 
 impl Engine {
-    fn new(tx: Sender<Msg>, shared: Arc<Mutex<Shared>>, likes: Likes, notify: Notify, eq: Arc<EqParams>) -> Self {
+    fn new(tx: Sender<Msg>, shared: Arc<Mutex<Shared>>, likes: Likes, notify: Notify, eq: Arc<EqParams>, latest_seek: Arc<AtomicU32>) -> Self {
         // Фидбек и лайки — по порядку в отдельном потоке, чтобы не блокировать плеер.
         let (bg, bg_rx) = mpsc::channel::<Job>();
         thread::Builder::new()
@@ -271,6 +283,8 @@ impl Engine {
             gen: 0,
             current_shared: None,
             fade: FadeState::new(),
+            latest_seek,
+            seek_pending: None,
             loaded: false,
             paused: true,
             volume: 0.6,
@@ -392,6 +406,7 @@ impl Engine {
             s.clear();
         }
         self.loaded = false;
+        self.seek_pending = None;
     }
 
     fn clear_queue(&mut self) {
@@ -430,7 +445,10 @@ impl Engine {
     /// Состояние движка → Shared для UI.
     fn sync(&mut self) {
         let playing = self.loaded && !self.paused && self.sink().map(|s| !s.is_paused()).unwrap_or(false);
-        let pos = if self.loaded { self.pos() } else { 0.0 };
+        let pos = match self.seek_pending {
+            Some(p) => p,
+            None => if self.loaded { self.pos() } else { 0.0 },
+        };
         let upcoming: Vec<Track> = self.queue.iter().take(30).cloned().collect();
         let mut s = self.shared.lock().unwrap();
         s.playing = playing;
@@ -479,6 +497,7 @@ impl Engine {
         }
         self.gen += 1;
         self.loaded = false;
+        self.seek_pending = None;
         {
             let mut s = self.sh();
             s.position = 0.0;
@@ -632,11 +651,16 @@ impl Engine {
                     return;
                 }
                 let pos = sec.max(0.0);
-                // UI показывает цель сразу, не дожидаясь докачки и фейда:
-                // иначе ползунок отскакивает к старой позиции и прыгает.
-                // После применения seek sync() подтвердит её из get_pos().
+                // UI показывает цель сразу и держит её в sync(), пока seek не
+                // применён: иначе ползунок отскакивает к старой позиции, а при
+                // частых кликах — к целям очереди перемоток.
+                self.seek_pending = Some(pos);
                 self.sh().position = pos;
                 (self.notify)();
+                // В очереди уже более новая перемотка — не дёргаем звук к устаревшей цели.
+                if self.latest_seek.load(Ordering::Relaxed) != pos.to_bits() {
+                    return;
+                }
                 if let Some(shared) = self.current_shared.clone() {
                     let dur = self.sh().duration;
                     let len = shared.len;
@@ -669,6 +693,7 @@ impl Engine {
                 if fade.is_held() {
                     fade.reset();
                 }
+                self.seek_pending = None;
             }
             Cmd::Volume(v) => {
                 self.volume = v.clamp(0.0, 1.0);
@@ -992,6 +1017,7 @@ impl Engine {
         self.gen += 1;
         self.loaded = false;
         self.current_url = None;
+        self.seek_pending = None;
         let Some(t) = self.current.clone() else { return };
         {
             let mut s = self.sh();
@@ -1065,6 +1091,7 @@ impl Engine {
             }
         };
         self.fade.reset();
+        self.seek_pending = None;
         let src = SeekFade::new(Eq::new(src, self.eq.clone()), self.fade.clone());
         let vol = self.volume * self.volume;
         let paused = self.paused;
