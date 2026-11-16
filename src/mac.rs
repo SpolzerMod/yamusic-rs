@@ -17,9 +17,9 @@ use std::time::{Duration, Instant};
 type Id = *mut c_void;
 type Sel = *mut c_void;
 
-/// Наблюдатель окна (создаётся в init_window_observers) — цель отложенных
-/// performSelector для постановки «светофора».
+/// Наблюдатель окна (init_window_observers) — цель отложенных performSelector.
 static OBSERVER: std::sync::atomic::AtomicPtr<c_void> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
 
 extern "C" {
     fn objc_getClass(name: *const c_char) -> Id;
@@ -286,18 +286,19 @@ pub fn now_playing(track: Option<&Track>, playing: bool, position: f32, duration
 
 // ---------- нативные кнопки окна ----------
 
-/// Желаемый NSWindowStyleMask: Titled(1) | Closable(2) | Miniaturizable(4) |
-/// Resizable(8) | FullSizeContentView(1 << 15).
-const WINDOW_STYLE: c_ulong = 1 | 2 | 4 | 8 | (1 << 15);
-
 /// Вернуть окну нативный вид: «светофор», прозрачный тайтлбар на всю высоту
-/// (как `titleBarStyle: hiddenInset` у Electron-оригинала) и скруглённые углы ~10pt.
+/// (как `titleBarStyle: hiddenInset` у Electron-оригинала) и скруглённые углы.
+/// Маску не форсируем: ею владеет winit (Slint no-frame:false → decorations:true),
+/// добавляем только бит FullSizeContentView — winit set_decorations early-return'ится
+/// при неизменном флаге и наш бит не стирает; fullscreen save/restore маски winit
+/// делает сам и сохраняет бит. Форс полной маски вызывал цикл сбросов с winit.
 unsafe fn restyle_window(win: Id) {
     if win.is_null() {
         return;
     }
-    // macOS сбрасывает styleMask при выходе из полноэкранного режима — ставим всегда.
-    msg_set_ulong(win, "setStyleMask:", WINDOW_STYLE);
+    let gm: unsafe extern "C" fn(Id, Sel) -> c_ulong = std::mem::transmute(objc_msgSend as unsafe extern "C" fn() as usize);
+    let mask = gm(win, sel_registerName(c("styleMask").as_ptr()));
+    msg_set_ulong(win, "setStyleMask:", mask | (1 << 15));
     msg_set_bool(win, "setTitlebarAppearsTransparent:", true);
     msg_set_long(win, "setTitleVisibility:", 1); // NSWindowTitleHidden
     // Сервер скругляет стандартные окна сам, но окно winit создаётся borderless,
@@ -311,59 +312,52 @@ unsafe fn restyle_window(win: Id) {
 }
 
 /// Центры «светофора» как у Finder macOS 26 (pt от левого верхнего угла окна):
-/// замер захватом — (26,26), (49,26), (72,26). Дефолт AppKit (~14,16) с радиусом
-/// 24pt выглядит зажатым в углу, поэтому переставляем кнопки вручную.
+/// замер захватом — (26,26), (49,26), (72,26). Дефолт AppKit (~16,16) с радиусом
+/// 24pt выглядит зажатым в углу. Позиции ставим как Electron/tao:
+/// standardWindowButton setFrameOrigin:, повторно после выхода из fullscreen.
 const LIGHT_CENTERS: [(f64, f64); 3] = [(26.0, 26.0), (49.0, 26.0), (72.0, 26.0)];
+
+/// NSPoint: два CGFloat — для convertPoint:fromView:.
+#[repr(C)]
+struct NsPoint {
+    x: f64,
+    y: f64,
+}
 
 unsafe fn place_traffic_lights(win: Id) {
     if win.is_null() || !msg_responds(win, sel_registerName(c("standardWindowButton:").as_ptr())) {
         return;
     }
+    let wf = ns_rect(win, "frame");
+    let get: unsafe extern "C" fn(Id, Sel, c_long) -> Id = std::mem::transmute(objc_msgSend as unsafe extern "C" fn() as usize);
+    let cp: unsafe extern "C" fn(Id, Sel, f64, f64, Id) -> NsPoint = std::mem::transmute(objc_msgSend as unsafe extern "C" fn() as usize);
+    let set: unsafe extern "C" fn(Id, Sel, f64, f64) = std::mem::transmute(objc_msgSend as unsafe extern "C" fn() as usize);
+    let sh: unsafe extern "C" fn(Id, Sel, bool) = std::mem::transmute(objc_msgSend as unsafe extern "C" fn() as usize);
+    let sa: unsafe extern "C" fn(Id, Sel, f64) = std::mem::transmute(objc_msgSend as unsafe extern "C" fn() as usize);
     for (idx, (cx, cy)) in LIGHT_CENTERS.iter().enumerate() {
         // NSWindowCloseButton = 0, NSWindowMiniaturizeButton = 1, NSWindowZoomButton = 2.
-        let get: unsafe extern "C" fn(Id, Sel, c_long) -> Id = std::mem::transmute(objc_msgSend as unsafe extern "C" fn() as usize);
         let btn = get(win, sel_registerName(c("standardWindowButton:").as_ptr()), idx as c_long);
         if btn.is_null() {
-            // Кнопки ещё не созданы AppKit — повторим попытку позже (с лимитом).
-            static RETRIES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            if RETRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 100 {
-                schedule_place_lights(win, 0.1);
-            }
+            // Кнопки ещё не созданы AppKit — повторим отложенно (placeLights:).
             return;
         }
         let sup = msg0(btn, "superview");
         if sup.is_null() {
             continue;
         }
+        // После fullscreen-анимаций AppKit может оставить кнопки с alpha=0.
+        sh(btn, sel_registerName(c("setHidden:").as_ptr()), false);
+        sa(btn, sel_registerName(c("setAlphaValue:").as_ptr()), 1.0);
         let bf = ns_rect(btn, "frame");
-        let sf = ns_rect(sup, "frame");
-        // Контейнер тайтлбара не flipped, но его родитель (theme frame) flipped:
-        // верх контейнера совпадает с верхом окна, y кнопки — от низа контейнера.
-        let x = cx - bf.w / 2.0;
-        let y = sf.h - cy - bf.h / 2.0;
-        let set: unsafe extern "C" fn(Id, Sel, f64, f64) = std::mem::transmute(objc_msgSend as unsafe extern "C" fn() as usize);
-        set(btn, sel_registerName(c("setFrameOrigin:").as_ptr()), x, y);
+        // Желаемый центр в координатах окна (низ-лево) → координаты superview:
+        // не зависит от flip/позиции контейнера тайтлбара.
+        let p = cp(sup, sel_registerName(c("convertPoint:fromView:").as_ptr()), *cx, wf.h - cy, std::ptr::null_mut());
+        let x = p.x - bf.w / 2.0;
+        let y = p.y - bf.h / 2.0;
+        if (bf.x - x).abs() > 0.01 || (bf.y - y).abs() > 0.01 {
+            set(btn, sel_registerName(c("setFrameOrigin:").as_ptr()), x, y);
+        }
     }
-}
-
-/// Отложенная постановка «светофора» на main run loop: AppKit раскладывает кнопки
-/// в своём лейауте (создание кнопок, resize, becomeKey), наша постановка — после.
-/// Два таймера: default mode (покой) и event tracking mode (live resize крутит
-/// run loop в tracking mode, где default-таймеры не срабатывают). Псевдо-mode
-/// NSRunLoopCommonModes у performSelector:inModes: empirically не срабатывает.
-unsafe fn schedule_place_lights(win: Id, delay: f64) {
-    let observer = OBSERVER.load(std::sync::atomic::Ordering::Relaxed);
-    if observer.is_null() {
-        return;
-    }
-    let sel = sel_registerName(c("placeLights:").as_ptr());
-    let p0: unsafe extern "C" fn(Id, Sel, Sel, Id, f64) = std::mem::transmute(objc_msgSend as unsafe extern "C" fn() as usize);
-    p0(observer, sel_registerName(c("performSelector:withObject:afterDelay:").as_ptr()), sel, win, delay);
-    let mode = msg_string(objc_getClass(c("NSString").as_ptr()), "NSEventTrackingRunLoopMode");
-    let mkarr: unsafe extern "C" fn(Id, Sel, Id) -> Id = std::mem::transmute(objc_msgSend as unsafe extern "C" fn() as usize);
-    let modes = mkarr(objc_getClass(c("NSArray").as_ptr()), sel_registerName(c("arrayWithObject:").as_ptr()), mode);
-    let p1: unsafe extern "C" fn(Id, Sel, Sel, Id, f64, Id) = std::mem::transmute(objc_msgSend as unsafe extern "C" fn() as usize);
-    p1(observer, sel_registerName(c("performSelector:withObject:afterDelay:inModes:").as_ptr()), sel, win, delay, modes);
 }
 
 /// Первичная стилизация окна. `ns_view` — NSView окна winit; вызывать из главного
@@ -372,11 +366,33 @@ pub fn native_window_buttons(ns_view: Id) {
     unsafe {
         let win = msg0(ns_view, "window");
         restyle_window(win);
+        // AppKit может дорасложить кнопки после нашего вызова — контрольная
+        // постановка inset'а следующим оборотом run loop.
+        schedule_place_lights(win, 0.15);
     }
 }
 
-/// После выхода из полноэкранного режима macOS сбрасывает styleMask и «светофор»
-/// пропадает — ловим уведомление и возращаем нативный вид. Вызывать один раз.
+/// Отложенная постановка inset'а кнопок (main run loop, default mode).
+unsafe fn schedule_place_lights(win: Id, delay: f64) {
+    let observer = OBSERVER.load(std::sync::atomic::Ordering::Relaxed);
+    if observer.is_null() {
+        return;
+    }
+    let p: unsafe extern "C" fn(Id, Sel, Sel, Id, f64) = std::mem::transmute(objc_msgSend as unsafe extern "C" fn() as usize);
+    p(
+        observer,
+        sel_registerName(c("performSelector:withObject:afterDelay:").as_ptr()),
+        sel_registerName(c("placeLights:").as_ptr()),
+        win,
+        delay,
+    );
+}
+
+/// После выхода из полноэкранного режима macOS/winit сбрасывают styleMask и
+/// «светофор» пропадает — ловим уведомление и возвращаем нативный вид.
+/// Вызывать один раз. Restyle только здесь и при init: на resize/becomeKey
+/// нельзя — setStyleMask провоцирует winit переставить свою borderless-маску,
+/// и возникает цикл сбросов, в котором кнопки исчезают.
 pub fn init_window_observers() {
     unsafe {
         let cls = objc_allocateClassPair(objc_getClass(c("NSObject").as_ptr()), c("YamusicWindowObserver").as_ptr(), 0);
@@ -387,16 +403,16 @@ pub fn init_window_observers() {
             class_addMethod(cls, sel_registerName(c(name).as_ptr()), imp as *const c_void, c("v@:@").as_ptr());
         };
         add("windowDidExitFullScreen:", on_exit_fullscreen);
+        add("windowDidResize:", on_window_resize);
         add("restyleNow:", on_restyle_now);
         add("placeLights:", on_place_lights);
-        add("windowDidResize:", on_window_resize);
-        add("windowBecomeKey:", on_window_become_key);
         objc_registerClassPair(cls);
         let observer = msg0(msg0(cls, "alloc"), "init");
         let center = msg0(objc_getClass(c("NSNotificationCenter").as_ptr()), "defaultCenter");
         if observer.is_null() || center.is_null() {
             return;
         }
+        OBSERVER.store(observer, std::sync::atomic::Ordering::Relaxed);
         let name = msg_string(objc_getClass(c("NSString").as_ptr()), "NSWindowDidExitFullScreenNotification");
         // addObserver:selector:name:object: — object nil, то есть все окна приложения.
         let f: unsafe extern "C" fn(Id, Sel, Id, Sel, Id, Id) = std::mem::transmute(objc_msgSend as unsafe extern "C" fn() as usize);
@@ -408,7 +424,8 @@ pub fn init_window_observers() {
             name,
             std::ptr::null_mut(),
         );
-        // AppKit перекладывает «светофор» при лейауте/resize/becomeKey — возвращаем наши отступы.
+        // Live resize: AppKit временно ставит кнопки в дефолт — возвращаем inset
+        // синхронно. Только frame кнопок: маску не трогаем (её владелец winit).
         let rname = msg_string(objc_getClass(c("NSString").as_ptr()), "NSWindowDidResizeNotification");
         f(
             center,
@@ -418,78 +435,50 @@ pub fn init_window_observers() {
             rname,
             std::ptr::null_mut(),
         );
-        let kname = msg_string(objc_getClass(c("NSString").as_ptr()), "NSWindowDidBecomeKeyNotification");
-        f(
-            center,
-            sel_registerName(c("addObserver:selector:name:object:").as_ptr()),
-            observer,
-            sel_registerName(c("windowBecomeKey:").as_ptr()),
-            kname,
-            std::ptr::null_mut(),
-        );
-        OBSERVER.store(observer, std::sync::atomic::Ordering::Relaxed);
-        // Первичная постановка после лейаута окна: сразу и с задержкой (AppKit
-        // дораскладывает кнопки уже после нашего вызова).
-        let app = msg0(objc_getClass(c("NSApplication").as_ptr()), "sharedApplication");
-        let wins = msg0(app, "windows");
-        let win = if wins.is_null() { std::ptr::null_mut() } else { msg0(wins, "firstObject") };
-        if !win.is_null() {
-            place_traffic_lights(win);
-            schedule_place_lights(win, 0.15);
-        }
-    }
-}
-
-extern "C" fn on_place_lights(_self: Id, _sel: Sel, win: Id) {
-    unsafe {
-        place_traffic_lights(win);
-    }
-}
-
-/// Resize-уведомление приходит после того, как AppKit переложил кнопки в этом
-/// же обороте, поэтому ставим синхронно: иначе на каждом mouse-move события
-/// live resize кнопки мигали бы дефолтным углом до срабатывания таймера.
-/// Частота resize-событий — естественный троттл постановки.
-extern "C" fn on_window_resize(_self: Id, _sel: Sel, note: Id) {
-    unsafe {
-        let win = msg0(note, "object");
-        if !win.is_null() {
-            place_traffic_lights(win);
-        }
-    }
-}
-
-/// becomeKey-уведомление приносит NSNotification; лейаут кнопок может пройти
-/// позже уведомления, поэтому здесь отложенная постановка (default + tracking).
-extern "C" fn on_window_become_key(_self: Id, _sel: Sel, note: Id) {
-    unsafe {
-        let win = msg0(note, "object");
-        if !win.is_null() {
-            schedule_place_lights(win, 0.05);
-        }
     }
 }
 
 extern "C" fn on_exit_fullscreen(_self: Id, _sel: Sel, note: Id) {
     unsafe {
         let win = msg0(note, "object");
-        // Перестилизуем не сразу, а через 0.12 с: winit тем же уведомлением/делегатом
-        // успевает сбросить styleMask, и наш `setStyleMask` должен идти последним.
-        // performSelector:withObject:afterDelay: выполняется на main-очереди — можно.
+        // После анимации выхода (~0.5 с): AppKit сбрасывает frame кнопок в
+        // своём лейауте во время перехода, наша постановка — после него.
         let f: unsafe extern "C" fn(Id, Sel, Sel, Id, f64) = std::mem::transmute(objc_msgSend as unsafe extern "C" fn() as usize);
         f(
             _self,
             sel_registerName(c("performSelector:withObject:afterDelay:").as_ptr()),
             sel_registerName(c("restyleNow:").as_ptr()),
             win,
-            0.12,
+            0.6,
         );
     }
 }
 
 extern "C" fn on_restyle_now(_self: Id, _sel: Sel, win: Id) {
     unsafe {
+        crate::config::log("window: restyle after fullscreen exit");
         restyle_window(win);
+    }
+}
+
+/// Live resize: возвращаем inset кнопок синхронно (AppKit на время drag'а
+/// ставит их в дефолт). Маску/геометрию контейнера не трогаем.
+extern "C" fn on_window_resize(_self: Id, _sel: Sel, note: Id) {
+    unsafe {
+        place_traffic_lights(msg0(note, "object"));
+    }
+}
+
+/// Контрольная постановка inset'а; если кнопки ещё не созданы — повтор с лимитом.
+extern "C" fn on_place_lights(_self: Id, _sel: Sel, win: Id) {
+    unsafe {
+        place_traffic_lights(win);
+        let get: unsafe extern "C" fn(Id, Sel, c_long) -> Id = std::mem::transmute(objc_msgSend as unsafe extern "C" fn() as usize);
+        let b0 = get(win, sel_registerName(c("standardWindowButton:").as_ptr()), 0);
+        static TRIES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if b0.is_null() && TRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 20 {
+            schedule_place_lights(win, 0.15);
+        }
     }
 }
 
