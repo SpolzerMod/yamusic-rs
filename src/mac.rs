@@ -348,19 +348,22 @@ unsafe fn place_traffic_lights(win: Id) {
 
 /// Отложенная постановка «светофора» на main run loop: AppKit раскладывает кнопки
 /// в своём лейауте (создание кнопок, resize, becomeKey), наша постановка — после.
+/// Два таймера: default mode (покой) и event tracking mode (live resize крутит
+/// run loop в tracking mode, где default-таймеры не срабатывают). Псевдо-mode
+/// NSRunLoopCommonModes у performSelector:inModes: empirically не срабатывает.
 unsafe fn schedule_place_lights(win: Id, delay: f64) {
     let observer = OBSERVER.load(std::sync::atomic::Ordering::Relaxed);
     if observer.is_null() {
         return;
     }
-    let p: unsafe extern "C" fn(Id, Sel, Sel, Id, f64) = std::mem::transmute(objc_msgSend as unsafe extern "C" fn() as usize);
-    p(
-        observer,
-        sel_registerName(c("performSelector:withObject:afterDelay:").as_ptr()),
-        sel_registerName(c("placeLights:").as_ptr()),
-        win,
-        delay,
-    );
+    let sel = sel_registerName(c("placeLights:").as_ptr());
+    let p0: unsafe extern "C" fn(Id, Sel, Sel, Id, f64) = std::mem::transmute(objc_msgSend as unsafe extern "C" fn() as usize);
+    p0(observer, sel_registerName(c("performSelector:withObject:afterDelay:").as_ptr()), sel, win, delay);
+    let mode = msg_string(objc_getClass(c("NSString").as_ptr()), "NSEventTrackingRunLoopMode");
+    let mkarr: unsafe extern "C" fn(Id, Sel, Id) -> Id = std::mem::transmute(objc_msgSend as unsafe extern "C" fn() as usize);
+    let modes = mkarr(objc_getClass(c("NSArray").as_ptr()), sel_registerName(c("arrayWithObject:").as_ptr()), mode);
+    let p1: unsafe extern "C" fn(Id, Sel, Sel, Id, f64, Id) = std::mem::transmute(objc_msgSend as unsafe extern "C" fn() as usize);
+    p1(observer, sel_registerName(c("performSelector:withObject:afterDelay:inModes:").as_ptr()), sel, win, delay, modes);
 }
 
 /// Первичная стилизация окна. `ns_view` — NSView окна winit; вызывать из главного
@@ -387,6 +390,7 @@ pub fn init_window_observers() {
         add("restyleNow:", on_restyle_now);
         add("placeLights:", on_place_lights);
         add("windowDidResize:", on_window_resize);
+        add("windowBecomeKey:", on_window_become_key);
         objc_registerClassPair(cls);
         let observer = msg0(msg0(cls, "alloc"), "init");
         let center = msg0(objc_getClass(c("NSNotificationCenter").as_ptr()), "defaultCenter");
@@ -419,7 +423,7 @@ pub fn init_window_observers() {
             center,
             sel_registerName(c("addObserver:selector:name:object:").as_ptr()),
             observer,
-            sel_registerName(c("windowDidResize:").as_ptr()),
+            sel_registerName(c("windowBecomeKey:").as_ptr()),
             kname,
             std::ptr::null_mut(),
         );
@@ -442,14 +446,26 @@ extern "C" fn on_place_lights(_self: Id, _sel: Sel, win: Id) {
     }
 }
 
-/// Resize/becomeKey-уведомление приносит NSNotification, а не окно: объект берём
-/// из object. Ставим с задержкой 0 (следующий оборот run loop): AppKit раскладывает
-/// кнопки в своём лейауте после уведомления, наша постановка должна идти последней.
+/// Resize-уведомление приходит после того, как AppKit переложил кнопки в этом
+/// же обороте, поэтому ставим синхронно: иначе на каждом mouse-move события
+/// live resize кнопки мигали бы дефолтным углом до срабатывания таймера.
+/// Частота resize-событий — естественный троттл постановки.
 extern "C" fn on_window_resize(_self: Id, _sel: Sel, note: Id) {
     unsafe {
         let win = msg0(note, "object");
         if !win.is_null() {
-            schedule_place_lights(win, 0.0);
+            place_traffic_lights(win);
+        }
+    }
+}
+
+/// becomeKey-уведомление приносит NSNotification; лейаут кнопок может пройти
+/// позже уведомления, поэтому здесь отложенная постановка (default + tracking).
+extern "C" fn on_window_become_key(_self: Id, _sel: Sel, note: Id) {
+    unsafe {
+        let win = msg0(note, "object");
+        if !win.is_null() {
+            schedule_place_lights(win, 0.05);
         }
     }
 }
