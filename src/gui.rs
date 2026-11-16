@@ -3582,7 +3582,6 @@ fn music_dir(cfg: &Config) -> std::path::PathBuf {
     let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()));
     home.join("Music").join("Яндекс Музыка")
 }
-}
 
 /// Расширение по первым байтам: mp3, AAC (ADTS), MP4 или FLAC.
 fn audio_ext(b: &[u8]) -> &'static str {
