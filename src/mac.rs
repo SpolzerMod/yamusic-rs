@@ -311,53 +311,24 @@ unsafe fn restyle_window(win: Id) {
     place_traffic_lights(win);
 }
 
-/// Центры «светофора»: по горизонтали inset как у Finder macOS 26 (26/49/72 pt),
-/// по вертикали — дефолт AppKit (16 pt): строки заголовков страниц начинаются
-/// с y=24, и вертикальный inset 26 клал бы кнопки поверх них (клик по «назад»
-/// попадал бы в нативный close). Полный Finder-inset потребовал бы сдвига
-/// шапок всех страниц — отдельная UI-задача.
-const LIGHT_CENTERS: [(f64, f64); 3] = [(26.0, 16.0), (49.0, 16.0), (72.0, 16.0)];
-
-/// NSPoint: два CGFloat — для convertPoint:fromView:.
-#[repr(C)]
-struct NsPoint {
-    x: f64,
-    y: f64,
-}
-
+/// Видимость кнопок: после fullscreen-анимаций AppKit может оставить их с
+/// alpha=0 (кликабельны, но не видны). Позиции НЕ трогаем: нативный inset
+/// (16,16) — то, подо что свёрстаны шапки страниц (y=24); ручной inset Finder
+/// (26,26) перекрывал бы их и требовал бы релейаута всех страниц.
 unsafe fn place_traffic_lights(win: Id) {
     if win.is_null() || !msg_responds(win, sel_registerName(c("standardWindowButton:").as_ptr())) {
         return;
     }
-    let wf = ns_rect(win, "frame");
     let get: unsafe extern "C" fn(Id, Sel, c_long) -> Id = std::mem::transmute(objc_msgSend as unsafe extern "C" fn() as usize);
-    let cp: unsafe extern "C" fn(Id, Sel, f64, f64, Id) -> NsPoint = std::mem::transmute(objc_msgSend as unsafe extern "C" fn() as usize);
-    let set: unsafe extern "C" fn(Id, Sel, f64, f64) = std::mem::transmute(objc_msgSend as unsafe extern "C" fn() as usize);
     let sh: unsafe extern "C" fn(Id, Sel, bool) = std::mem::transmute(objc_msgSend as unsafe extern "C" fn() as usize);
     let sa: unsafe extern "C" fn(Id, Sel, f64) = std::mem::transmute(objc_msgSend as unsafe extern "C" fn() as usize);
-    for (idx, (cx, cy)) in LIGHT_CENTERS.iter().enumerate() {
-        // NSWindowCloseButton = 0, NSWindowMiniaturizeButton = 1, NSWindowZoomButton = 2.
-        let btn = get(win, sel_registerName(c("standardWindowButton:").as_ptr()), idx as c_long);
+    for idx in 0..3 {
+        let btn = get(win, sel_registerName(c("standardWindowButton:").as_ptr()), idx);
         if btn.is_null() {
-            // Кнопки ещё не созданы AppKit — повторим отложенно (placeLights:).
             return;
         }
-        let sup = msg0(btn, "superview");
-        if sup.is_null() {
-            continue;
-        }
-        // После fullscreen-анимаций AppKit может оставить кнопки с alpha=0.
         sh(btn, sel_registerName(c("setHidden:").as_ptr()), false);
         sa(btn, sel_registerName(c("setAlphaValue:").as_ptr()), 1.0);
-        let bf = ns_rect(btn, "frame");
-        // Желаемый центр в координатах окна (низ-лево) → координаты superview:
-        // не зависит от flip/позиции контейнера тайтлбара.
-        let p = cp(sup, sel_registerName(c("convertPoint:fromView:").as_ptr()), *cx, wf.h - cy, std::ptr::null_mut());
-        let x = p.x - bf.w / 2.0;
-        let y = p.y - bf.h / 2.0;
-        if (bf.x - x).abs() > 0.01 || (bf.y - y).abs() > 0.01 {
-            set(btn, sel_registerName(c("setFrameOrigin:").as_ptr()), x, y);
-        }
     }
 }
 
@@ -367,26 +338,7 @@ pub fn native_window_buttons(ns_view: Id) {
     unsafe {
         let win = msg0(ns_view, "window");
         restyle_window(win);
-        // AppKit может дорасложить кнопки после нашего вызова — контрольная
-        // постановка inset'а следующим оборотом run loop.
-        schedule_place_lights(win, 0.15);
     }
-}
-
-/// Отложенная постановка inset'а кнопок (main run loop, default mode).
-unsafe fn schedule_place_lights(win: Id, delay: f64) {
-    let observer = OBSERVER.load(std::sync::atomic::Ordering::Relaxed);
-    if observer.is_null() {
-        return;
-    }
-    let p: unsafe extern "C" fn(Id, Sel, Sel, Id, f64) = std::mem::transmute(objc_msgSend as unsafe extern "C" fn() as usize);
-    p(
-        observer,
-        sel_registerName(c("performSelector:withObject:afterDelay:").as_ptr()),
-        sel_registerName(c("placeLights:").as_ptr()),
-        win,
-        delay,
-    );
 }
 
 /// После выхода из полноэкранного режима macOS/winit сбрасывают styleMask и
@@ -406,7 +358,6 @@ pub fn init_window_observers() {
         add("windowDidExitFullScreen:", on_exit_fullscreen);
         add("windowDidResize:", on_window_resize);
         add("restyleNow:", on_restyle_now);
-        add("placeLights:", on_place_lights);
         objc_registerClassPair(cls);
         let observer = msg0(msg0(cls, "alloc"), "init");
         let center = msg0(objc_getClass(c("NSNotificationCenter").as_ptr()), "defaultCenter");
@@ -467,19 +418,6 @@ extern "C" fn on_restyle_now(_self: Id, _sel: Sel, win: Id) {
 extern "C" fn on_window_resize(_self: Id, _sel: Sel, note: Id) {
     unsafe {
         place_traffic_lights(msg0(note, "object"));
-    }
-}
-
-/// Контрольная постановка inset'а; если кнопки ещё не созданы — повтор с лимитом.
-extern "C" fn on_place_lights(_self: Id, _sel: Sel, win: Id) {
-    unsafe {
-        place_traffic_lights(win);
-        let get: unsafe extern "C" fn(Id, Sel, c_long) -> Id = std::mem::transmute(objc_msgSend as unsafe extern "C" fn() as usize);
-        let b0 = get(win, sel_registerName(c("standardWindowButton:").as_ptr()), 0);
-        static TRIES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        if b0.is_null() && TRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 20 {
-            schedule_place_lights(win, 0.15);
-        }
     }
 }
 

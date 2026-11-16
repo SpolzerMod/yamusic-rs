@@ -80,10 +80,26 @@ fn main() -> Result<(), slint::PlatformError> {
         }
         return Ok(());
     }
-    // Skia без видеокарты: память не зависит от драйвера (с OpenGL или D3D окно занимает
-    // в 2–3 раза больше). Режим работы («Плавный» или «Лёгкий») меняет только анимации
-    // и кэши и переключается на лету (gui::apply_mode).
-    slint::BackendSelector::new().backend_name("winit".into()).renderer_name("skia-software".into()).select()?;
+    // GPU по умолчанию: Skia через wgpu (macOS — Metal, Windows — DX12/Vulkan).
+    // Замер на macOS (играющая волна с градиентом): CPU 25.1% → 4.3%,
+    // RSS 178 → 137 МБ против software. Откат: YAMUSIC_RENDERER=skia-software
+    // (или skia/skia-opengl); при ошибке выбора GPU — автоматический fallback.
+    let want = std::env::var("YAMUSIC_RENDERER").unwrap_or_default();
+    let renderer = match want.as_str() {
+        "skia-software" | "skia" | "skia-opengl" | "skia-wgpu" => want.clone(),
+        _ => "skia-wgpu".to_string(),
+    };
+    config::log(format!("renderer: {renderer}"));
+    let selected = slint::BackendSelector::new()
+        .backend_name("winit".into())
+        .renderer_name(renderer.clone())
+        .select();
+    if selected.is_err() && renderer != "skia-software" {
+        config::log(format!("renderer {renderer} недоступен, fallback на skia-software"));
+        slint::BackendSelector::new().backend_name("winit".into()).renderer_name("skia-software".into()).select()?;
+    } else {
+        selected?;
+    }
     update::cleanup();
     win::refresh_autostart();
     // На macOS трея нет: --tray игнорируем, иначе окно спрячется без возможности вернуть.
