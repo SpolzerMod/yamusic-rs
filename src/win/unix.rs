@@ -61,15 +61,22 @@ pub fn pick_image(_owner: isize, title: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// AppleScript диалога выбора папки. `default location` подставляется, только если
+/// папка существует: AppleScript коэрсит путь в `alias` и падает на несуществующем
+/// (`-1700 Can't make file … into type alias`), из-за чего диалог не открывается.
+fn choose_folder_script(title: &str, start: &str) -> String {
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let def = if !start.is_empty() && std::path::Path::new(start).exists() {
+        format!(" default location (POSIX file \"{}\")", esc(start))
+    } else {
+        String::new()
+    };
+    format!("POSIX path of (choose folder with prompt \"{}\"{def})", esc(title))
+}
+
 /// Системный диалог выбора папки (macOS: `choose folder` через osascript).
 pub fn pick_folder(_owner: isize, title: &str, start: &str) -> Option<String> {
-    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
-    let def = if start.is_empty() {
-        String::new()
-    } else {
-        format!(" default location (POSIX file \"{}\")", esc(start))
-    };
-    let script = format!("POSIX path of (choose folder with prompt \"{}\"{def})", esc(title));
+    let script = choose_folder_script(title, start);
     let out = std::process::Command::new("osascript").arg("-e").arg(script).output().ok()?;
     if !out.status.success() {
         return None;
@@ -139,5 +146,26 @@ pub fn set_autostart(on: bool) -> bool {
 pub fn refresh_autostart() {
     if autostart_enabled() {
         set_autostart(true);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::choose_folder_script;
+
+    /// Несуществующая стартовая папка не должна попадать в `default location`,
+    /// иначе AppleScript падает и диалог не открывается.
+    #[test]
+    fn missing_default_location_is_omitted() {
+        let s = choose_folder_script("Папка", "/definitely/not/exists/xyz");
+        assert!(!s.contains("default location"), "диалог упадёт на несуществующем пути: {s}");
+    }
+
+    /// Существующая стартовая папка должна подставляться.
+    #[test]
+    fn existing_default_location_is_used() {
+        let dir = std::env::temp_dir();
+        let s = choose_folder_script("Папка", dir.to_str().expect("temp"));
+        assert!(s.contains("default location"), "стартовая папка потерялась: {s}");
     }
 }
