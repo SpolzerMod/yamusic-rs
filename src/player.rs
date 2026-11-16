@@ -449,7 +449,7 @@ impl Engine {
 
     /// Состояние движка → Shared для UI.
     fn sync(&mut self) {
-        let playing = self.loaded && !self.paused && self.sink().map(|s| !s.is_paused()).unwrap_or(false);
+        let playing = playing_flag(self.loaded, self.paused, self.sh().loading, self.sink().map(|s| s.is_paused()));
         let pos = match self.seek_pending {
             Some(p) => p,
             None => if self.loaded { self.pos() } else { 0.0 },
@@ -1143,10 +1143,37 @@ impl Engine {
     }
 }
 
+/// Кнопка play/pause в UI: не должна сбрасываться в play на время загрузки
+/// следующего трека (advance ставит loaded=false, но loading=true означает
+/// «идёт переход, продолжаем играть»). Пауза пользователя всегда главнее.
+fn playing_flag(loaded: bool, paused: bool, loading: bool, sink_paused: Option<bool>) -> bool {
+    !paused && (loaded || loading) && !sink_paused.unwrap_or(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rodio::Source as _;
+
+    /// Переход на следующий трек: loaded=false, loading=true — кнопка остаётся
+    /// в состоянии «играет» (регрессия: раньше сбрасывалась в play до загрузки).
+    #[test]
+    fn next_track_transition_keeps_playing() {
+        assert!(playing_flag(false, false, true, Some(false)));
+    }
+
+    #[test]
+    fn playing_flag_paused_and_idle() {
+        // Пауза пользователя главнее перехода.
+        assert!(!playing_flag(false, true, true, Some(false)));
+        assert!(!playing_flag(true, true, false, Some(false)));
+        // Ничего не загружено и не грузится — не играем.
+        assert!(!playing_flag(false, false, false, Some(false)));
+        // Обычное воспроизведение и пауза sink.
+        assert!(playing_flag(true, false, false, Some(false)));
+        assert!(!playing_flag(true, false, false, Some(true)));
+        assert!(!playing_flag(true, false, false, None));
+    }
 
     /// Сетевой тест: ссылка на поток → потоковое чтение → декодирование (без токена — 30-сек превью).
     #[test]
