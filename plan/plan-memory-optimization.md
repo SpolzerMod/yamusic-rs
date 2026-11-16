@@ -122,6 +122,8 @@ macOS-агент закоммитил порт в ветку `macos` (ребей
 
 Для демонстрации эффекта M3–M9 нужен замер на обложечном лендинге («Для вас») или больших списках в одинаковом состоянии UI (требует навигации), либо авторитетный сценарий Windows CI (Private Bytes).
 
+Windows CI на ребейзнутой ветке (`memory-audit` = macos + M3–M9, без лестницы) — **success** (прогон 43840217730, PR #1 `windows pass`): `clippy --release --all-targets -- -D warnings`, `cargo test --release`, `cargo build --release`, SHA-256 `d40274318b056538ddd126109b7251bff76561f4bdc87ca6bc8dd8871673312b`, артефакт `yamusic-rs.exe` (26 МБ). Ветка force-push'нута в форк `rnikitin/yamusic-rs` (`8ffb435`). Артефакт готов для замера памяти на Windows по сценарию README.
+
 
 ## Context and Orientation
 
