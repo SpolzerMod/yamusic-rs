@@ -49,6 +49,8 @@ struct State {
     track_id: Option<String>,
     toast_timer: Option<Timer>,
     cards: HashMap<String, Vec<Card>>,
+    /// Порядок вставки ключей `cards` для ограничения размера (LRU): Grid берёт отсюда полные карточки.
+    cards_order: Vec<String>,
     search_shown: Option<Arc<Data>>,
     results_key: Option<String>,
     results_shown: Option<Arc<Data>>,
@@ -768,9 +770,13 @@ impl Ctx {
             liked: self.player.is_liked(&t.id),
             explicit: t.explicit,
             available: true,
-            artist_names: ModelRc::from(Rc::new(VecModel::from(
-                t.artist_list.iter().map(|a| SharedString::from(a.name.as_str())).collect::<Vec<_>>(),
-            ))),
+            artist_names: if t.artist_list.is_empty() {
+                ModelRc::default()
+            } else {
+                ModelRc::from(Rc::new(VecModel::from(
+                    t.artist_list.iter().map(|a| SharedString::from(a.name.as_str())).collect::<Vec<_>>(),
+                )))
+            },
         }
     }
 
@@ -1442,6 +1448,8 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     if let Some(sprite) = &assets {
         set_icons(&ui, sprite);
     }
+    // Спрайт (вся SVG-строка) нужен только для нарезки иконок — дальше не держим его в памяти.
+    drop(assets);
     load_id_icons(&ui);
     start_updates(&ui);
 
@@ -1511,6 +1519,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             track_id: None,
             toast_timer: None,
             cards: HashMap::new(),
+            cards_order: Vec::new(),
             search_shown: None,
             results_key: None,
             results_shown: None,
@@ -1661,7 +1670,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             let full = c.st.borrow().net.as_ref().and_then(|n| n.get("likes")).and_then(|r| r.ok());
             let tracks = match full.as_deref() {
                 Some(Data::List(l)) => l.tracks.clone(),
-                _ => col.likes_preview.clone(),
+                _ => Arc::new(col.likes_preview.clone()),
             };
             let start = tracks.iter().position(|x| x.id == t.id).unwrap_or(0);
             c.player.send(Cmd::PlayList {
@@ -2207,6 +2216,8 @@ impl Ctx {
             st.pins.clear();
             st.history.clear();
             st.forward.clear();
+            st.cards.clear();
+            st.cards_order.clear();
         }
         let ui = self.ui();
         let app = ui.global::<App>();
@@ -2223,6 +2234,19 @@ impl Ctx {
     }
 
     // ---------- карточки ----------
+
+    /// Запомнить карточки блока для кликов и Grid, ограничивая кэш 24 ключами (LRU по вставке):
+    /// иначе каждый посещённый блок навсегда оставляет полную копию карточек.
+    fn remember_cards(&self, key: String, cards: Vec<Card>) {
+        let mut st = self.st.borrow_mut();
+        st.cards_order.retain(|k| k != &key);
+        st.cards_order.push(key.clone());
+        st.cards.insert(key, cards);
+        while st.cards_order.len() > 24 {
+            let old = st.cards_order.remove(0);
+            st.cards.remove(&old);
+        }
+    }
 
     fn card_model(self: &Rc<Self>, block: &str, cards: &[Card], css: f32) -> ModelRc<CardItem> {
         let items: Vec<CardItem> = cards
@@ -2243,7 +2267,7 @@ impl Ctx {
             self.load_cover(&model, i, c.covers.get(1).map(|s| s.as_str()), css * 0.6, |r, img| r.cover2 = img);
             self.load_cover(&model, i, c.covers.get(2).map(|s| s.as_str()), css * 0.6, |r, img| r.cover3 = img);
         }
-        self.st.borrow_mut().cards.insert(block.to_string(), cards.to_vec());
+        self.remember_cards(block.to_string(), cards.to_vec());
         ModelRc::from(model)
     }
 
@@ -2477,7 +2501,7 @@ impl Ctx {
         }
         self.player.send(Cmd::PlayList {
             source: Source::List { kind, id: id.to_string(), title: title.to_string() },
-            tracks,
+            tracks: Arc::new(tracks),
             start,
             after: After::Wave(Source::Wave),
         });
@@ -3040,7 +3064,7 @@ impl Ctx {
         let Some(data) = self.list() else { return };
         let Data::List(l) = &*data else { return };
         if !l.tracks.is_empty() {
-            net.add_to_playlist(&pl, l.tracks.clone(), l.title.clone());
+            net.add_to_playlist(&pl, l.tracks.to_vec(), l.title.clone());
         }
     }
 
@@ -3342,6 +3366,7 @@ impl Ctx {
         let ui = self.ui();
         let app = ui.global::<App>();
         let mut st = self.st.borrow_mut();
+        let net = st.net.clone();
         match page {
             Page::List => {
                 st.list_shown = None;
@@ -3392,7 +3417,26 @@ impl Ctx {
                 app.set_top_artists(ModelRc::default());
                 app.set_my_artists(ModelRc::default());
             }
+            Page::Wave => {
+                st.blob_src = None;
+                drop(st);
+                app.set_blob(Image::default());
+            }
             _ => {}
+        }
+        // Ушли со страницы: не держим её блоки/поиск в кэше сети и клоны треков в состоянии.
+        if let Some(net) = net {
+            match page {
+                Page::Trends | Page::Concerts | Page::Nonmusic => net.release_prefix("lblock:"),
+                Page::Search => net.release_prefix("search:"),
+                _ => {}
+            }
+        }
+        {
+            let mut st = self.st.borrow_mut();
+            st.results.clear();
+            st.chart.clear();
+            st.artist_tracks.clear();
         }
         self.images.trim();
         if self.lite.get() {
@@ -3458,7 +3502,7 @@ impl Ctx {
                         });
                         c.player.send(Cmd::PlayList {
                             source: Source::List { kind: ListKind::Tracks, id: format!("trailer:{path}"), title },
-                            tracks,
+                            tracks: Arc::new(tracks),
                             start: 0,
                             after: After::Wave(Source::Wave),
                         });
@@ -3746,6 +3790,12 @@ fn register_extra(app: &App) {
             });
         })
     });
+    app.on_fullscreen_closed(|| {
+        with_ctx(|c| c.ui().global::<App>().set_cover_big(Image::default()));
+    });
+    app.on_cover_closed(|| {
+        with_ctx(|c| c.ui().global::<App>().set_cover_view(Image::default()));
+    });
     app.on_toggle_navbar(|| {
         with_ctx(|c| {
             let ui = c.ui();
@@ -4019,7 +4069,7 @@ fn register_extra(app: &App) {
         with_ctx(|c| {
             let Some(data) = c.list() else { return };
             let Data::List(l) = &*data else { return };
-            c.download_tracks(l.title.clone(), l.tracks.clone());
+            c.download_tracks(l.title.clone(), l.tracks.to_vec());
         })
     });
     app.set_eq_presets(ModelRc::from(Rc::new(VecModel::from(

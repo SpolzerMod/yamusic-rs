@@ -1,5 +1,5 @@
-# Каждый push и PR: clippy, тесты и exe в артефактах.
-# Тег v* (например v1.0.1): то же и релиз с yamusic-rs.exe — его ищет встроенная обновлялка.
+# Каждый push и PR: clippy, тесты и артефакты (Windows exe + macOS .app).
+# Тег v* (например v1.0.2): релиз GitHub с yamusic-rs.exe и yamusic-rs-macos-arm64.zip.
 name: Сборка
 
 on:
@@ -12,8 +12,6 @@ on:
 jobs:
   windows:
     runs-on: windows-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v7
 
@@ -40,15 +38,49 @@ jobs:
         shell: pwsh
         run: (Get-FileHash target/release/yamusic-rs.exe -Algorithm SHA256).Hash.ToLower()
 
-      # Без zip: из артефактов скачивается сразу yamusic-rs.exe.
       - uses: actions/upload-artifact@v7
         with:
+          name: windows-exe
           path: target/release/yamusic-rs.exe
           archive: false
 
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo build --release
+
+      - name: Собрать .app и упаковать в zip
+        run: |
+          tools/make_app.sh
+          ditto -c -k --keepParent target/release/yamusic-rs.app yamusic-rs-macos-arm64.zip
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-app
+          path: yamusic-rs-macos-arm64.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
       - name: Релиз
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" target/release/yamusic-rs.exe --title "Яндекс Музыка RS ${GITHUB_REF_NAME#v}" --generate-notes
+        run: |
+          ls -la dist
+          gh release create "$GITHUB_REF_NAME" \
+            dist/yamusic-rs.exe dist/yamusic-rs-macos-arm64.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Яндекс Музыка RS ${GITHUB_REF_NAME#v}" --generate-notes

@@ -219,9 +219,7 @@ const FONTS: &[&str] = &[
     "YSText-Regular",
     "YSText-Medium",
     "YSText-Bold",
-    "YSText-Heavy",
     "YSText-Black",
-    "YSText-Light",
     "YSMusic-HeadlineBold",
 ];
 
