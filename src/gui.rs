@@ -1484,6 +1484,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         crate::discord::DiscordCfg { enabled: cfg.discord_enabled, app_id: cfg.discord_app_id.clone() },
     );
     app.set_discord_on(cfg.discord_enabled);
+    app.set_gpu(cfg.gpu);
     app.set_autostart(win::autostart_enabled());
     app.set_download_dir(music_dir(&cfg).display().to_string().into());
     let ctx = Rc::new(Ctx {
@@ -2636,6 +2637,19 @@ impl Ctx {
                 let mut st = self.st.borrow_mut();
                 st.cfg.discord_enabled = on;
                 st.cfg.save();
+            }
+            "gpu" => {
+                let on = !app.get_gpu();
+                let mut st = self.st.borrow_mut();
+                st.cfg.gpu = on;
+                st.cfg.save();
+                drop(st);
+                app.set_gpu(on);
+                self.toast(if on {
+                    "GPU-ускорение включится после перезапуска"
+                } else {
+                    "GPU-ускорение выключится после перезапуска"
+                });
             }
             "autostart" => {
                 let on = !app.get_autostart();

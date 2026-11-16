@@ -80,14 +80,16 @@ fn main() -> Result<(), slint::PlatformError> {
         }
         return Ok(());
     }
-    // GPU по умолчанию: Skia через wgpu (macOS — Metal, Windows — DX12/Vulkan).
-    // Замер на macOS (играющая волна с градиентом): CPU 25.1% → 4.3%,
-    // RSS 178 → 137 МБ против software. Откат: YAMUSIC_RENDERER=skia-software
-    // (или skia/skia-opengl); при ошибке выбора GPU — автоматический fallback.
+    // Дефолт — CPU (skia-software): так задумал автор (память и совместимость
+    // не зависят от драйвера). GPU (Skia через wgpu: macOS — Metal, Windows —
+    // DX12/Vulkan) включается в настройках; замер на macOS дал CPU 25.1% → 4.3%,
+    // RSS 178 → 137 МБ, но на слабых машинах решение остаётся за пользователем.
+    // Env YAMUSIC_RENDERER перекрывает конфиг; при ошибке выбора GPU — fallback.
     let want = std::env::var("YAMUSIC_RENDERER").unwrap_or_default();
+    let gpu_on = config::Config::load().gpu;
     let renderer = match want.as_str() {
         "skia-software" | "skia" | "skia-opengl" | "skia-wgpu" => want.clone(),
-        _ => "skia-wgpu".to_string(),
+        _ => if gpu_on { "skia-wgpu".to_string() } else { "skia-software".to_string() },
     };
     config::log(format!("renderer: {renderer}"));
     let selected = slint::BackendSelector::new()

@@ -23,6 +23,10 @@ pub struct Config {
     /// Unix-время, когда токен истечёт.
     pub token_expires: Option<u64>,
     pub volume: f32,
+    /// GPU-рендер интерфейса (Skia через wgpu): opt-in в настройках, дефолт CPU —
+    /// так задумал автор (память/совместимость не зависят от драйвера).
+    #[serde(default)]
+    pub gpu: bool,
     pub discord_enabled: bool,
     pub discord_app_id: String,
     /// system / light / dark
@@ -52,6 +56,7 @@ impl Default for Config {
             token_plain: None,
             token_expires: None,
             volume: 0.6,
+            gpu: false,
             discord_enabled: true,
             discord_app_id: String::new(),
             theme: "system".into(),
@@ -165,3 +170,18 @@ pub fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// GPU — opt-in: дефолт CPU и старые конфиги без поля gpu не ломаются.
+    #[test]
+    fn gpu_defaults_to_cpu_and_old_configs_load() {
+        assert!(!Config::default().gpu);
+        let old: Config = serde_json::from_str("{}").expect("старый конфиг");
+        assert!(!old.gpu);
+        let on: Config = serde_json::from_str(r#"{"gpu":true}"#).expect("gpu=true");
+        assert!(on.gpu);
+    }
+}

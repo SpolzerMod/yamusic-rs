@@ -138,6 +138,8 @@ export global App {
     in property <bool> mac;
     // Windows-only опции (автозапуск в трее): на macOS/Linux скрываем.
     in property <bool> windows;
+    // GPU-рендер интерфейса: opt-in в настройках, применится после перезапуска.
+    in property <bool> gpu;
     in property <string> toast;
     in property <image> toast-cover;
     in property <bool> toast-has-cover;

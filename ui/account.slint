@@ -370,6 +370,13 @@ export component SettingsPage inherits Rectangle {
                 on: App.discord-on;
                 clicked => { App.setting("discord"); }
             }
+            SettingItem {
+                title: T.t("GPU-ускорение интерфейса");
+                desc: T.t("Metal на macOS, DX12/Vulkan на Windows. Применится после перезапуска");
+                toggle: true;
+                on: App.gpu;
+                clicked => { App.setting("gpu"); }
+            }
             if App.windows: SettingItem {
                 title: T.t("Запускать вместе с Windows");
                 desc: T.t("Приложение откроется в трее, без окна");
