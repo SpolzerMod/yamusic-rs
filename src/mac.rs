@@ -297,11 +297,11 @@ unsafe fn restyle_window(win: Id) {
     msg_set_bool(win, "setTitlebarAppearsTransparent:", true);
     msg_set_long(win, "setTitleVisibility:", 1); // NSWindowTitleHidden
     // Сервер скругляет стандартные окна сам, но окно winit создаётся borderless,
-    // поэтому задаём радиус самому окну. ~16pt — как у нативных окон macOS 26
-    // (у TextEdit на этом же Retina-экране диагональ угла прозрачна до ~10 px).
+    // поэтому задаём радиус самому окну. ~24pt — как у окна Finder (диагональ угла
+    // прозрачна до ~12 device px при 2x, у TextEdit — только до ~6).
     let corner_sel = sel_registerName(c("_setCornerRadius:").as_ptr());
     if msg_responds(win, corner_sel) {
-        msg_set_double(win, "_setCornerRadius:", 16.0);
+        msg_set_double(win, "_setCornerRadius:", 24.0);
     }
 }
 
