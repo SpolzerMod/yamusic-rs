@@ -1,0 +1,133 @@
+# План: сборка и запуск Яндекс Музыки RS на macOS
+
+Статус: в работе. Ключевая идея — не переписывать приложение, а добавить платформенный
+слой: Win32-код изолируется в cfg-модули, для macOS пишутся свои реализации или
+заглушки с теми же сигнатурами, чтобы `gui.rs` почти не менялся.
+
+## Что уже проверено
+
+- На маке стоит rustc 1.96 (требуется 1.92+) и Xcode CLT — всё нужное для сборки есть.
+- `cargo check` на macOS: **все зависимости собираются** (slint 1.18 + winit, skia-safe
+  0.153 с готовым бинарником под `aarch64-apple-darwin`, rodio/cpal → CoreAudio,
+  reqwest + rustls). Ошибок компиляции в коде приложения всего две, и обе в одной
+  функции `copy_text` (`src/gui.rs:1922`) — Windows-утилита `clip` и
+  `std::os::windows::process::CommandExt`.
+- Часть кроссплатформенности автор уже заложил: `secret.rs` и `config.rs::save()`
+  имеют ветки `#[cfg(not(windows))]`, `build.rs` гейтит ресурсы exe. README при этом
+  заявляет «macOS — пока не планируется», так что это локальный форк.
+
+## Чего не хватает
+
+1. **Линковка.** `cargo check` не линкует, а `cargo build` упадёт: `main.rs`, `win.rs`,
+   `tray.rs` вызывают Win32-API без cfg-гейтов (`CreateMutexW`, `ShowWindow`,
+   `Shell_NotifyIconW`, DPAPI и т.д.). `windows-sys` при этом прописан в Cargo.toml
+   безусловно.
+2. **Windows-допущения в остальном коде:**
+
+   | Место | Проблема | Решение на macOS |
+   | --- | --- | --- |
+   | `config.rs:71` `dir()` | `%APPDATA%` не существует → пишет в CWD | `~/Library/Application Support/yamusic-rs` |
+   | `gui.rs:3426` `music_dir()` | `USERPROFILE\Music` | `$HOME/Music` |
+   | `gui.rs:1920` `copy_text()` | `clip.exe` + creation_flags | `pbcopy` |
+   | `gui.rs:1066` `apply_ui_scale` | `win::dpi_scale(HWND)` | `ui.window().scale_factor()` (Retina = 2.0) |
+   | `gui.rs:1682` `on_close` | прятать окно через `win::hide(HWND)` | `ui.hide()` (slint), приложение остаётся в Dock |
+   | `main.rs` | single-instance через мьютекс Win32 | пропустить (Dock не запускает вторую копию .app); `--tray` игнорировать, пока нет трея |
+   | `discord.rs:45` | пайп `\\.\pipe\discord-ipc-N` | Unix-сокет `$TMPDIR/discord-ipc-N` (протокол тот же) |
+   | `update.rs` | самообновление качает `yamusic-rs.exe` | на macOS считать, что exe в релизе нет → кнопка «Обновить» ведёт на страницу релиза |
+   | `assets.rs:18` | ищет `app.asar` установленного Windows-приложения | искать в `/Applications/Яндекс Музыка.app/Contents/Resources/`; сработает и веб-фолбэк (скачивание с music.yandex.ru уже кроссплатформенно) |
+   | `win.rs` | всё: тема из реестра, автозапуск HKCU\Run, диалог выбора файла, `open_url` | свои реализации: `defaults`, LaunchAgent, `osascript`, `open` |
+
+3. **Упаковка.** Голый бинарник работает, но без `.app`-бандла: нет иконки в Dock,
+   имя процесса в меню-баре. Нужен скрипт сборки бандла с Info.plist и `.icns`
+   из `icons/app.ico`.
+
+## Платформенный слой (главное изменение)
+
+- `src/win.rs` → фасад: `pub use windows::*` / `pub use unix::*` по cfg.
+  - `src/win/windows.rs` — текущий код win.rs без изменений.
+  - `src/win/unix.rs` — реализация для macOS:
+    - рабочие: `open_url` (команда `open`), `system_light_theme` (`defaults read -g
+      AppleInterfaceStyle`: ошибка = светлая), `pick_image` (`osascript choose file`),
+      автозапуск (plist в `~/Library/LaunchAgents/`), `refresh_autostart`;
+    - заглушки (окном управляет slint/winit, HWND всегда 0): `is_visible`, `is_iconic`,
+      `show`, `hide`, `force_foreground`, `is_window`, `round_corners`, `set_icon`,
+      `trim_memory`, `release_memory`.
+  - только для Windows остаются `wide`, `dpi_scale`, `app_icon` (тип HICON).
+- `src/tray.rs` → фасад: `Event` и `MenuState` общие (с `allow(dead_code)` вне
+  Windows), текущий код в `src/tray/windows.rs`, на macOS `install/remove/
+  wake_existing` — заглушки.
+- `Cargo.toml`: `windows-sys` перенести в `[target.'cfg(windows)'.dependencies]`.
+
+## Что сделано
+
+### Этап 1 — сборка и запуск (готово)
+1. `Cargo.toml` → `windows-sys` в `[target.'cfg(windows)'.dependencies]`.
+2. Платформенные фасады: `src/win.rs` (+ `src/win/windows.rs`, `src/win/unix.rs`),
+   `src/tray.rs` (+ `src/tray/windows.rs`, заглушки для macOS).
+3. `main.rs`: cfg на `claim_instance`; на macOS `--tray` не прячет окно.
+4. `gui.rs`: `copy_text` (pbcopy), `dpi_base` (scale_factor, Retina=2.0),
+   `finish_reveal` ждёт появления winit-окна (было: размер окна, из-за чего
+   handle был null), `on_close` → `ui.hide()`, `music_dir` → HOME.
+5. `config.rs::dir()` → `~/Library/Application Support/yamusic-rs`.
+6. `secret.rs`: `ENTROPY` под cfg(windows) (на macOS токен открытым текстом —
+   штатный не-Windows фолбэк апстрима).
+7. Проверено: сборка, линковка, `clippy -D warnings`, тесты, запуск, вход по коду,
+   воспроизведение через CoreAudio, скачивание шрифтов/иконок из веб-фолбэка.
+
+### Этап 2 — готово
+8. `discord.rs`: транспорт через `UnixStream` (`$TMPDIR/discord-ipc-N`).
+9. `update.rs`: на не-Windows `exe = None` → кнопка ведёт на страницу релиза.
+10. `assets.rs`: поиск `app.asar` в `/Applications/Яндекс Музыка.app` и т.п.
+11. `tools/make_app.sh`: `.app`-бандл (Info.plist, `.icns` из app.ico, ad-hoc codesign).
+
+### macOS-специфика (по просьбам пользователя)
+12. **Медиа-клавиши** (F7/F8/F9) и команды Пункта управления — `MPRemoteCommandCenter`
+    напрямую через objc runtime (`src/mac.rs`), без сторонних крейтов. Добавлены
+    `Cmd::Pause` и `Cmd::Seek`. Как у оригинала (Electron → MediaSession).
+13. **«Сейчас играет»** в Пункте управления — `MPNowPlayingInfoCenter`
+    (название, исполнитель, альбом, длительность, позиция, скорость).
+14. **Нативные кнопки окна** («светофор») — окно winit переводится в
+    titled + FullSizeContentView + прозрачный тайтлбар (как `hiddenInset` в Electron).
+    Виндовые кнопки в slint скрыты флагом `App.mac`, навбар сдвинут под «светофор».
+15. **Скруглённые углы** окна — `_setCornerRadius:` (приватный, с проверкой
+    `respondsToSelector`), т.к. borderless-окно winit не скругляется само.
+16. **Возврат «светофора» после fullscreen** — наблюдатель
+    `NSWindowDidExitFullScreenNotification` перестилизует окно с задержкой 0.12 с
+    (чтобы успеть после winit). Проверено самотестом: после выхода из fullscreen
+    окно 1280×800, углы скруглены, `AXCloseButton`/`AXZoomButton` на месте.
+17. **Отзывчивость «Моей волны»** — `player.rs`:
+    - смена станции сразу глушит старый трек и показывает новую станцию с загрузкой;
+    - фидбеки старой сессии уходят параллельным потоком, а не задерживают запрос;
+    - запрос новой сессии (`replace`) идёт отдельным потоком, минуя очередь фидбеков.
+18. **Потоковое воспроизведение** — `src/stream.rs`: `HttpStream` (Read+Seek через
+    HTTP Range). Вместо полной загрузки 13 МБ (≈1.8 с) играет после первого куска
+    256 КБ (≈0.4 с). Проверено: декодирование и перемотка побайтово совпадают
+    с прямым Range-запросом (тесты `stream_and_decode`, `stream_seek_correct`).
+
+## Этап 3 — что осталось (по желанию)
+- настоящий трей через крейт `tray-icon` (NSStatusItem);
+- CI-джоба `macos-latest` в `build.yml`, universal-бинарник (lipo);
+- самообновление с отдельным ассетом `yamusic-rs-macos` + заметки про Gatekeeper;
+- обновить README (таблица поддержки систем);
+- XDG-пути для Linux (слой unix сейчас заточен под macOS: `defaults`, LaunchAgent);
+- Keychain для токена на macOS (сейчас открытым текстом, как не-Windows фолбэк апстрима);
+- обложка в карточке «Сейчас играет» (MPMediaItemArtwork).
+
+## Риски / заметки
+- `skia-software` на macOS поднялся без проблем — Metal не понадобился.
+- Приватный `_setCornerRadius:` и `MPRemoteCommandCenter` — стабильные API,
+  но `_setCornerRadius` приватный; если пропадёт, окно просто будет с прямыми углами
+  (проверка `respondsToSelector`).
+
+## Исправления после проверки пользователем
+- **Медиа-клавиши и «Сейчас играет».** Причина: у констант `MPNowPlayingInfoProperty*`
+  строковое значение — полное имя (`"MPNowPlayingInfoPropertyPlaybackRate"`), а не
+  короткое, как у `MPMediaItem*`. Из-за неверных ключей `elapsedPlaybackTime`/`playbackRate`
+  система не считала трек играющим → виджет пустой, клавиши не маршрутизировались.
+  Исправлено, проверено на реальном воспроизведении.
+- **Пауза гасила фон волны.** `sync_vibe` зависел от `playing`; теперь оттенок берётся
+  от цвета трека (после первого запуска `started`), пауза его не сбрасывает.
+- **«Светофор» после fullscreen.** Наблюдатель `NSWindowDidExitFullScreenNotification`
+  перестилизует окно с задержкой 0.12 с (после winit). Проверено самотестом.
+
+

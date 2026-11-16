@@ -1,15 +1,34 @@
-//! Discord Rich Presence через локальный IPC Discord (named pipe) — без сторонних библиотек.
+//! Discord Rich Presence через локальный IPC Discord (named pipe на Windows, Unix-сокет
+//! на macOS) — без сторонних библиотек.
 //! Показывает «Слушает …»: трек, исполнитель, обложка, полоска прогресса, кнопка на трек.
 
 use crate::api::Track;
 use crate::config::log;
 use crate::player::{Player, Status};
 use serde_json::{json, Value};
-use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// Локальный канал Discord: named pipe на Windows, Unix-сокет на macOS/Linux.
+#[cfg(windows)]
+type Ipc = std::fs::File;
+#[cfg(not(windows))]
+type Ipc = std::os::unix::net::UnixStream;
+
+/// Открыть канал с номером `i` (Discord слушает до 10 штук).
+#[cfg(windows)]
+fn open_ipc(i: u32) -> std::io::Result<Ipc> {
+    std::fs::OpenOptions::new().read(true).write(true).open(format!(r"\\.\pipe\discord-ipc-{i}"))
+}
+
+#[cfg(not(windows))]
+fn open_ipc(i: u32) -> std::io::Result<Ipc> {
+    let base = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into());
+    let base = base.trim_end_matches('/');
+    std::os::unix::net::UnixStream::connect(format!("{base}/discord-ipc-{i}"))
+}
 
 /// Приложение Discord, под которым все пользователи показывают статус «Слушает».
 /// Его имя видно в профиле («Слушает …»), картинка `logo` — значок в углу обложки.
@@ -30,7 +49,7 @@ pub struct Discord {
 }
 
 struct Conn {
-    pipe: File,
+    pipe: Ipc,
     nonce: u64,
 }
 
@@ -42,7 +61,7 @@ impl Conn {
     fn connect(app_id: &str) -> Result<Conn, String> {
         let mut last = "Discord не запущен".to_string();
         for i in 0..10 {
-            let Ok(pipe) = OpenOptions::new().read(true).write(true).open(format!(r"\\.\pipe\discord-ipc-{i}")) else {
+            let Ok(pipe) = open_ipc(i) else {
                 continue;
             };
             let mut c = Conn { pipe, nonce: 0 };

@@ -21,7 +21,8 @@ base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 miniz_oxide = "0.8"
 
-[dependencies.windows-sys]
+# Win32 нужен только сборке для Windows (окно, трей, DPAPI, автозапуск).
+[target.'cfg(windows)'.dependencies.windows-sys]
 version = "0.59"
 features = [
   "Win32_Foundation",

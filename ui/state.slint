@@ -134,6 +134,8 @@ export global T {
 export global App {
     in-out property <Page> page: Page.wave;
     in property <bool> maximized;
+    // macOS: нативный «светофор» вместо виндовых кнопок окна (src/mac.rs).
+    in property <bool> mac;
     in property <string> toast;
     in property <image> toast-cover;
     in property <bool> toast-has-cover;

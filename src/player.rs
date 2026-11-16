@@ -4,9 +4,9 @@
 use crate::api::{Account, Api, Batch, Res, Track, WAVE};
 use crate::config::log;
 use crate::eq::{Eq, EqParams};
+use crate::stream::HttpStream;
 use rodio::{Decoder, OutputStream, Sink, Source as _};
 use std::collections::{HashSet, VecDeque};
-use std::io::Cursor;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -90,6 +90,10 @@ pub enum Cmd {
     PlayPause,
     /// Снять с паузы (если уже играет — ничего не делать).
     Resume,
+    /// Поставить на паузу (если уже на паузе — ничего не делать).
+    /// Нужен командам медиа-клавиш macOS (на других платформах не создаётся).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Pause,
     Next,
     Prev,
     Seek(f32),
@@ -111,8 +115,8 @@ enum Msg {
     Account(Res<Account>),
     Likes(Res<Vec<String>>),
     Batch { res: Res<Batch>, replace: bool, gen: u64 },
-    Audio { gen: u64, res: Res<Vec<u8>> },
-    Prefetch { id: String, res: Res<Vec<u8>> },
+    Audio { gen: u64, res: Res<HttpStream> },
+    Prefetch { id: String, res: Res<HttpStream> },
     Error(String),
 }
 
@@ -156,11 +160,6 @@ impl Player {
 
 }
 
-fn load_track(api: &Api, t: &Track) -> Res<Vec<u8>> {
-    let url = api.stream_url(&t.id)?;
-    api.fetch_bytes(&url)
-}
-
 /// Перемешивание без лишних зависимостей (xorshift от времени).
 pub fn shuffle<T>(v: &mut [T]) {
     let mut x = std::time::SystemTime::now()
@@ -202,7 +201,8 @@ struct Engine {
     queue: VecDeque<Track>,
     history: Vec<Track>,
     current: Option<Track>,
-    current_bytes: Option<Arc<[u8]>>,
+    /// Адрес mp3 текущего трека — для повтора (Repeat::One) без повторного поиска ссылки.
+    current_url: Option<String>,
     batch_id: String,
     /// Сессия ротора текущей волны; radioStarted уходит в неё, когда она появится.
     session: String,
@@ -220,7 +220,7 @@ struct Engine {
     volume: f32,
     repeat: Repeat,
     shuffle: bool,
-    prefetch: Option<(String, Vec<u8>)>,
+    prefetch: Option<(String, HttpStream)>,
     prefetching: Option<String>,
     errors_in_row: u32,
     was_playing: bool,
@@ -253,7 +253,7 @@ impl Engine {
             queue: VecDeque::new(),
             history: Vec::new(),
             current: None,
-            current_bytes: None,
+            current_url: None,
             batch_id: String::new(),
             session: String::new(),
             radio_started_pending: false,
@@ -355,20 +355,27 @@ impl Engine {
     }
 
     /// Отложенные фидбеки, которые не ушли с запросом треков, отправляются отдельно.
-    fn flush_feedback(&mut self) {
+    /// `parallel` — отдельным потоком, а не очередью bg: при смене станции они не должны
+    /// задерживать запрос треков новой сессии (старой сессии они уже не влияют на подбор).
+    fn flush_feedback(&mut self, parallel: bool) {
         if self.deferred.is_empty() {
             return;
         }
         let list = std::mem::take(&mut self.deferred);
         let (Some(api), false) = (self.api.clone(), self.session.is_empty()) else { return };
         let session = self.session.clone();
-        let _ = self.bg.send(Box::new(move || {
+        let job = move || {
             for body in list {
                 if let Err(e) = api.session_feedback(&session, &body) {
                     log(format!("feedback: {e}"));
                 }
             }
-        }));
+        };
+        if parallel {
+            thread::spawn(job);
+        } else {
+            let _ = self.bg.send(Box::new(job));
+        }
     }
 
     fn stop_audio(&mut self) {
@@ -379,7 +386,7 @@ impl Engine {
     }
 
     fn clear_queue(&mut self) {
-        self.flush_feedback();
+        self.flush_feedback(false);
         self.stale_batches = 0;
         self.queue.clear();
         self.prefetch = None;
@@ -397,7 +404,7 @@ impl Engine {
         self.clear_queue();
         self.history.clear();
         self.current = None;
-        self.current_bytes = None;
+        self.current_url = None;
         self.list = None;
         self.source = Source::Wave;
         let mut s = self.sh();
@@ -455,8 +462,9 @@ impl Engine {
     }
 
     fn replay(&mut self) -> bool {
-        let Some(bytes) = self.current_bytes.clone() else { return false };
-        let Ok(src) = Decoder::new(Cursor::new(bytes)) else { return false };
+        let (Some(url), Some(api)) = (self.current_url.clone(), self.api.clone()) else { return false };
+        let Ok(stream) = api.reopen_stream(&url) else { return false };
+        let Ok(src) = Decoder::new(stream) else { return false };
         let src = Eq::new(src.convert_samples::<f32>(), self.eq.clone());
         if let Some(sink) = self.sink() {
             sink.append(src);
@@ -570,6 +578,12 @@ impl Engine {
                 self.paused = false;
                 if let Some(s) = self.sink() {
                     s.play();
+                }
+            }
+            Cmd::Pause => {
+                self.paused = true;
+                if let Some(s) = self.sink() {
+                    s.pause();
                 }
             }
             Cmd::PlayPause => {
@@ -706,9 +720,26 @@ impl Engine {
     // ---------- очередь ----------
 
     fn start_wave(&mut self, src: Source, fetch: bool) {
+        // Смена станции реагирует сразу, как оригинал: старый трек замолкает, UI
+        // показывает новую станцию и загрузку, не дожидаясь ответа сервера.
+        if let Some(cur) = self.current.take() {
+            if self.loaded {
+                self.feedback("skip", Some(cur.full_id()), Some(self.pos() as f64));
+            }
+            self.history.push(cur);
+            self.trim_history();
+        }
+        self.stop_audio();
+        // Фидбеки старой сессии — параллельно, чтобы не задерживать запрос новых треков.
+        self.flush_feedback(true);
         self.clear_queue();
         self.list = None;
         self.set_source(src);
+        {
+            let mut s = self.sh();
+            s.track = None;
+            s.loading = true;
+        }
         self.feedback("radioStarted", None, None);
         if fetch {
             self.fetch_batch_with(true);
@@ -742,11 +773,17 @@ impl Engine {
         let feedbacks = std::mem::take(&mut self.deferred);
         let tx = self.tx.clone();
         let gen = self.batch_gen;
-        // В очереди фонового потока: запрос уйдёт после уже отправленных фидбеков.
-        let _ = self.bg.send(Box::new(move || {
+        let job = move || {
             let res = api.wave_session(&station, Some(&session), &queue, &feedbacks);
             let _ = tx.send(Msg::Batch { res, replace, gen });
-        }));
+        };
+        if replace {
+            // Смена станции: запрос уходит сразу, не дожидаясь очереди фидбеков.
+            thread::spawn(job);
+        } else {
+            // В очереди фонового потока: запрос уйдёт после уже отправленных фидбеков.
+            let _ = self.bg.send(Box::new(job));
+        }
     }
 
     fn on_batch(&mut self, b: Batch, replace: bool) {
@@ -771,7 +808,7 @@ impl Engine {
         let fresh: Vec<Track> = b
             .tracks
             .iter()
-            .filter(|t| !queued(t) && !(check_history && self.history.iter().any(|h| h.id == t.id)))
+            .filter(|t| !(queued(t) || check_history && self.history.iter().any(|h| h.id == t.id)))
             .cloned()
             .collect();
         let tracks = if !fresh.is_empty() || b.tracks.iter().all(&queued) {
@@ -817,7 +854,7 @@ impl Engine {
         }
         self.stop_audio();
         self.play_from_queue();
-        self.flush_feedback();
+        self.flush_feedback(false);
     }
 
     /// Список закончился: по кругу (исполнитель) или волна по нему (плейлист, альбом).
@@ -833,7 +870,7 @@ impl Engine {
                 self.list = Some(l);
             }
             After::Wave(src) => {
-                self.flush_feedback();
+                self.flush_feedback(false);
                 self.set_source(src);
                 self.session.clear();
                 self.feedback("radioStarted", None, None);
@@ -858,7 +895,7 @@ impl Engine {
             }
             None => {
                 self.current = None;
-                self.current_bytes = None;
+                self.current_url = None;
                 self.gen += 1;
                 let mut s = self.sh();
                 s.track = None;
@@ -896,7 +933,7 @@ impl Engine {
     fn start_current(&mut self) {
         self.gen += 1;
         self.loaded = false;
-        self.current_bytes = None;
+        self.current_url = None;
         let Some(t) = self.current.clone() else { return };
         {
             let mut s = self.sh();
@@ -921,13 +958,13 @@ impl Engine {
         let gen = self.gen;
         let tx = self.tx.clone();
         thread::spawn(move || {
-            let res = load_track(&api, &t);
+            let res = api.open_track_stream(&t);
             let _ = tx.send(Msg::Audio { gen, res });
         });
     }
 
     fn prefetch_next(&mut self) {
-        // Следующий трек качаем под конец текущего: не держать в памяти два файла всё время.
+        // Следующий трек открываем под конец текущего: в памяти только первый кусок.
         let near_end = {
             let s = self.shared.lock().unwrap();
             s.duration > 0.0 && s.duration - s.position <= 45.0
@@ -944,20 +981,20 @@ impl Engine {
         self.prefetching = Some(next.id.clone());
         let tx = self.tx.clone();
         thread::spawn(move || {
-            let res = load_track(&api, &next);
+            let res = api.open_track_stream(&next);
             let _ = tx.send(Msg::Prefetch { id: next.id, res });
         });
     }
 
-    fn play_loaded(&mut self, bytes: Vec<u8>) {
+    fn play_loaded(&mut self, stream: HttpStream) {
         let Some(t) = self.current.clone() else { return };
         if !self.ensure_audio() {
             self.error("Не найдено аудиоустройство");
             self.sh().loading = false;
             return;
         }
-        let bytes: Arc<[u8]> = bytes.into();
-        let src = match Decoder::new(Cursor::new(bytes.clone())) {
+        let url = stream.url().to_string();
+        let src = match Decoder::new(stream) {
             Ok(s) => s,
             Err(e) => {
                 self.on_load_error(format!("не удалось декодировать: {e}"));
@@ -977,7 +1014,7 @@ impl Engine {
                 sink.play()
             }
         }
-        self.current_bytes = Some(bytes);
+        self.current_url = Some(url);
         self.loaded = true;
         self.errors_in_row = 0;
         self.sh().loading = false;
@@ -1003,15 +1040,14 @@ impl Engine {
 mod tests {
     use super::*;
 
-    /// Сетевой тест: ссылка на поток → скачивание → декодирование (без токена — 30-сек превью).
+    /// Сетевой тест: ссылка на поток → потоковое чтение → декодирование (без токена — 30-сек превью).
     #[test]
     #[ignore]
     fn stream_and_decode() {
         let api = Api::new("");
         let url = api.stream_url("57703").expect("stream url");
-        let bytes = api.fetch_bytes(&url).expect("download");
-        assert!(bytes.len() > 50_000);
-        let dec = Decoder::new(Cursor::new(bytes)).expect("decode");
+        let stream = api.reopen_stream(&url).expect("open stream");
+        let dec = Decoder::new(stream).expect("decode");
         let samples = dec.take(44100).count();
         assert!(samples > 1000);
     }

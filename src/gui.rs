@@ -74,7 +74,8 @@ struct State {
     queue_ids: Vec<String>,
     blob_src: Option<SharedPixelBuffer<Rgba8Pixel>>,
     blob_requested: bool,
-    vibe_key: Option<(bool, Option<[u8; 3]>)>,
+    /// Последний цвет фона волны (None внутри — чёрный фон без трека); None снаружи — ещё не считали.
+    vibe_key: Option<Option<[u8; 3]>>,
     /// Анимация пятна: таймер есть, только пока волна играет на экране.
     trailer: Option<Trailer>,
     downloading: bool,
@@ -224,6 +225,9 @@ impl Ctx {
 
         let started = self.st.borrow().started;
         app.set_has_track(started && s.track.is_some());
+        // Карточка «Сейчас играет» в Пункте управления macOS.
+        #[cfg(target_os = "macos")]
+        crate::mac::now_playing(s.track.as_ref().filter(|_| started), s.playing, s.position, s.duration);
         app.set_playing(s.playing);
         app.set_loading(s.loading);
         app.set_position(s.position);
@@ -248,8 +252,9 @@ impl Ctx {
         app.set_wave_context(context);
 
         app.set_can_prev(s.track.is_some());
-        let playing_now = started && s.playing;
-        self.sync_vibe(playing_now, s.track.as_ref().and_then(|t| t.color));
+        // Градиент — по цвету трека, но только после первого запуска: до него фон чёрный.
+        // Пауза не должна его гасить (started остаётся true).
+        self.sync_vibe(if started { s.track.as_ref().and_then(|t| t.color) } else { None });
 
         self.sync_trailer(&s);
         self.sync_queue(&s);
@@ -1063,7 +1068,7 @@ fn apply_ui_scale(ui: &AppWindow) {
     if phys.width == 0 || phys.height == 0 {
         return;
     }
-    let base = std::env::var("SLINT_SCALE_FACTOR").ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or_else(|| win::dpi_scale(hwnd(ui)));
+    let base = std::env::var("SLINT_SCALE_FACTOR").ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or_else(|| dpi_base(ui));
     let css_w = phys.width as f32 / base;
     let k = if css_w >= 1920.0 { (12.0 + 0.003 * css_w) / 16.0 } else { 1.0 };
     let target = base * k;
@@ -1085,6 +1090,18 @@ fn quit() {
     let _ = slint::quit_event_loop();
 }
 
+/// Масштаб монитора: на Windows — DPI по HWND, на macOS — scale_factor окна
+/// (Retina отдаёт 2.0).
+#[cfg(windows)]
+fn dpi_base(ui: &AppWindow) -> f32 {
+    win::dpi_scale(hwnd(ui))
+}
+
+#[cfg(not(windows))]
+fn dpi_base(ui: &AppWindow) -> f32 {
+    ui.window().scale_factor()
+}
+
 /// Показать окно: при запуске в трей оно ещё не создано, после закрытия в трей — спрятано.
 fn reveal(ui: &AppWindow) {
     let first = hwnd(ui) == 0;
@@ -1104,11 +1121,23 @@ fn apply_mode(ui: &AppWindow, lite: bool) {
 }
 
 /// Окно winit создаётся не сразу после `show()` (до запуска цикла событий и с OpenGL),
-/// поэтому масштаб и прочее применяются, когда у окна появится HWND.
+/// поэтому масштаб и прочее применяются, когда окно появится: на Windows это HWND,
+/// на macOS — ненулевой размер.
 fn finish_reveal(weak: slint::Weak<AppWindow>, first: bool, tries: u32) {
     let Some(ui) = weak.upgrade() else { return };
-    let h = hwnd(&ui);
-    if h == 0 {
+    let ready = {
+        #[cfg(windows)]
+        {
+            hwnd(&ui) != 0
+        }
+        #[cfg(not(windows))]
+        {
+            // Размер окна ненулевой сразу (preferred-size), а winit-окно создаётся
+            // позже — ждём именно его появления, иначе handle ещё null.
+            ui.window().with_winit_window(|_| ()).is_some()
+        }
+    };
+    if !ready {
         if tries < 100 {
             Timer::single_shot(Duration::from_millis(20), move || finish_reveal(weak, first, tries + 1));
         }
@@ -1116,12 +1145,33 @@ fn finish_reveal(weak: slint::Weak<AppWindow>, first: bool, tries: u32) {
     }
     if first {
         apply_ui_scale(&ui);
-        win::round_corners(h);
-        let _ = std::fs::write(crate::config::dir().join("hwnd"), h.to_string());
-        win::set_icon(h);
+        #[cfg(windows)]
+        {
+            let h = hwnd(&ui);
+            win::round_corners(h);
+            let _ = std::fs::write(crate::config::dir().join("hwnd"), h.to_string());
+            win::set_icon(h);
+        }
+        // macOS: нативные кнопки окна («светофор») поверх контента.
+        #[cfg(target_os = "macos")]
+        {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            let view = ui
+                .window()
+                .with_winit_window(|w| match w.window_handle().map(|h| h.as_raw()) {
+                    Ok(RawWindowHandle::AppKit(h)) => h.ns_view.as_ptr(),
+                    _ => std::ptr::null_mut(),
+                })
+                .unwrap_or(std::ptr::null_mut());
+            crate::mac::native_window_buttons(view);
+        }
     }
-    win::show(h);
-    win::force_foreground(h);
+    #[cfg(windows)]
+    {
+        let h = hwnd(&ui);
+        win::show(h);
+        win::force_foreground(h);
+    }
 }
 
 fn hwnd(ui: &AppWindow) -> isize {
@@ -1396,6 +1446,12 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     start_updates(&ui);
 
     let player = Player::spawn(notifier());
+    // macOS: медиа-клавиши, карточка «Сейчас играет» и возврат «светофора» после fullscreen.
+    #[cfg(target_os = "macos")]
+    {
+        crate::mac::init_media_keys(player.clone());
+        crate::mac::init_window_observers();
+    }
     player.send(Cmd::Volume(cfg.volume));
     if let Some(t) = cfg.token.clone() {
         player.send(Cmd::Login(t));
@@ -1411,6 +1467,8 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     ui.global::<T>().set_lang(cfg.lang.clone().into());
     ui.global::<T>().on_tr(|s: SharedString| SharedString::from(crate::i18n::tr(s.as_str())));
     app.set_nav_collapsed(cfg.navbar_collapsed);
+    // macOS: нативный «светофор» вместо виндовых кнопок, сдвиг навбара вниз.
+    app.set_mac(cfg!(target_os = "macos"));
 
     let discord = crate::discord::Discord::spawn(
         player.clone(),
@@ -1725,10 +1783,19 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     app.on_close(move || {
         if p.state().playing {
             if let Some(ui) = weak.upgrade() {
-                let h = hwnd(&ui);
-                if h != 0 {
-                    win::hide(h);
-                    win::trim_memory();
+                #[cfg(windows)]
+                {
+                    let h = hwnd(&ui);
+                    if h != 0 {
+                        win::hide(h);
+                        win::trim_memory();
+                        return;
+                    }
+                }
+                // На macOS трея нет: прячем окно, приложение остаётся в Dock.
+                #[cfg(not(windows))]
+                {
+                    let _ = ui.hide();
                     return;
                 }
             }
@@ -1791,6 +1858,13 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Forward, .. } => {
                 with_ctx(|c| c.go_forward());
+                EventResult::PreventDefault
+            }
+            // Нативная красная кнопка macOS: та же логика, что у кнопки ✕ (App.close) —
+            // при играющем треке прячем окно, иначе выходим. PreventDefault не даёт
+            // slint закрыть окно самому.
+            WindowEvent::CloseRequested => {
+                with_ctx(|c| c.ui().global::<App>().invoke_close());
                 EventResult::PreventDefault
             }
             _ => EventResult::Propagate,
@@ -1959,15 +2033,19 @@ fn card_from_playlist(p: &Playlist) -> Card {
     }
 }
 
-/// Скопировать текст в буфер обмена Windows.
+/// Скопировать текст в системный буфер обмена: `clip` на Windows, `pbcopy` на macOS.
 fn copy_text(text: &str) {
     use std::io::Write as _;
-    use std::os::windows::process::CommandExt;
-    if let Ok(mut child) = std::process::Command::new("clip")
-        .creation_flags(0x0800_0000)
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-    {
+    #[cfg(windows)]
+    let mut prog = {
+        use std::os::windows::process::CommandExt;
+        let mut cmd = std::process::Command::new("clip");
+        cmd.creation_flags(0x0800_0000);
+        cmd
+    };
+    #[cfg(not(windows))]
+    let mut prog = std::process::Command::new("pbcopy");
+    if let Ok(mut child) = prog.stdin(std::process::Stdio::piped()).spawn() {
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(text.as_bytes());
         }
@@ -3169,15 +3247,17 @@ impl Ctx {
     }
 
     /// Пятно и фон волны: в паузе — исходная картинка и чёрный фон, во время игры — цвета трека.
-    fn sync_vibe(self: &Rc<Self>, playing: bool, color: Option<[u8; 3]>) {
-        let key = (playing, if playing { color } else { None });
+    fn sync_vibe(self: &Rc<Self>, color: Option<[u8; 3]>) {
+        // Оттенок фона берётся от цвета трека, а не от того, играет он или на паузе:
+        // пауза не должна гасить градиент и сбрасывать подложку.
+        let key = color;
         if self.st.borrow().vibe_key == Some(key) && self.st.borrow().blob_src.is_some() {
             return;
         }
         let ui = self.ui();
         let app = ui.global::<App>();
         let bucket = vibe_bucket(color);
-        let stops: Vec<Color> = if playing {
+        let stops: Vec<Color> = if color.is_some() {
             bucket.4.iter().map(|c| rgb(*c)).collect()
         } else {
             vec![Color::from_rgb_u8(0, 0, 0); 16]
@@ -3198,13 +3278,14 @@ impl Ctx {
                     }
                     let s = c.player.state();
                     let color = s.track.as_ref().and_then(|t| t.color);
-                    c.sync_vibe(s.playing && c.st.borrow().started, color);
+                    let started = c.st.borrow().started;
+                    c.sync_vibe(if started { color } else { None });
                 })
             });
             return;
         };
         self.st.borrow_mut().vibe_key = Some(key);
-        if playing {
+        if color.is_some() {
             app.set_blob(recolor(&src, bucket.4[2]));
         } else {
             app.set_blob(Image::from_rgba8(src));
@@ -3494,7 +3575,13 @@ fn music_dir(cfg: &Config) -> std::path::PathBuf {
     if !cfg.download_dir.is_empty() {
         return cfg.download_dir.clone().into();
     }
-    std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into())).join("Music").join("Яндекс Музыка")
+    // Windows: %USERPROFILE%\Music; macOS: ~/Music.
+    #[cfg(windows)]
+    let home = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into()));
+    #[cfg(not(windows))]
+    let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()));
+    home.join("Music").join("Яндекс Музыка")
+}
 }
 
 /// Расширение по первым байтам: mp3, AAC (ADTS), MP4 или FLAC.

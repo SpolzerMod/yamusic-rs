@@ -15,8 +15,31 @@ pub struct Asar {
 }
 
 pub fn asar_path() -> PathBuf {
-    let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
-    PathBuf::from(local).join("Programs").join("YandexMusic").join("resources").join("app.asar")
+    let c = asar_candidates();
+    c.iter().find(|p| p.exists()).cloned().unwrap_or_else(|| c[0].clone())
+}
+
+/// Где искать app.asar установленного официального приложения. На Windows оно
+/// Electron-установщик в %LOCALAPPDATA%; на macOS — .app-бандл в /Applications
+/// (имя зависит от источника установки). Не нашли — сработает загрузка
+/// с music.yandex.ru.
+fn asar_candidates() -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        vec![PathBuf::from(local).join("Programs").join("YandexMusic").join("resources").join("app.asar")]
+    }
+    #[cfg(not(windows))]
+    {
+        let mut v = vec![
+            PathBuf::from("/Applications/Яндекс Музыка.app/Contents/Resources/app.asar"),
+            PathBuf::from("/Applications/YandexMusic.app/Contents/Resources/app.asar"),
+        ];
+        if let Ok(home) = std::env::var("HOME") {
+            v.push(PathBuf::from(home).join("Applications/Яндекс Музыка.app/Contents/Resources/app.asar"));
+        }
+        v
+    }
 }
 
 impl Asar {

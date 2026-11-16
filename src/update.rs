@@ -12,7 +12,8 @@ use std::time::Duration;
 /// Как часто спрашивать GitHub. У оригинала UPDATE_POLL_INTERVAL_MS — те же 30 минут.
 pub const POLL: Duration = Duration::from_secs(30 * 60);
 
-/// Имя exe в релизе.
+/// Имя exe в релизе. Вне Windows используется только тестом.
+#[cfg_attr(not(windows), allow(dead_code))]
 const ASSET: &str = concat!(env!("CARGO_PKG_NAME"), ".exe");
 
 /// Аргумент, с которым обновлённый exe ждёт, пока закроется старый.
@@ -63,11 +64,21 @@ pub fn check() -> Result<Option<Release>, String> {
         return Ok(None);
     }
     let exe = v.get("assets").and_then(|a| a.as_array()).and_then(|assets| {
-        let a = assets.iter().find(|a| a.get("name").and_then(|n| n.as_str()) == Some(ASSET))?;
-        let url = a.get("browser_download_url")?.as_str()?.to_string();
-        let size = a.get("size")?.as_u64()?;
-        let sha = a.get("digest")?.as_str()?.strip_prefix("sha256:")?.to_ascii_lowercase();
-        Some((url, size, sha))
+        #[cfg(windows)]
+        {
+            let a = assets.iter().find(|a| a.get("name").and_then(|n| n.as_str()) == Some(ASSET))?;
+            let url = a.get("browser_download_url")?.as_str()?.to_string();
+            let size = a.get("size")?.as_u64()?;
+            let sha = a.get("digest")?.as_str()?.strip_prefix("sha256:")?.to_ascii_lowercase();
+            Some((url, size, sha))
+        }
+        // Самообновление пока только для Windows: в релизе лежит exe, а на macOS
+        // бинарник и Gatekeeper. Кнопка «Обновить» просто откроет страницу релиза.
+        #[cfg(not(windows))]
+        {
+            let _ = assets;
+            None
+        }
     });
     Ok(Some(Release {
         version: tag.trim_start_matches('v').to_string(),

@@ -13,6 +13,13 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         resources::embed();
     }
+    // macOS: MediaPlayer (медиа-клавиши, «Сейчас играет»), Foundation и objc runtime
+    // для прямых вызовов в src/mac.rs.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rustc-link-lib=objc");
+        println!("cargo:rustc-link-lib=framework=MediaPlayer");
+        println!("cargo:rustc-link-lib=framework=Foundation");
+    }
 }
 
 /// Ресурсы exe: описание (его показывают диспетчер задач и свойства файла) и значок из

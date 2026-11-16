@@ -14,10 +14,13 @@ mod gui;
 mod i18n;
 mod images;
 mod landing;
+#[cfg(target_os = "macos")]
+mod mac;
 mod net;
 mod palette;
 mod player;
 mod secret;
+mod stream;
 mod tags;
 mod tray;
 mod update;
@@ -26,6 +29,7 @@ mod yandex_id;
 
 /// Занять мьютекс единственного экземпляра. Если он уже чей-то — отпустить свою ссылку,
 /// чтобы мьютекс исчез вместе с тем процессом.
+#[cfg(windows)]
 fn claim_instance() -> bool {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
     use windows_sys::Win32::System::Threading::CreateMutexW;
@@ -38,6 +42,13 @@ fn claim_instance() -> bool {
         }
         true
     }
+}
+
+/// На macOS второй запуск .app не создаёт процесс (LaunchServices показывает уже
+/// открытое окно), отдельного мьютекса не нужно: считаем себя первым.
+#[cfg(not(windows))]
+fn claim_instance() -> bool {
+    true
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -69,6 +80,10 @@ fn main() -> Result<(), slint::PlatformError> {
     slint::BackendSelector::new().backend_name("winit".into()).renderer_name("skia-software".into()).select()?;
     update::cleanup();
     win::refresh_autostart();
+    // На macOS трея нет: --tray игнорируем, иначе окно спрячется без возможности вернуть.
+    #[cfg(windows)]
     let start_hidden = std::env::args().any(|a| a == "--tray");
+    #[cfg(not(windows))]
+    let start_hidden = false;
     gui::run(start_hidden)
 }

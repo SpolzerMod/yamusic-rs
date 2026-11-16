@@ -1533,6 +1533,17 @@ let mp3 = || arr.iter().filter(|x| x.get("codec").and_then(|c| c.as_str()) == So
         }
         resp.bytes().map(|b| b.to_vec()).map_err(|e| format!("сеть: {e}"))
     }
+
+    /// Открыть поток трека: ссылка на mp3 + первый кусок (дальше докачка при чтении).
+    pub fn open_track_stream(&self, t: &Track) -> Res<crate::stream::HttpStream> {
+        let url = self.stream_url(&t.id)?;
+        crate::stream::HttpStream::open(self.http.clone(), url)
+    }
+
+    /// Переоткрыть уже известный адрес mp3 (для повтора трека без повторного поиска ссылки).
+    pub fn reopen_stream(&self, url: &str) -> Res<crate::stream::HttpStream> {
+        crate::stream::HttpStream::open(self.http.clone(), url.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -1552,5 +1563,49 @@ mod tests {
     #[test]
     fn pic_size() {
         assert_eq!(pic("avatars.yandex.net/a/%%", 200), "https://avatars.yandex.net/a/200x200");
+    }
+
+    /// Замер цепочки загрузки трека и поддержка Range CDN (нужен вход в аккаунт).
+    #[test]
+    #[ignore]
+    fn stream_range_timing() {
+        let cfg = crate::config::Config::load();
+        let token = cfg.token.expect("нужен вход в аккаунт");
+        let api = Api::new(&token);
+        let t0 = std::time::Instant::now();
+        let url = api.stream_url("57703").expect("stream url");
+        println!("stream_url (2 запроса): {:?}", t0.elapsed());
+        let t1 = std::time::Instant::now();
+        let resp = api.http.get(&url).header("Range", "bytes=0-262143").send().expect("range");
+        println!("range: status={}, content-range={:?}, {:?}", resp.status(), resp.headers().get("content-range"), t1.elapsed());
+        let first = resp.bytes().expect("range body");
+        println!("первый кусок: {} байт", first.len());
+        let t2 = std::time::Instant::now();
+        let full = api.fetch_bytes(&url).expect("full");
+        println!("полная загрузка: {} байт, {:?}", full.len(), t2.elapsed());
+    }
+
+    /// Перемотка потокового источника совпадает с прямым Range-запросом (в т.ч. за границей куска).
+    #[test]
+    #[ignore]
+    fn stream_seek_correct() {
+        use std::io::{Read, Seek, SeekFrom};
+        let cfg = crate::config::Config::load();
+        let token = cfg.token.expect("нужен вход в аккаунт");
+        let api = Api::new(&token);
+        let url = api.stream_url("57703").expect("stream url");
+        let mut s = api.reopen_stream(&url).expect("open stream");
+        // 300000 — за пределами первого куска (256 КБ): чтение должно догрузить Range.
+        let expect = api.http.get(&url).header("Range", "bytes=300000-300999").send().unwrap().bytes().unwrap();
+        s.seek(SeekFrom::Start(300000)).unwrap();
+        let mut got = [0u8; 1000];
+        s.read_exact(&mut got).unwrap();
+        assert_eq!(&got[..], &expect[..]);
+        // Перемотка назад к началу.
+        let expect0 = api.http.get(&url).header("Range", "bytes=0-3").send().unwrap().bytes().unwrap();
+        s.seek(SeekFrom::Start(0)).unwrap();
+        let mut head = [0u8; 4];
+        s.read_exact(&mut head).unwrap();
+        assert_eq!(&head[..], &expect0[..]);
     }
 }
