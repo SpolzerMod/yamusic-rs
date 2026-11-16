@@ -30,7 +30,6 @@ pub static QUALITY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::n
 /// Ссылка на картинку Яндекса: `uri` содержит `%%` вместо размера.
 pub fn pic(uri: &str, size: u32) -> String {
     let uri = uri.trim_start_matches("https://").trim_start_matches("http://");
-    let size = crate::images::ladder(size);
     // get-music-misc отдаёт только эти размеры, на остальные — 404.
     let size = if uri.contains("/get-music-misc/") {
         [30, 40, 50, 75, 80, 100, 150, 160, 200, 300, 400, 460, 600, 700, 800, 1000].into_iter().find(|&s| s >= size).unwrap_or(1000)
@@ -1575,12 +1574,7 @@ mod tests {
 
     #[test]
     fn pic_size() {
-        // 200 квантуется лестницей в 320, серверный размер округляется вверх до 400.
-        assert_eq!(pic("avatars.yandex.net/a/%%", 200), "https://avatars.yandex.net/a/400x400");
-        assert_eq!(crate::images::ladder(40), 64);
-        assert_eq!(crate::images::ladder(96), 128);
-        assert_eq!(crate::images::ladder(500), 640);
-        assert_eq!(crate::images::ladder(2000), 900);
+        assert_eq!(pic("avatars.yandex.net/a/%%", 200), "https://avatars.yandex.net/a/200x200");
     }
 
     /// Замер цепочки загрузки трека и поддержка Range CDN (нужен вход в аккаунт).

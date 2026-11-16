@@ -45,12 +45,6 @@ thread_local! {
     static CURRENT: RefCell<Option<Images>> = const { RefCell::new(None) };
 }
 
-/// Квантование размера обложки к короткой лестнице: разные места с близкими размерами
-/// попадают в одну запись кэша вместо плодения почти одинаковых копий одного арта.
-pub fn ladder(px: u32) -> u32 {
-    [64, 128, 192, 320, 640, 900].into_iter().find(|&s| s >= px).unwrap_or(900)
-}
-
 fn decode(bytes: &[u8], px: u32) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
     // Ресайз в родном формате до конверсии в RGBA — без лишней полной RGBA-копии источника.
     let mut img = image::load_from_memory(bytes).ok()?;
@@ -123,7 +117,6 @@ impl Images {
         if url.trim_start_matches("https://").is_empty() {
             return;
         }
-        let px = ladder(px);
         // Один адрес в разных размерах — разные записи: картинка декодируется точно под место.
         let key = format!("{url}#{px}");
         let url = key.as_str();
