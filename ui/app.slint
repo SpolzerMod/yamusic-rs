@@ -87,6 +87,14 @@ export component AppWindow inherits Window {
     default-font-size: 16px;
     background: Theme.background-color-primary-enabled-basic;
 
+    // Диагностика ввода: самый нижний слой. Сюда попадают нажатия, не попавшие ни в один
+    // элемент — так видно, что клик дошёл до окна, но мимо кнопки (а не «потерялся»).
+    if App.input-debug: TouchArea {
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down { App.input-note("фон — нажато"); }
+        }
+    }
+
     property <bool> new-vibe: App.page == Page.wave;
     changed width => { App.window-resized(); }
     property <length> pad: 8px;

@@ -23,7 +23,13 @@ export component TrackRow inherits Rectangle {
     background: current || hot ? Theme.controls-color-secondary-default-disabled : transparent;
     ta := TouchArea {
         mouse-cursor: MouseCursor.pointer;
-        clicked => { root.play(); }
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down && App.input-debug { App.input-note("TrackRow — нажато: " + item.title); }
+        }
+        clicked => {
+            if App.input-debug { App.input-note("TrackRow — клик: " + item.title); }
+            root.play();
+        }
     }
     Cover {
         x: 0;

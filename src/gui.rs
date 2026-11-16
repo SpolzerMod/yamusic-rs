@@ -114,6 +114,10 @@ thread_local! {
 /// пользователь сам нажимает «Получить новый код» или когда вход завершился.
 static LOGIN_RENEW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+/// Сколько кадров отрисовано: по нему видно, обновляется ли окно вообще
+/// (в диагностике ввода пишется раз в 5 секунд).
+static FRAMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Включена ли диагностика ввода (`YAMUSIC_INPUT_DEBUG=1 yamusic-rs`): в log.txt
 /// попадают координаты курсора, масштаб, фокус и отметки о дошедших кликах.
 fn input_debug() -> bool {
@@ -1238,6 +1242,29 @@ fn finish_reveal(weak: slint::Weak<AppWindow>, first: bool, tries: u32) {
     }
 }
 
+/// Завершить «нажатие» после перемещения или изменения размера окна.
+///
+/// Пока пользователь тянет окно за заголовок или край, указатель принадлежит композитору
+/// (`xdg_toplevel.move`/`resize` на Wayland, `_NET_WM_MOVERESIZE` на X11), и отпускание
+/// кнопки до приложения не доходит. Slint в этот момент остаётся с зажатой кнопкой:
+/// наведение перестаёт обновляться, а клики уходят «захваченному» элементу — окно
+/// выглядит мёртвым, пока не придёт следующая полная пара нажатие-отпускание.
+/// Поэтому отпускание доставляем сами, сразу после старта перемещения.
+fn settle_pointer_after_move(ui: &AppWindow) {
+    // Именно отложенно: обработчик нажатия выполняется внутри разбора этого же события,
+    // и «захват» элемента выставляется уже после возврата из него.
+    let weak = ui.as_weak();
+    let _ = slint::invoke_from_event_loop(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let w = ui.window();
+        let s = w.size().to_logical(w.scale_factor());
+        w.dispatch_event(slint::platform::WindowEvent::PointerReleased {
+            position: slint::LogicalPosition::new(s.width / 2.0, s.height / 2.0),
+            button: slint::platform::PointerEventButton::Left,
+        });
+    });
+}
+
 /// Рабочая область монитора с окном (лево, верх, право, низ) в физических пикселях.
 /// Windows учитывает панель задач, Linux — весь монитор: winit не отдаёт рабочую область.
 fn work_area(ui: &AppWindow) -> (i32, i32, i32, i32) {
@@ -1833,6 +1860,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             ui.window().with_winit_window(|w| {
                 let _ = w.drag_window();
             });
+            settle_pointer_after_move(&ui);
         }
     });
     let weak = ui.as_weak();
@@ -1885,6 +1913,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             ui.window().with_winit_window(|w| {
                 let _ = w.drag_resize_window(d);
             });
+            settle_pointer_after_move(&ui);
         }
     });
     let weak = ui.as_weak();
@@ -1999,6 +2028,9 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
                         logical.map(|(x, y)| format!("{x:.0},{y:.0}")).unwrap_or_else(|| "?".into())
                     ));
                 }
+                WindowEvent::RedrawRequested => {
+                    FRAMES.fetch_add(1, Ordering::Relaxed);
+                }
                 WindowEvent::Focused(f) => log(format!("ввод: фокус {f}")),
                 WindowEvent::ScaleFactorChanged { scale_factor, .. } => log(format!("ввод: масштаб окна {scale_factor}")),
                 WindowEvent::Resized(size) => log(format!("ввод: размер окна {}×{} (k {})", size.width, size.height, scale())),
@@ -2017,6 +2049,16 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             _ => EventResult::Propagate,
         }
     });
+
+    // Пульс отрисовки: если кадры не идут, интерфейс «замирает» (клики доходят,
+    // но ничего не перерисовывается) — по этой строке это видно сразу.
+    // Таймер держим живым до конца run(): локальная переменная в блоке останавливается.
+    let frames_timer = input_debug().then(Timer::default);
+    if let Some(t) = &frames_timer {
+        t.start(TimerMode::Repeated, Duration::from_secs(5), move || {
+            log(format!("рендер: кадров всего {}", FRAMES.load(Ordering::Relaxed)));
+        });
+    }
 
     let tick = Timer::default();
     tick.start(TimerMode::Repeated, Duration::from_millis(250), move || {

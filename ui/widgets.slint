@@ -156,6 +156,9 @@ export component IconButton inherits Rectangle {
     ta := TouchArea {
         enabled: enabled;
         mouse-cursor: MouseCursor.pointer;
+        changed has-hover => {
+            if App.input-debug { App.input-note("IconButton — наведение: " + (ta.has-hover ? "да" : "нет")); }
+        }
         pointer-event(e) => {
             if e.kind == PointerEventKind.down && App.input-debug { App.input-note("IconButton — нажато"); }
         }
@@ -225,6 +228,9 @@ export component PillButton inherits Rectangle {
     }
     ta := TouchArea {
         mouse-cursor: MouseCursor.pointer;
+        changed has-hover => {
+            if App.input-debug { App.input-note("PillButton — наведение: " + root.text + (ta.has-hover ? " да" : " нет")); }
+        }
         pointer-event(e) => {
             if e.kind == PointerEventKind.down && App.input-debug { App.input-note("PillButton — нажато: " + root.text); }
         }

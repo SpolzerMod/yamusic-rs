@@ -30,7 +30,16 @@ component NavLink inherits Rectangle {
     }
     ta := TouchArea {
         mouse-cursor: MouseCursor.pointer;
-        clicked => { App.navigate(page); }
+        changed has-hover => {
+            if App.input-debug { App.input-note("NavLink — наведение: " + root.text + (ta.has-hover ? " да" : " нет")); }
+        }
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down && App.input-debug { App.input-note("NavLink — нажато: " + root.text); }
+        }
+        clicked => {
+            if App.input-debug { App.input-note("NavLink — клик: " + root.text); }
+            App.navigate(page);
+        }
     }
 }
 
