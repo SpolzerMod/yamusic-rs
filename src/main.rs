@@ -10,6 +10,7 @@ mod client;
 mod config;
 mod discord;
 mod eq;
+mod fade;
 mod gui;
 mod i18n;
 mod images;

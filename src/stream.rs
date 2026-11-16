@@ -4,33 +4,38 @@
 //! Seek (перемотка шлёт отдельный Range-запрос), поэтому годится для symphonia.
 //! Если сервер не умеет Range (ответ 200 на запрос куска) — забираем весь файл сразу.
 //!
-//! Чтение с аудиопотока не должно блокироваться сетью, иначе будут заикания на
-//! границах кусков. Поэтому следующий кусок качается заранее в фоновом потоке.
+//! Чтение с аудиопотока не должно блокироваться сетью, иначе будут заикания.
+//! Поэтому (1) следующий кусок качается заранее в фоновом потоке, а (2) перед
+//! перемоткой движок заранее скачивает целевой кусок в слот `primed` — тогда
+//! `Sink::try_seek`, который rodio применяет прямо в аудиоколбэке, читает из памяти.
 
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Mutex};
 
 /// Размер куска: хватает на несколько секунд звука, качается быстро.
 const CHUNK: u64 = 256 * 1024;
 /// За сколько до конца куска начинаем качать следующий (~2.7 с звука при 192 кбит/с).
 const AHEAD: u64 = 64 * 1024;
 
-/// Результат фоновой докачки: (начало куска, байты или ошибка).
-type AheadChunk = (u64, std::sync::Mutex<Receiver<(u64, Result<Vec<u8>, String>)>>);
+/// Кусок файла: с какой позиции и байты.
+struct Chunk {
+    start: u64,
+    bytes: Vec<u8>,
+}
 
-pub struct HttpStream {
+type AheadChunk = (u64, Mutex<Receiver<(u64, Result<Vec<u8>, String>)>>);
+
+/// Общее состояние потока, доступное движку: предзагрузка куска перед перемоткой.
+/// Поля, кроме `len`, снаружи не нужны — движок зовёт только [`Shared::prime`].
+pub struct Shared {
     client: reqwest::blocking::Client,
     url: String,
-    pos: u64,
-    len: u64,
-    chunk: Vec<u8>,
-    chunk_start: u64,
-    /// false — сервер отдал весь файл одним ответом, докачка не нужна.
+    pub len: u64,
     ranged: bool,
-    /// Заранее качаемый следующий кусок: (начало, результат из фонового потока).
-    /// Mutex нужен, чтобы источник был Sync (требование rodio); доступ всё равно
-    /// только с аудиопотока.
-    ahead: Option<AheadChunk>,
+    chunk: Mutex<Chunk>,
+    /// Кусок, заранее скачанный для перемотки: `read` заберёт его вместо сети.
+    primed: Mutex<Option<Chunk>>,
 }
 
 fn fetch_range(client: &reqwest::blocking::Client, url: &str, start: u64, end: u64) -> Result<Vec<u8>, String> {
@@ -45,6 +50,72 @@ fn fetch_range(client: &reqwest::blocking::Client, url: &str, start: u64, end: u
     resp.bytes().map(|b| b.to_vec()).map_err(|e| format!("сеть: {e}"))
 }
 
+impl Shared {
+    /// Обеспечить кусок, покрывающий байт `byte` (для перемотки). Если данные уже
+    /// в памяти — ничего не качаем, и `sink.try_seek` применится сразу; иначе
+    /// докачиваем целевой кусок в слот предзагрузки.
+    pub fn prime(&self, byte: u64) -> Result<(), String> {
+        if !self.ranged || self.len == 0 {
+            return Ok(());
+        }
+        let byte = byte.min(self.len - 1);
+        // Coarse seek приземляется на ~2.9 КБ раньше линейной оценки (запас на
+        // кадр) и читает несколько кадров вперёд — берём запас с обеих сторон.
+        let start = byte.saturating_sub(8192);
+        let need_end = (byte + 8192).min(self.len);
+        let (cstart, cend) = self.chunk_bounds();
+        if start >= cstart && need_end <= cend {
+            return Ok(());
+        }
+        if let Some(c) = self.primed.lock().unwrap().as_ref() {
+            if start >= c.start && need_end <= c.start + c.bytes.len() as u64 {
+                return Ok(());
+            }
+        }
+        let end = (start + CHUNK - 1).min(self.len - 1);
+        let bytes = fetch_range(&self.client, &self.url, start, end)?;
+        *self.primed.lock().unwrap() = Some(Chunk { start, bytes });
+        Ok(())
+    }
+
+    /// Забрать предзагруженный кусок, если он покрывает `pos`.
+    fn take_primed(&self, pos: u64) -> Option<Chunk> {
+        let mut p = self.primed.lock().unwrap();
+        match p.as_ref() {
+            Some(c) if pos >= c.start && pos < c.start + c.bytes.len() as u64 => p.take(),
+            _ => None,
+        }
+    }
+
+    fn set_chunk(&self, chunk: Chunk) {
+        *self.chunk.lock().unwrap() = chunk;
+    }
+
+    /// Начало и конец текущего куска.
+    fn chunk_bounds(&self) -> (u64, u64) {
+        let c = self.chunk.lock().unwrap();
+        (c.start, c.start + c.bytes.len() as u64)
+    }
+
+    fn fetch_chunk(&self, start: u64) -> Result<(), String> {
+        if !self.ranged {
+            return Ok(());
+        }
+        let end = (start + CHUNK - 1).min(self.len.saturating_sub(1));
+        let bytes = fetch_range(&self.client, &self.url, start, end)?;
+        self.set_chunk(Chunk { start, bytes });
+        Ok(())
+    }
+}
+
+pub struct HttpStream {
+    shared: Arc<Shared>,
+    pos: u64,
+    /// Заранее качаемый следующий кусок: (начало, результат из фонового потока).
+    /// Mutex нужен, чтобы источник был Sync (требование rodio).
+    ahead: Option<AheadChunk>,
+}
+
 impl HttpStream {
     pub fn open(client: reqwest::blocking::Client, url: String) -> Result<Self, String> {
         let resp = client
@@ -56,62 +127,59 @@ impl HttpStream {
         if !status.is_success() {
             return Err(format!("HTTP {status}"));
         }
-        if status == reqwest::StatusCode::PARTIAL_CONTENT {
+        let ranged = status == reqwest::StatusCode::PARTIAL_CONTENT;
+        let len = if ranged {
             // Content-Range: bytes 0-262143/13252440 — полная длина после слэша.
-            let total = resp
-                .headers()
+            resp.headers()
                 .get("content-range")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.rsplit('/').next())
                 .and_then(|s| s.parse::<u64>().ok())
-                .ok_or("нет длины в Content-Range")?;
-            let chunk = resp.bytes().map_err(|e| format!("сеть: {e}"))?.to_vec();
-            Ok(HttpStream { client, url, pos: 0, len: total, chunk, chunk_start: 0, ranged: true, ahead: None })
+                .ok_or("нет длины в Content-Range")?
         } else {
-            let chunk = resp.bytes().map_err(|e| format!("сеть: {e}"))?.to_vec();
-            let len = chunk.len() as u64;
-            Ok(HttpStream { client, url, pos: 0, len, chunk, chunk_start: 0, ranged: false, ahead: None })
-        }
+            resp.content_length().unwrap_or(0)
+        };
+        let bytes = resp.bytes().map_err(|e| format!("сеть: {e}"))?.to_vec();
+        let len = if ranged { len } else { bytes.len() as u64 };
+        let shared = Arc::new(Shared {
+            client,
+            url,
+            len,
+            ranged,
+            chunk: Mutex::new(Chunk { start: 0, bytes }),
+            primed: Mutex::new(None),
+        });
+        Ok(HttpStream { shared, pos: 0, ahead: None })
     }
 
     pub fn url(&self) -> &str {
-        &self.url
+        &self.shared.url
     }
 
-    fn chunk_end(&self) -> u64 {
-        self.chunk_start + self.chunk.len() as u64
-    }
-
-    fn fetch_chunk(&mut self, start: u64) -> io::Result<()> {
-        self.ahead = None;
-        if !self.ranged {
-            return Ok(());
-        }
-        let end = (start + CHUNK - 1).min(self.len.saturating_sub(1));
-        self.chunk = fetch_range(&self.client, &self.url, start, end).map_err(io::Error::other)?;
-        self.chunk_start = start;
-        Ok(())
+    /// Состояние для предзагрузки куска перед перемоткой.
+    pub fn shared(&self) -> Arc<Shared> {
+        self.shared.clone()
     }
 
     /// Запустить фоновую докачку следующего куска, когда подходим к концу текущего.
     fn maybe_start_ahead(&mut self) {
-        if !self.ranged || self.ahead.is_some() {
+        if !self.shared.ranged || self.ahead.is_some() {
             return;
         }
-        let end = self.chunk_end();
-        if end >= self.len || self.pos + AHEAD < end {
+        let (_, end) = self.shared.chunk_bounds();
+        if end >= self.shared.len || self.pos + AHEAD < end {
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
-        let client = self.client.clone();
-        let url = self.url.clone();
-        let len = self.len;
+        let client = self.shared.client.clone();
+        let url = self.shared.url.clone();
+        let len = self.shared.len;
         std::thread::spawn(move || {
             let stop = (end + CHUNK - 1).min(len - 1);
             let res = fetch_range(&client, &url, end, stop);
             let _ = tx.send((end, res));
         });
-        self.ahead = Some((end, std::sync::Mutex::new(rx)));
+        self.ahead = Some((end, Mutex::new(rx)));
     }
 
     /// Взять заранее скачанный кусок, если он начинается там, где нужно.
@@ -126,42 +194,47 @@ impl HttpStream {
             _ => None,
         }
     }
+
+    /// Обеспечить кусок, покрывающий `pos`, когда текущий его не покрывает:
+    /// заранее скачанный следующий (только при непрерывном чтении), затем
+    /// предзагруженный для перемотки (в любую сторону), иначе — сетевой запрос.
+    fn ensure_chunk(&mut self) -> io::Result<()> {
+        let (_, cend) = self.shared.chunk_bounds();
+        if self.pos == cend {
+            if let Some(bytes) = self.take_ahead(cend) {
+                self.shared.set_chunk(Chunk { start: cend, bytes });
+                return Ok(());
+            }
+        }
+        if let Some(chunk) = self.shared.take_primed(self.pos) {
+            self.shared.set_chunk(chunk);
+            return Ok(());
+        }
+        self.ahead = None;
+        self.shared.fetch_chunk(self.pos).map_err(io::Error::other)
+    }
 }
 
 impl Read for HttpStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.pos >= self.len || buf.is_empty() {
+        if self.pos >= self.shared.len || buf.is_empty() {
             return Ok(0);
         }
-        let end = self.chunk_end();
-        if self.pos >= end {
-            // Заранее скачанный кусок подходит только при непрерывном чтении
-            // (pos == end). После перемотки вперёд pos может быть дальше него —
-            // тогда предзагрузку сбрасываем и качаем по новой позиции, иначе
-            // получился бы пустой Read (EOF) и трек бы оборвался.
-            let ahead = if self.pos == end {
-                self.take_ahead(end)
-            } else {
-                self.ahead = None;
-                None
-            };
-            match ahead {
-                Some(bytes) => {
-                    self.chunk = bytes;
-                    self.chunk_start = end;
-                }
-                None => self.fetch_chunk(self.pos)?,
+        let (cstart, cend) = self.shared.chunk_bounds();
+        if self.pos >= cend || self.pos < cstart {
+            self.ensure_chunk()?;
+        }
+        let n = {
+            let c = self.shared.chunk.lock().unwrap();
+            let off = (self.pos - c.start) as usize;
+            if off >= c.bytes.len() {
+                return Ok(0);
             }
-        } else if self.pos < self.chunk_start {
-            self.fetch_chunk(self.pos)?;
-        }
-        let off = (self.pos - self.chunk_start) as usize;
-        if off >= self.chunk.len() {
-            return Ok(0);
-        }
-        let avail = &self.chunk[off..];
-        let n = buf.len().min(avail.len()).min((self.len - self.pos) as usize);
-        buf[..n].copy_from_slice(&avail[..n]);
+            let avail = &c.bytes[off..];
+            let n = buf.len().min(avail.len()).min((self.shared.len - self.pos) as usize);
+            buf[..n].copy_from_slice(&avail[..n]);
+            n
+        };
         self.pos += n as u64;
         self.maybe_start_ahead();
         Ok(n)
@@ -172,7 +245,7 @@ impl Seek for HttpStream {
     fn seek(&mut self, s: SeekFrom) -> io::Result<u64> {
         let new = match s {
             SeekFrom::Start(n) => n as i64,
-            SeekFrom::End(n) => self.len as i64 + n,
+            SeekFrom::End(n) => self.shared.len as i64 + n,
             SeekFrom::Current(n) => self.pos as i64 + n,
         };
         if new < 0 {
@@ -184,7 +257,7 @@ impl Seek for HttpStream {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
     use std::net::TcpListener;
@@ -196,7 +269,7 @@ mod tests {
 
     /// Мини-сервер с поддержкой Range: 206 + Content-Range, как CDN Яндекса.
     /// Слушает 127.0.0.1 — внешняя сеть не нужна. Возвращает URL и счётчик запросов.
-    fn serve(data: Vec<u8>) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    pub(crate) fn serve(data: Vec<u8>) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let url = format!("http://{}/track", listener.local_addr().expect("addr"));
@@ -266,11 +339,11 @@ mod tests {
         assert_eq!(&buf[..n], &data[target as usize..target as usize + n]);
     }
 
-    /// Ключевой инвариант фикса перемотки: повторный seek в уже загруженный кусок
-    /// не должен снова идти в сеть. Иначе финальный `Sink::try_seek` (он выполняется
-    /// на аудиопотоке) снова качал бы данные и давал щелчки.
+    /// Ключевой инвариант перемотки: если движок заранее скачал целевой кусок
+    /// (`prime`), повторный seek в него не должен идти в сеть — иначе финальный
+    /// `Sink::try_seek` на аудиопотоке снова качал бы данные.
     #[test]
-    fn second_seek_into_loaded_chunk_does_not_refetch() {
+    fn primed_chunk_is_served_without_refetch() {
         use std::sync::atomic::Ordering;
         let len = 2 * 1024 * 1024 + 300_000;
         let data = pattern(len);
@@ -279,17 +352,13 @@ mod tests {
         let mut s = HttpStream::open(client, url).expect("open");
         let mut buf = [0u8; 4096];
 
-        // Первый seek в середину трека: кусок докачивается (сеть — здесь допустима).
         let at = 700_000u64;
-        s.seek(SeekFrom::Start(at)).expect("seek");
-        let n = s.read(&mut buf).expect("read");
-        assert_eq!(&buf[..n], &data[at as usize..at as usize + n]);
-        let after_first = hits.load(Ordering::SeqCst);
+        s.shared().prime(at).expect("prime");
+        let before = hits.load(Ordering::SeqCst);
 
-        // Тот же seek ещё раз: данные уже в куске, запросов быть не должно.
         s.seek(SeekFrom::Start(at)).expect("seek");
         let n = s.read(&mut buf).expect("read");
         assert_eq!(&buf[..n], &data[at as usize..at as usize + n]);
-        assert_eq!(hits.load(Ordering::SeqCst), after_first, "повторный seek снова сходил в сеть");
+        assert_eq!(hits.load(Ordering::SeqCst), before, "предзагруженный кусок не использован — сходили в сеть");
     }
 }

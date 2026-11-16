@@ -4,8 +4,10 @@
 use crate::api::{Account, Api, Batch, Res, Track, WAVE};
 use crate::config::log;
 use crate::eq::{Eq, EqParams};
+use crate::fade::{FadeState, SeekFade};
 use crate::stream::HttpStream;
-use rodio::{Decoder, OutputStream, Sink, Source as _};
+// rodio 0.22: Sink переименован в Player, OutputStream — в MixerDeviceSink.
+use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player as Sink};
 use std::collections::{HashSet, VecDeque};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -117,8 +119,6 @@ enum Msg {
     Batch { res: Res<Batch>, replace: bool, gen: u64 },
     Audio { gen: u64, res: Res<HttpStream> },
     Prefetch { id: String, res: Res<HttpStream> },
-    /// Результат фоновой перемотки: готовый декодер уже стоит на нужной позиции.
-    Seeked { gen: u64, seq: u64, pos: f32, res: Result<Decoder<HttpStream>, String> },
     Error(String),
 }
 
@@ -195,7 +195,9 @@ struct Engine {
     likes: Likes,
     notify: Notify,
     eq: Arc<EqParams>,
-    audio: Option<(OutputStream, Sink)>,
+    audio: Option<(MixerDeviceSink, Sink)>,
+    /// Состояние микро-фейда на стыке перемотки (общее с аудиопотоком).
+    fade: Arc<FadeState>,
     api: Option<Api>,
     uid: String,
     source: Source,
@@ -217,8 +219,8 @@ struct Engine {
     batch_gen: u64,
     retry_at: Option<Instant>,
     gen: u64,
-    /// Счётчик запросов перемотки: применяем только последний результат.
-    seek_seq: u64,
+    /// Общее состояние текущего HttpStream: для предзагрузки куска при перемотке.
+    current_shared: Option<Arc<crate::stream::Shared>>,
     loaded: bool,
     paused: bool,
     volume: f32,
@@ -267,7 +269,8 @@ impl Engine {
             batch_gen: 0,
             retry_at: None,
             gen: 0,
-            seek_seq: 0,
+            current_shared: None,
+            fade: FadeState::new(),
             loaded: false,
             paused: true,
             volume: 0.6,
@@ -307,11 +310,12 @@ impl Engine {
 
     fn ensure_audio(&mut self) -> bool {
         if self.audio.is_none() {
-            match OutputStream::try_default() {
-                Ok((stream, handle)) => match Sink::try_new(&handle) {
-                    Ok(sink) => self.audio = Some((stream, sink)),
-                    Err(e) => log(format!("sink: {e}")),
-                },
+            match DeviceSinkBuilder::open_default_sink() {
+                Ok(mut stream) => {
+                    stream.log_on_drop(false);
+                    let sink = Sink::connect_new(stream.mixer());
+                    self.audio = Some((stream, sink));
+                }
                 Err(e) => log(format!("audio device: {e}")),
             }
         }
@@ -560,38 +564,6 @@ impl Engine {
                     }
                 }
             }
-            Msg::Seeked { gen, seq, pos, res } => {
-                // Применяем только последнюю перемотку для того же трека.
-                if gen != self.gen || seq != self.seek_seq {
-                    return;
-                }
-                match res {
-                    Ok(dec) => {
-                        let eq = self.eq.clone();
-                        let vol = self.volume * self.volume;
-                        let paused = self.paused;
-                        let src = Eq::new(dec.convert_samples::<f32>(), eq);
-                        if let Some(sink) = self.sink() {
-                            // Старый источник снимаем, ставим уже спозиционированный.
-                            // Финальный try_seek нужен, чтобы rodio обновил позицию
-                            // (TrackPosition) — данные при этом уже в памяти.
-                            sink.clear();
-                            sink.set_volume(vol);
-                            sink.append(src);
-                            if paused {
-                                sink.pause()
-                            } else {
-                                sink.play()
-                            }
-                            if let Err(e) = sink.try_seek(Duration::from_secs_f32(pos)) {
-                                log(format!("seek: {e:?}"));
-                            }
-                        }
-                        self.sh().position = pos;
-                    }
-                    Err(e) => log(format!("seek: {e}")),
-                }
-            }
             Msg::Error(e) => self.error(e),
         }
     }
@@ -652,26 +624,46 @@ impl Engine {
             }
             Cmd::Prev => self.prev(),
             Cmd::Seek(sec) => {
-                // Перемотку делаем в фоне. Sink::try_seek применяет seek на аудиопотоке,
-                // а symphonia при Accurate сразу читает из HttpStream — сетевой fetch
-                // в аудиоколбэке даёт underrun и щелчки. Поэтому ссылку/поток/точный
-                // seek готовим отдельным потоком и подменяем источник (Msg::Seeked).
+                // rodio применяет seek в аудиоколбэке. Coarse seek (rodio 0.22)
+                // читает лишь пару кадров около цели, но и они не должны ходить
+                // в сеть — поэтому кусок докачиваем здесь, в движке. Если он уже
+                // в памяти — перемотка мгновенная.
                 if !self.loaded {
                     return;
                 }
-                let (Some(api), Some(url)) = (self.api.clone(), self.current_url.clone()) else { return };
                 let pos = sec.max(0.0);
-                self.seek_seq += 1;
-                let (seq, gen, tx) = (self.seek_seq, self.gen, self.tx.clone());
-                thread::spawn(move || {
-                    let res = (|| -> Result<Decoder<HttpStream>, String> {
-                        let stream = api.reopen_stream(&url)?;
-                        let mut dec = Decoder::new(stream).map_err(|e| format!("декодер: {e}"))?;
-                        dec.try_seek(Duration::from_secs_f32(pos)).map_err(|e| format!("seek: {e:?}"))?;
-                        Ok(dec)
-                    })();
-                    let _ = tx.send(Msg::Seeked { gen, seq, pos, res });
-                });
+                if let Some(shared) = self.current_shared.clone() {
+                    let dur = self.sh().duration;
+                    let len = shared.len;
+                    if dur > 0.0 && len > 0 {
+                        let byte = (len as f64 * (pos as f64 / dur as f64)) as u64;
+                        if let Err(e) = shared.prime(byte) {
+                            log(format!("seek: кусок не скачался: {e}"));
+                        }
+                    }
+                }
+                // Щелчок от разрыва волны гасим микро-фейдом: затухание, seek
+                // при нулевом усилении, нарастание (SeekFade в try_seek).
+                let fade = self.fade.clone();
+                let can_fade = !self.paused && self.sink().map(|s| !s.empty()).unwrap_or(false);
+                if can_fade {
+                    fade.start_out();
+                    for _ in 0..60 {
+                        if fade.is_held() {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                }
+                if let Some(s) = self.sink() {
+                    if let Err(e) = s.try_seek(Duration::from_secs_f32(pos)) {
+                        log(format!("seek: {e:?}"));
+                    }
+                }
+                // Seek мог не примениться (пустой sink) — не оставляем тишину.
+                if fade.is_held() {
+                    fade.reset();
+                }
             }
             Cmd::Volume(v) => {
                 self.volume = v.clamp(0.0, 1.0);
@@ -1055,14 +1047,20 @@ impl Engine {
             return;
         }
         let url = stream.url().to_string();
-        let src = match Decoder::new(stream) {
+        let shared = stream.shared();
+        let len = shared.len;
+        // Coarse seek: прыжок к цели вместо покадрового скана всего промежутка
+        // (Accurate в rodio 0.20 качал его прямо в аудиоколбэке — щелчки и секунды
+        // ожидания). byte_len нужен и для точной длительности MP3.
+        let src = match Decoder::builder().with_data(stream).with_byte_len(len).with_coarse_seek(true).build() {
             Ok(s) => s,
             Err(e) => {
                 self.on_load_error(format!("не удалось декодировать: {e}"));
                 return;
             }
         };
-        let src = Eq::new(src.convert_samples::<f32>(), self.eq.clone());
+        self.fade.reset();
+        let src = SeekFade::new(Eq::new(src, self.eq.clone()), self.fade.clone());
         let vol = self.volume * self.volume;
         let paused = self.paused;
         if let Some(sink) = self.sink() {
@@ -1076,6 +1074,7 @@ impl Engine {
             }
         }
         self.current_url = Some(url);
+        self.current_shared = Some(shared);
         self.loaded = true;
         self.errors_in_row = 0;
         self.sh().loading = false;
@@ -1100,6 +1099,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rodio::Source as _;
 
     /// Сетевой тест: ссылка на поток → потоковое чтение → декодирование (без токена — 30-сек превью).
     #[test]
@@ -1108,8 +1108,53 @@ mod tests {
         let api = Api::new("");
         let url = api.stream_url("57703").expect("stream url");
         let stream = api.reopen_stream(&url).expect("open stream");
-        let dec = Decoder::new(stream).expect("decode");
+        let len = stream.shared().len;
+        let dec = Decoder::builder().with_data(stream).with_byte_len(len).build().expect("decode");
         let samples = dec.take(44100).count();
         assert!(samples > 1000);
+    }
+
+    /// Регрессия на корневую причину щелчков и тормозов при перемотке:
+    /// rodio 0.20 использовал SeekMode::Accurate, и symphonia парсила каждый
+    /// MP3-кадр от текущей позиции до цели, качая все куски промежутка прямо
+    /// в аудиоколбэке. Coarse seek прыгает сразу к цели — после предзагрузки
+    /// целевого куска перемотка не должна делать ни одного сетевого запроса.
+    #[test]
+    fn coarse_seek_does_not_stream_the_gap() {
+        use std::sync::atomic::Ordering;
+        // 4000 тихих MPEG1-кадров (~105 с, 1.6 МБ) — несколько кусков HttpStream.
+        // Заголовок FF FB 90 C0: MPEG1 Layer3, 128 кбит/с, 44.1 кГц, моно;
+        // нулевые side info и main data декодируются в тишину.
+        let mut data = Vec::new();
+        for _ in 0..4000 {
+            let mut frame = vec![0u8; 417];
+            frame[..4].copy_from_slice(&[0xFF, 0xFB, 0x90, 0xC0]);
+            data.extend_from_slice(&frame);
+        }
+        let (url, hits) = crate::stream::tests::serve(data);
+        let stream = HttpStream::open(reqwest::blocking::Client::new(), url).expect("open");
+        let shared = stream.shared();
+        let len = shared.len;
+        let mut dec = Decoder::builder().with_data(stream).with_byte_len(len).with_coarse_seek(true).build().expect("decoder");
+        let dur = dec.total_duration().expect("duration").as_secs_f32();
+        assert!(dur > 100.0, "синтетический mp3 не распознан: {dur}");
+        let _ = dec.by_ref().take(4410).count(); // 0.1 с с начала
+        let before = hits.load(Ordering::SeqCst);
+
+        // Перемотка вперёд, в самый конец: целевой кусок докачан заранее,
+        // как это делает движок в Cmd::Seek. Сам seek — ни одного запроса.
+        let target = dur * 0.9;
+        shared.prime((len as f64 * target as f64 / dur as f64) as u64).expect("prime");
+        dec.try_seek(Duration::from_secs_f32(target)).expect("seek");
+        let played = dec.by_ref().take(44100).count();
+        assert!(played > 40000, "после seek звук не пошёл");
+        assert_eq!(hits.load(Ordering::SeqCst), before + 1, "seek скачал промежуток (Accurate-скан?)");
+
+        // Обратная перемотка — тоже без скачивания промежутка.
+        let back = dur * 0.2;
+        shared.prime((len as f64 * back as f64 / dur as f64) as u64).expect("prime");
+        dec.try_seek(Duration::from_secs_f32(back)).expect("seek back");
+        let _ = dec.by_ref().take(4410).count();
+        assert_eq!(hits.load(Ordering::SeqCst), before + 2, "обратный seek скачал промежуток");
     }
 }
