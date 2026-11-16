@@ -279,7 +279,7 @@ export component AppWindow inherits Window {
         opacity: k;
         x: (parent.width - self.width) / 2;
         y: parent.height - (App.page == Page.wave ? 96px : 140px) + (1 - k) * 16px;
-        width: min(parent.width * 0.9, max(App.toast-has-cover ? 360px : 0px, toast-text.preferred-width + cover-w + 32px));
+        width: min(parent.width * 0.9, max(App.toast-has-cover ? 360px : 0px, toast-text.preferred-width + cover-w + 32px + (App.toast-action != "" ? toast-btn.width + Theme.spacer-size-m : 0px)));
         height: 56px;
         border-radius: Theme.radius-size-l;
         background: Theme.background-color-primary-enabled-popover;
@@ -297,13 +297,36 @@ export component AppWindow inherits Window {
         }
         toast-text := Text {
             x: 16px + cover-w - (App.toast-has-cover ? 8px : 0px);
-            width: parent.width - self.x - 16px;
+            width: parent.width - self.x - 16px - (App.toast-action != "" ? toast-btn.width + Theme.spacer-size-m : 0px);
             text: App.toast;
             overflow: elide;
             vertical-alignment: center;
             color: Theme.controls-color-primary-text-enabled-variant;
             font-size: Theme.font-size-label-m;
             font-weight: 500;
+        }
+        toast-btn := Rectangle {
+            visible: App.toast-action != "";
+            x: parent.width - self.width - Theme.spacer-size-xxs;
+            y: (parent.height - self.height) / 2;
+            width: max(126px, toast-btn-label.preferred-width + 2 * Theme.spacer-size-l);
+            height: 32px;
+            border-radius: self.height / 2;
+            background: toast-btn-ta.pressed ? Theme.controls-color-secondary-default-pressed
+                : toast-btn-ta.has-hover ? Theme.controls-color-secondary-default-hovered
+                : Theme.controls-color-secondary-default-enabled;
+            toast-btn-label := Text {
+                x: (parent.width - self.preferred-width) / 2;
+                y: (parent.height - self.preferred-height) / 2;
+                text: App.toast-action;
+                color: Theme.controls-color-primary-text-enabled-variant;
+                font-size: Theme.font-size-label-m;
+                font-weight: 500;
+            }
+            toast-btn-ta := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => { App.toast-action-clicked(); }
+            }
         }
     }
 

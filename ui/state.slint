@@ -143,6 +143,9 @@ export global App {
     in property <string> toast;
     in property <image> toast-cover;
     in property <bool> toast-has-cover;
+    // Кнопка действия в тосте (например «Перезапустить» после смены рендера).
+    in property <string> toast-action;
+    callback toast-action-clicked();
     // Новая версия на GitHub (src/update.rs): пусто — обновлений нет.
     in property <string> update-version;
     // Установщик скачивается.

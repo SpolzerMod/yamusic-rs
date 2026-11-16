@@ -192,6 +192,7 @@ impl Ctx {
     fn toast(self: &Rc<Self>, msg: impl Into<String>) {
         let ui = self.ui();
         ui.global::<App>().set_toast_has_cover(false);
+        ui.global::<App>().set_toast_action(SharedString::new());
         ui.global::<App>().set_toast(crate::i18n::tr(&msg.into()).into());
         let t = Timer::default();
         let weak = self.ui.clone();
@@ -201,6 +202,32 @@ impl Ctx {
             }
         });
         self.st.borrow_mut().toast_timer = Some(t);
+    }
+
+    /// Тост с кнопкой действия (живёт дольше, чтобы успеть нажать).
+    fn toast_action(self: &Rc<Self>, msg: impl Into<String>, action: &str) {
+        let ui = self.ui();
+        ui.global::<App>().set_toast_has_cover(false);
+        ui.global::<App>().set_toast(crate::i18n::tr(&msg.into()).into());
+        ui.global::<App>().set_toast_action(action.into());
+        let t = Timer::default();
+        let weak = self.ui.clone();
+        t.start(TimerMode::SingleShot, Duration::from_secs(10), move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.global::<App>().set_toast(SharedString::new());
+                ui.global::<App>().set_toast_action(SharedString::new());
+            }
+        });
+        self.st.borrow_mut().toast_timer = Some(t);
+    }
+
+    /// Перезапуск: новый процесс ждёт освобождения single-instance
+    /// (AFTER_UPDATE), поэтому spawn до exit безопасен и на Windows, и на macOS.
+    fn restart_app(self: &Rc<Self>) {
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = crate::update::relaunch(&exe);
+        }
+        std::process::exit(0);
     }
 
     fn sync_player(self: &Rc<Self>) {
@@ -1696,6 +1723,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     app.on_play_wheel(|i| with_ctx(|c| c.play_wheel(i as usize)));
     app.on_go_back(|| with_ctx(|c| c.go_back()));
     app.on_go_forward(|| with_ctx(|c| c.go_forward()));
+    app.on_toast_action_clicked(|| with_ctx(|c| c.restart_app()));
     app.on_play_list(|i| with_ctx(|c| c.play_list(i as usize)));
     app.on_like_track(|i| {
         with_ctx(|c| {
@@ -2645,19 +2673,14 @@ impl Ctx {
                 st.cfg.save();
                 drop(st);
                 app.set_gpu(on);
-                self.toast(if on {
-                    "GPU-ускорение включится после перезапуска"
-                } else {
-                    "GPU-ускорение выключится после перезапуска"
-                });
-            }
-            "restart" => {
-                // Новый процесс ждёт освобождения single-instance (AFTER_UPDATE),
-                // поэтому spawn до exit безопасен и на Windows, и на macOS.
-                if let Ok(exe) = std::env::current_exe() {
-                    let _ = crate::update::relaunch(&exe);
-                }
-                std::process::exit(0);
+                self.toast_action(
+                    if on {
+                        "GPU-ускорение включится после перезапуска"
+                    } else {
+                        "GPU-ускорение выключится после перезапуска"
+                    },
+                    "Перезапустить",
+                );
             }
             "autostart" => {
                 let on = !app.get_autostart();
