@@ -370,7 +370,7 @@ export component SettingsPage inherits Rectangle {
                 on: App.discord-on;
                 clicked => { App.setting("discord"); }
             }
-            SettingItem {
+            if App.windows: SettingItem {
                 title: T.t("Запускать вместе с Windows");
                 desc: T.t("Приложение откроется в трее, без окна");
                 toggle: true;

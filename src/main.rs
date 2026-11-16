@@ -53,6 +53,11 @@ fn claim_instance() -> bool {
 }
 
 fn main() -> Result<(), slint::PlatformError> {
+    // В release stderr теряется: панику пишем в лог (сообщение + место),
+    // чтобы краши можно было разбирать по log.txt без crash report'ов.
+    std::panic::set_hook(Box::new(|info| {
+        config::log(format!("PANIC: {info}"));
+    }));
     // После обновления старая версия ещё закрывается: ждём её до 15 секунд.
     let after_update = std::env::args().any(|a| a == update::AFTER_UPDATE);
     let mut claimed = claim_instance();

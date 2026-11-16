@@ -1477,6 +1477,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     app.set_nav_collapsed(cfg.navbar_collapsed);
     // macOS: нативный «светофор» вместо виндовых кнопок, сдвиг навбара вниз.
     app.set_mac(cfg!(target_os = "macos"));
+    app.set_windows(cfg!(target_os = "windows"));
 
     let discord = crate::discord::Discord::spawn(
         player.clone(),
@@ -3422,7 +3423,12 @@ impl Ctx {
                 drop(st);
                 app.set_blob(Image::default());
             }
-            _ => {}
+            // Settings/Grid и прочие: borrow обязательно отпустить до хвоста
+            // функции (там ещё один borrow_mut) — иначе RefCell panic при
+            // уходе со страницы (краш «назад из настроек»).
+            _ => {
+                drop(st);
+            }
         }
         // Ушли со страницы: не держим её блоки/поиск в кэше сети и клоны треков в состоянии.
         if let Some(net) = net {
