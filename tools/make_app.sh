@@ -10,15 +10,33 @@ if [ "${1:-}" = "--debug" ]; then
   PROFILE=debug
 fi
 
+# Сборка бинарника. Три режима:
+#  - MACOS_UNIVERSAL=1 — обе арки (arm64 + x86_64) и lipo в universal (CI: Intel-раннер);
+#  - MACOS_TARGET=<triple> — одна кросс-арка;
+#  - иначе — нативно под хост (локальная сборка на Apple Silicon).
 VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
 NAME="Яндекс Музыка RS"
 APP="target/$PROFILE/yamusic-rs.app"
 
-cargo build "--$PROFILE"
+if [ "${MACOS_UNIVERSAL:-}" = "1" ]; then
+  cargo build "--$PROFILE" --target aarch64-apple-darwin
+  cargo build "--$PROFILE" --target x86_64-apple-darwin
+  BIN="target/$PROFILE/yamusic-rs-universal"
+  lipo -create \
+    "target/aarch64-apple-darwin/$PROFILE/yamusic-rs" \
+    "target/x86_64-apple-darwin/$PROFILE/yamusic-rs" \
+    -output "$BIN"
+elif [ -n "${MACOS_TARGET:-}" ]; then
+  cargo build "--$PROFILE" --target "$MACOS_TARGET"
+  BIN="target/$MACOS_TARGET/$PROFILE/yamusic-rs"
+else
+  cargo build "--$PROFILE"
+  BIN="target/$PROFILE/yamusic-rs"
+fi
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "target/$PROFILE/yamusic-rs" "$APP/Contents/MacOS/yamusic-rs"
+cp "$BIN" "$APP/Contents/MacOS/yamusic-rs"
 
 # Иконка: app.ico → PNG 256 → все размеры → icns.
 ICONSET="$APP/Contents/Resources/AppIcon.iconset"
