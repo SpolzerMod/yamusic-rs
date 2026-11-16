@@ -135,12 +135,20 @@ impl Read for HttpStream {
         }
         let end = self.chunk_end();
         if self.pos >= end {
-            // Граница куска: сначала пробуем заранее скачанное, иначе качаем сейчас.
-            let want = end;
-            match self.take_ahead(want) {
+            // Заранее скачанный кусок подходит только при непрерывном чтении
+            // (pos == end). После перемотки вперёд pos может быть дальше него —
+            // тогда предзагрузку сбрасываем и качаем по новой позиции, иначе
+            // получился бы пустой Read (EOF) и трек бы оборвался.
+            let ahead = if self.pos == end {
+                self.take_ahead(end)
+            } else {
+                self.ahead = None;
+                None
+            };
+            match ahead {
                 Some(bytes) => {
                     self.chunk = bytes;
-                    self.chunk_start = want;
+                    self.chunk_start = end;
                 }
                 None => self.fetch_chunk(self.pos)?,
             }
@@ -172,5 +180,85 @@ impl Seek for HttpStream {
         }
         self.pos = new as u64;
         Ok(self.pos)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+    use std::net::TcpListener;
+
+    /// Детерминированные байты длиной `len`.
+    fn pattern(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
+
+    /// Мини-сервер с поддержкой Range: 206 + Content-Range, как CDN Яндекса.
+    /// Слушает 127.0.0.1 — внешняя сеть не нужна.
+    fn serve(data: Vec<u8>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("http://{}/track", listener.local_addr().expect("addr"));
+        std::thread::spawn(move || {
+            for sock in listener.incoming() {
+                let Ok(mut sock) = sock else { break };
+                let Ok(mut reader) = sock.try_clone().map(BufReader::new) else { continue };
+                let (mut start, mut end) = (0usize, data.len().saturating_sub(1));
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    let l = line.trim_end().to_ascii_lowercase();
+                    if l.is_empty() {
+                        break;
+                    }
+                    if let Some(r) = l.strip_prefix("range: bytes=") {
+                        let mut it = r.split('-');
+                        start = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                        end = it.next().and_then(|v| v.parse().ok()).unwrap_or(data.len() - 1);
+                    }
+                }
+                let end = end.min(data.len() - 1);
+                let body = &data[start..=end];
+                let _ = write!(
+                    sock,
+                    "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{total}\r\nContent-Length: {n}\r\nConnection: close\r\n\r\n",
+                    total = data.len(),
+                    n = body.len()
+                );
+                let _ = sock.write_all(body);
+                let _ = sock.flush();
+            }
+        });
+        url
+    }
+
+    /// Перемотка вперёд, когда следующий кусок уже качается заранее, не должна
+    /// давать EOF: раньше read возвращал Ok(0) → трек обрывался.
+    #[test]
+    fn seek_forward_past_pending_prefetch_keeps_reading() {
+        let len = 2 * 1024 * 1024 + 300_000;
+        let data = pattern(len);
+        let url = serve(data.clone());
+        let client = reqwest::blocking::Client::new();
+        let mut s = HttpStream::open(client, url).expect("open");
+
+        // Читаем до срабатывания префетча (за AHEAD до конца первого куска).
+        let mut buf = [0u8; 8192];
+        let mut read = 0usize;
+        while read < (CHUNK - AHEAD / 2) as usize {
+            let n = s.read(&mut buf).expect("read");
+            assert!(n > 0, "неожиданный EOF при последовательном чтении");
+            assert_eq!(&buf[..n], &data[read..read + n]);
+            read += n;
+        }
+
+        // Перемотка за пределы куска, который качается заранее ([CHUNK, 2*CHUNK)).
+        let target = 2 * CHUNK + 1000;
+        s.seek(SeekFrom::Start(target)).expect("seek");
+        let n = s.read(&mut buf).expect("read after seek");
+        assert!(n > 0, "после перемотки чтение вернуло EOF");
+        assert_eq!(&buf[..n], &data[target as usize..target as usize + n]);
     }
 }
