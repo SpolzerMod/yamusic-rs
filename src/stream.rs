@@ -254,7 +254,14 @@ impl Seek for HttpStream {
         if new < 0 {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "seek до начала файла"));
         }
-        self.pos = new as u64;
+        let new = new as u64;
+        if new != self.pos {
+            // Префетч старого региона после перемотки устарел: пока он Some,
+            // maybe_start_ahead не качает новый регион, и на границе primed-куска
+            // fetch уходит в аудиопоток (underrun и клик через пару секунд после seek).
+            self.ahead = None;
+        }
+        self.pos = new;
         Ok(self.pos)
     }
 }
@@ -346,8 +353,7 @@ pub(crate) mod tests {
     /// (`prime`), повторный seek в него не должен идти в сеть — иначе финальный
     /// `Sink::try_seek` на аудиопотоке снова качал бы данные.
     #[test]
-    fn primed_chunk_is_served_without_refetch() {
-        use std::sync::atomic::Ordering;
+    fn primed_chunk_is_served_without_refetch() {        use std::sync::atomic::Ordering;
         let len = 2 * 1024 * 1024 + 300_000;
         let data = pattern(len);
         let (url, hits) = serve(data.clone());
@@ -363,5 +369,58 @@ pub(crate) mod tests {
         let n = s.read(&mut buf).expect("read");
         assert_eq!(&buf[..n], &data[at as usize..at as usize + n]);
         assert_eq!(hits.load(Ordering::SeqCst), before, "предзагруженный кусок не использован — сходили в сеть");
+    }
+
+    /// Регрессия на клики после перемотки: префетч старого региона (ahead)
+    /// не должен блокировать префетч нового. Иначе на границе primed-куска
+    /// (через пару секунд после seek) fetch уходит в аудиопоток → underrun/клик.
+    #[test]
+    fn seek_invalidates_stale_prefetch() {
+        use std::sync::atomic::Ordering;
+        let len = (4 * CHUNK + 100_000) as usize;
+        let data = pattern(len);
+        let (url, hits) = serve(data.clone());
+        let client = reqwest::blocking::Client::new();
+        let mut s = HttpStream::open(client, url).expect("open");
+        let shared = s.shared();
+        let mut buf = [0u8; 8192];
+        // Префетч асинхронный: ждём счётчик, а не спим фиксированно.
+        let wait = |want: usize| {
+            let t0 = std::time::Instant::now();
+            while hits.load(Ordering::SeqCst) < want && t0.elapsed().as_secs() < 5 {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        };
+
+        // Последовательное воспроизведение до срабатывания префетча следующего куска.
+        let mut read = 0usize;
+        while read < (CHUNK - AHEAD / 2) as usize {
+            let n = s.read(&mut buf).expect("read");
+            read += n;
+        }
+        wait(2);
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "префетч следующего куска не стартовал");
+
+        // Перемотка как в движке: целевой кусок предзагружен, позиция переставлена.
+        let target = 3 * CHUNK + 5000;
+        shared.prime(target).expect("prime");
+        s.seek(SeekFrom::Start(target)).expect("seek");
+        let after_prime = hits.load(Ordering::SeqCst);
+
+        // Дочитываем до окна префетча нового региона: докачка должна стартовать
+        // здесь (в фоне), а не на границе куска в аудиопотоке.
+        let window = target - 8192 + PRIME - AHEAD + 1000;
+        while s.stream_position().expect("pos") < window {
+            assert!(s.read(&mut buf).expect("read") > 0);
+        }
+        wait(after_prime + 1);
+        assert_eq!(hits.load(Ordering::SeqCst), after_prime + 1, "устаревший ahead заблокировал префетч нового региона");
+
+        // Граница куска обслуживается префетчем: сетевых чтений на read-пути нет.
+        let end = target - 8192 + PRIME;
+        while s.stream_position().expect("pos") < end + 4096 {
+            assert!(s.read(&mut buf).expect("read") > 0);
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), after_prime + 1, "fetch на границе куска в read-пути");
     }
 }
