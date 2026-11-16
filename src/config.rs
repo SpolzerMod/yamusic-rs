@@ -68,24 +68,37 @@ impl Default for Config {
     }
 }
 
-/// %APPDATA%\yamusic-rs. Папка прежнего названия (yamusic-lite, ещё раньше yawave) переносится
-/// молча, вместе с токеном и настройками. Если её держит запущенная старая версия, этот запуск
+/// %APPDATA%\yamusic-rs (Windows) или ~/Library/Application Support/yamusic-rs (macOS).
+/// Папка прежнего названия (yamusic-lite, ещё раньше yawave) переносится молча, вместе
+/// с токеном и настройками. Если её держит запущенная старая версия, этот запуск
 /// работает со старой папкой, а перенос повторится в следующий раз.
 pub fn dir() -> PathBuf {
     static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    DIR.get_or_init(|| {
-        let base = PathBuf::from(std::env::var("APPDATA").unwrap_or_else(|_| ".".into()));
-        let dir = base.join("yamusic-rs");
-        if !dir.exists() {
-            if let Some(old) = ["yamusic-lite", "yawave"].iter().map(|n| base.join(n)).find(|p| p.exists()) {
-                if std::fs::rename(&old, &dir).is_err() {
-                    return old;
-                }
+    DIR.get_or_init(data_dir).clone()
+}
+
+#[cfg(windows)]
+fn data_dir() -> PathBuf {
+    let base = PathBuf::from(std::env::var("APPDATA").unwrap_or_else(|_| ".".into()));
+    let dir = base.join("yamusic-rs");
+    if !dir.exists() {
+        if let Some(old) = ["yamusic-lite", "yawave"].iter().map(|n| base.join(n)).find(|p| p.exists()) {
+            if std::fs::rename(&old, &dir).is_err() {
+                return old;
             }
         }
-        dir
-    })
-    .clone()
+    }
+    dir
+}
+
+#[cfg(not(windows))]
+fn data_dir() -> PathBuf {
+    let dir = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
+        .join("Library")
+        .join("Application Support")
+        .join("yamusic-rs");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
 }
 
 impl Config {

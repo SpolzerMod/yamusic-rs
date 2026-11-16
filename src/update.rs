@@ -6,13 +6,15 @@
 //! Если папка недоступна для записи, кнопка открывает страницу релиза.
 
 use sha2::{Digest, Sha256};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Как часто спрашивать GitHub. У оригинала UPDATE_POLL_INTERVAL_MS — те же 30 минут.
 pub const POLL: Duration = Duration::from_secs(30 * 60);
 
-/// Имя exe в релизе.
+/// Имя exe в релизе. Вне Windows используется только тестом.
+#[cfg_attr(not(windows), allow(dead_code))]
 const ASSET: &str = concat!(env!("CARGO_PKG_NAME"), ".exe");
 
 /// Аргумент, с которым обновлённый exe ждёт, пока закроется старый.
@@ -63,11 +65,21 @@ pub fn check() -> Result<Option<Release>, String> {
         return Ok(None);
     }
     let exe = v.get("assets").and_then(|a| a.as_array()).and_then(|assets| {
-        let a = assets.iter().find(|a| a.get("name").and_then(|n| n.as_str()) == Some(ASSET))?;
-        let url = a.get("browser_download_url")?.as_str()?.to_string();
-        let size = a.get("size")?.as_u64()?;
-        let sha = a.get("digest")?.as_str()?.strip_prefix("sha256:")?.to_ascii_lowercase();
-        Some((url, size, sha))
+        #[cfg(windows)]
+        {
+            let a = assets.iter().find(|a| a.get("name").and_then(|n| n.as_str()) == Some(ASSET))?;
+            let url = a.get("browser_download_url")?.as_str()?.to_string();
+            let size = a.get("size")?.as_u64()?;
+            let sha = a.get("digest")?.as_str()?.strip_prefix("sha256:")?.to_ascii_lowercase();
+            Some((url, size, sha))
+        }
+        // Самообновление пока только для Windows: в релизе лежит exe, а на macOS
+        // бинарник и Gatekeeper. Кнопка «Обновить» просто откроет страницу релиза.
+        #[cfg(not(windows))]
+        {
+            let _ = assets;
+            None
+        }
     });
     Ok(Some(Release {
         version: tag.trim_start_matches('v').to_string(),
@@ -85,22 +97,37 @@ fn old_path(exe: &Path) -> PathBuf {
 pub fn install(r: &Release) -> Result<PathBuf, String> {
     let (url, size, sha) = r.exe.as_ref().ok_or("у релиза нет exe")?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let bytes = client()?
+    let new = exe.with_extension("new.exe");
+    let mut resp = client()?
         .get(url)
         .timeout(Duration::from_secs(600))
         .send()
         .and_then(|r| r.error_for_status())
-        .and_then(|r| r.bytes())
         .map_err(|e| format!("загрузка: {e}"))?;
-    if bytes.len() as u64 != *size {
+    let mut f = std::fs::File::create(&new).map_err(|e| format!("нет доступа к папке {}: {e}", exe.parent().unwrap_or(&exe).display()))?;
+    // Стримим чанками на диск с инкрементальным SHA-256 — не держим весь exe в памяти.
+    let mut hasher = Sha256::new();
+    let mut n: u64 = 0;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let k = resp.read(&mut buf).map_err(|e| format!("загрузка: {e}"))?;
+        if k == 0 {
+            break;
+        }
+        hasher.update(&buf[..k]);
+        f.write_all(&buf[..k]).map_err(|e| format!("запись: {e}"))?;
+        n += k as u64;
+    }
+    drop(f);
+    if n != *size {
+        let _ = std::fs::remove_file(&new);
         return Err("файл скачался не целиком".into());
     }
-    let got: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+    let got: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
     if &got != sha {
+        let _ = std::fs::remove_file(&new);
         return Err("контрольная сумма не совпала".into());
     }
-    let new = exe.with_extension("new.exe");
-    std::fs::write(&new, &bytes).map_err(|e| format!("нет доступа к папке {}: {e}", exe.parent().unwrap_or(&exe).display()))?;
     let old = old_path(&exe);
     let _ = std::fs::remove_file(&old);
     if let Err(e) = std::fs::rename(&exe, &old) {

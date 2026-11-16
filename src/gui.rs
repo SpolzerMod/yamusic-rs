@@ -49,6 +49,8 @@ struct State {
     track_id: Option<String>,
     toast_timer: Option<Timer>,
     cards: HashMap<String, Vec<Card>>,
+    /// Порядок вставки ключей `cards` для ограничения размера (LRU): Grid берёт отсюда полные карточки.
+    cards_order: Vec<String>,
     search_shown: Option<Arc<Data>>,
     results_key: Option<String>,
     results_shown: Option<Arc<Data>>,
@@ -74,7 +76,8 @@ struct State {
     queue_ids: Vec<String>,
     blob_src: Option<SharedPixelBuffer<Rgba8Pixel>>,
     blob_requested: bool,
-    vibe_key: Option<(bool, Option<[u8; 3]>)>,
+    /// Последний цвет фона волны (None внутри — чёрный фон без трека); None снаружи — ещё не считали.
+    vibe_key: Option<Option<[u8; 3]>>,
     /// Анимация пятна: таймер есть, только пока волна играет на экране.
     trailer: Option<Trailer>,
     downloading: bool,
@@ -224,6 +227,9 @@ impl Ctx {
 
         let started = self.st.borrow().started;
         app.set_has_track(started && s.track.is_some());
+        // Карточка «Сейчас играет» в Пункте управления macOS.
+        #[cfg(target_os = "macos")]
+        crate::mac::now_playing(s.track.as_ref().filter(|_| started), s.playing, s.position, s.duration);
         app.set_playing(s.playing);
         app.set_loading(s.loading);
         app.set_position(s.position);
@@ -248,8 +254,9 @@ impl Ctx {
         app.set_wave_context(context);
 
         app.set_can_prev(s.track.is_some());
-        let playing_now = started && s.playing;
-        self.sync_vibe(playing_now, s.track.as_ref().and_then(|t| t.color));
+        // Градиент — по цвету трека, но только после первого запуска: до него фон чёрный.
+        // Пауза не должна его гасить (started остаётся true).
+        self.sync_vibe(if started { s.track.as_ref().and_then(|t| t.color) } else { None });
 
         self.sync_trailer(&s);
         self.sync_queue(&s);
@@ -763,9 +770,13 @@ impl Ctx {
             liked: self.player.is_liked(&t.id),
             explicit: t.explicit,
             available: true,
-            artist_names: ModelRc::from(Rc::new(VecModel::from(
-                t.artist_list.iter().map(|a| SharedString::from(a.name.as_str())).collect::<Vec<_>>(),
-            ))),
+            artist_names: if t.artist_list.is_empty() {
+                ModelRc::default()
+            } else {
+                ModelRc::from(Rc::new(VecModel::from(
+                    t.artist_list.iter().map(|a| SharedString::from(a.name.as_str())).collect::<Vec<_>>(),
+                )))
+            },
         }
     }
 
@@ -1063,7 +1074,7 @@ fn apply_ui_scale(ui: &AppWindow) {
     if phys.width == 0 || phys.height == 0 {
         return;
     }
-    let base = std::env::var("SLINT_SCALE_FACTOR").ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or_else(|| win::dpi_scale(hwnd(ui)));
+    let base = std::env::var("SLINT_SCALE_FACTOR").ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or_else(|| dpi_base(ui));
     let css_w = phys.width as f32 / base;
     let k = if css_w >= 1920.0 { (12.0 + 0.003 * css_w) / 16.0 } else { 1.0 };
     let target = base * k;
@@ -1085,6 +1096,18 @@ fn quit() {
     let _ = slint::quit_event_loop();
 }
 
+/// Масштаб монитора: на Windows — DPI по HWND, на macOS — scale_factor окна
+/// (Retina отдаёт 2.0).
+#[cfg(windows)]
+fn dpi_base(ui: &AppWindow) -> f32 {
+    win::dpi_scale(hwnd(ui))
+}
+
+#[cfg(not(windows))]
+fn dpi_base(ui: &AppWindow) -> f32 {
+    ui.window().scale_factor()
+}
+
 /// Показать окно: при запуске в трей оно ещё не создано, после закрытия в трей — спрятано.
 fn reveal(ui: &AppWindow) {
     let first = hwnd(ui) == 0;
@@ -1104,11 +1127,23 @@ fn apply_mode(ui: &AppWindow, lite: bool) {
 }
 
 /// Окно winit создаётся не сразу после `show()` (до запуска цикла событий и с OpenGL),
-/// поэтому масштаб и прочее применяются, когда у окна появится HWND.
+/// поэтому масштаб и прочее применяются, когда окно появится: на Windows это HWND,
+/// на macOS — ненулевой размер.
 fn finish_reveal(weak: slint::Weak<AppWindow>, first: bool, tries: u32) {
     let Some(ui) = weak.upgrade() else { return };
-    let h = hwnd(&ui);
-    if h == 0 {
+    let ready = {
+        #[cfg(windows)]
+        {
+            hwnd(&ui) != 0
+        }
+        #[cfg(not(windows))]
+        {
+            // Размер окна ненулевой сразу (preferred-size), а winit-окно создаётся
+            // позже — ждём именно его появления, иначе handle ещё null.
+            ui.window().with_winit_window(|_| ()).is_some()
+        }
+    };
+    if !ready {
         if tries < 100 {
             Timer::single_shot(Duration::from_millis(20), move || finish_reveal(weak, first, tries + 1));
         }
@@ -1116,12 +1151,33 @@ fn finish_reveal(weak: slint::Weak<AppWindow>, first: bool, tries: u32) {
     }
     if first {
         apply_ui_scale(&ui);
-        win::round_corners(h);
-        let _ = std::fs::write(crate::config::dir().join("hwnd"), h.to_string());
-        win::set_icon(h);
+        #[cfg(windows)]
+        {
+            let h = hwnd(&ui);
+            win::round_corners(h);
+            let _ = std::fs::write(crate::config::dir().join("hwnd"), h.to_string());
+            win::set_icon(h);
+        }
+        // macOS: нативные кнопки окна («светофор») поверх контента.
+        #[cfg(target_os = "macos")]
+        {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            let view = ui
+                .window()
+                .with_winit_window(|w| match w.window_handle().map(|h| h.as_raw()) {
+                    Ok(RawWindowHandle::AppKit(h)) => h.ns_view.as_ptr(),
+                    _ => std::ptr::null_mut(),
+                })
+                .unwrap_or(std::ptr::null_mut());
+            crate::mac::native_window_buttons(view);
+        }
     }
-    win::show(h);
-    win::force_foreground(h);
+    #[cfg(windows)]
+    {
+        let h = hwnd(&ui);
+        win::show(h);
+        win::force_foreground(h);
+    }
 }
 
 fn hwnd(ui: &AppWindow) -> isize {
@@ -1392,10 +1448,18 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     if let Some(sprite) = &assets {
         set_icons(&ui, sprite);
     }
+    // Спрайт (вся SVG-строка) нужен только для нарезки иконок — дальше не держим его в памяти.
+    drop(assets);
     load_id_icons(&ui);
     start_updates(&ui);
 
     let player = Player::spawn(notifier());
+    // macOS: медиа-клавиши, карточка «Сейчас играет» и возврат «светофора» после fullscreen.
+    #[cfg(target_os = "macos")]
+    {
+        crate::mac::init_media_keys(player.clone());
+        crate::mac::init_window_observers();
+    }
     player.send(Cmd::Volume(cfg.volume));
     if let Some(t) = cfg.token.clone() {
         player.send(Cmd::Login(t));
@@ -1411,6 +1475,8 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     ui.global::<T>().set_lang(cfg.lang.clone().into());
     ui.global::<T>().on_tr(|s: SharedString| SharedString::from(crate::i18n::tr(s.as_str())));
     app.set_nav_collapsed(cfg.navbar_collapsed);
+    // macOS: нативный «светофор» вместо виндовых кнопок, сдвиг навбара вниз.
+    app.set_mac(cfg!(target_os = "macos"));
 
     let discord = crate::discord::Discord::spawn(
         player.clone(),
@@ -1453,6 +1519,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             track_id: None,
             toast_timer: None,
             cards: HashMap::new(),
+            cards_order: Vec::new(),
             search_shown: None,
             results_key: None,
             results_shown: None,
@@ -1603,7 +1670,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             let full = c.st.borrow().net.as_ref().and_then(|n| n.get("likes")).and_then(|r| r.ok());
             let tracks = match full.as_deref() {
                 Some(Data::List(l)) => l.tracks.clone(),
-                _ => col.likes_preview.clone(),
+                _ => Arc::new(col.likes_preview.clone()),
             };
             let start = tracks.iter().position(|x| x.id == t.id).unwrap_or(0);
             c.player.send(Cmd::PlayList {
@@ -1725,10 +1792,19 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     app.on_close(move || {
         if p.state().playing {
             if let Some(ui) = weak.upgrade() {
-                let h = hwnd(&ui);
-                if h != 0 {
-                    win::hide(h);
-                    win::trim_memory();
+                #[cfg(windows)]
+                {
+                    let h = hwnd(&ui);
+                    if h != 0 {
+                        win::hide(h);
+                        win::trim_memory();
+                        return;
+                    }
+                }
+                // На macOS трея нет: прячем окно, приложение остаётся в Dock.
+                #[cfg(not(windows))]
+                {
+                    let _ = ui.hide();
                     return;
                 }
             }
@@ -1791,6 +1867,13 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Forward, .. } => {
                 with_ctx(|c| c.go_forward());
+                EventResult::PreventDefault
+            }
+            // Нативная красная кнопка macOS: та же логика, что у кнопки ✕ (App.close) —
+            // при играющем треке прячем окно, иначе выходим. PreventDefault не даёт
+            // slint закрыть окно самому.
+            WindowEvent::CloseRequested => {
+                with_ctx(|c| c.ui().global::<App>().invoke_close());
                 EventResult::PreventDefault
             }
             _ => EventResult::Propagate,
@@ -1959,15 +2042,19 @@ fn card_from_playlist(p: &Playlist) -> Card {
     }
 }
 
-/// Скопировать текст в буфер обмена Windows.
+/// Скопировать текст в системный буфер обмена: `clip` на Windows, `pbcopy` на macOS.
 fn copy_text(text: &str) {
     use std::io::Write as _;
-    use std::os::windows::process::CommandExt;
-    if let Ok(mut child) = std::process::Command::new("clip")
-        .creation_flags(0x0800_0000)
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-    {
+    #[cfg(windows)]
+    let mut prog = {
+        use std::os::windows::process::CommandExt;
+        let mut cmd = std::process::Command::new("clip");
+        cmd.creation_flags(0x0800_0000);
+        cmd
+    };
+    #[cfg(not(windows))]
+    let mut prog = std::process::Command::new("pbcopy");
+    if let Ok(mut child) = prog.stdin(std::process::Stdio::piped()).spawn() {
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(text.as_bytes());
         }
@@ -2129,6 +2216,8 @@ impl Ctx {
             st.pins.clear();
             st.history.clear();
             st.forward.clear();
+            st.cards.clear();
+            st.cards_order.clear();
         }
         let ui = self.ui();
         let app = ui.global::<App>();
@@ -2145,6 +2234,19 @@ impl Ctx {
     }
 
     // ---------- карточки ----------
+
+    /// Запомнить карточки блока для кликов и Grid, ограничивая кэш 24 ключами (LRU по вставке):
+    /// иначе каждый посещённый блок навсегда оставляет полную копию карточек.
+    fn remember_cards(&self, key: String, cards: Vec<Card>) {
+        let mut st = self.st.borrow_mut();
+        st.cards_order.retain(|k| k != &key);
+        st.cards_order.push(key.clone());
+        st.cards.insert(key, cards);
+        while st.cards_order.len() > 24 {
+            let old = st.cards_order.remove(0);
+            st.cards.remove(&old);
+        }
+    }
 
     fn card_model(self: &Rc<Self>, block: &str, cards: &[Card], css: f32) -> ModelRc<CardItem> {
         let items: Vec<CardItem> = cards
@@ -2165,7 +2267,7 @@ impl Ctx {
             self.load_cover(&model, i, c.covers.get(1).map(|s| s.as_str()), css * 0.6, |r, img| r.cover2 = img);
             self.load_cover(&model, i, c.covers.get(2).map(|s| s.as_str()), css * 0.6, |r, img| r.cover3 = img);
         }
-        self.st.borrow_mut().cards.insert(block.to_string(), cards.to_vec());
+        self.remember_cards(block.to_string(), cards.to_vec());
         ModelRc::from(model)
     }
 
@@ -2399,7 +2501,7 @@ impl Ctx {
         }
         self.player.send(Cmd::PlayList {
             source: Source::List { kind, id: id.to_string(), title: title.to_string() },
-            tracks,
+            tracks: Arc::new(tracks),
             start,
             after: After::Wave(Source::Wave),
         });
@@ -2962,7 +3064,7 @@ impl Ctx {
         let Some(data) = self.list() else { return };
         let Data::List(l) = &*data else { return };
         if !l.tracks.is_empty() {
-            net.add_to_playlist(&pl, l.tracks.clone(), l.title.clone());
+            net.add_to_playlist(&pl, l.tracks.to_vec(), l.title.clone());
         }
     }
 
@@ -3169,15 +3271,17 @@ impl Ctx {
     }
 
     /// Пятно и фон волны: в паузе — исходная картинка и чёрный фон, во время игры — цвета трека.
-    fn sync_vibe(self: &Rc<Self>, playing: bool, color: Option<[u8; 3]>) {
-        let key = (playing, if playing { color } else { None });
+    fn sync_vibe(self: &Rc<Self>, color: Option<[u8; 3]>) {
+        // Оттенок фона берётся от цвета трека, а не от того, играет он или на паузе:
+        // пауза не должна гасить градиент и сбрасывать подложку.
+        let key = color;
         if self.st.borrow().vibe_key == Some(key) && self.st.borrow().blob_src.is_some() {
             return;
         }
         let ui = self.ui();
         let app = ui.global::<App>();
         let bucket = vibe_bucket(color);
-        let stops: Vec<Color> = if playing {
+        let stops: Vec<Color> = if color.is_some() {
             bucket.4.iter().map(|c| rgb(*c)).collect()
         } else {
             vec![Color::from_rgb_u8(0, 0, 0); 16]
@@ -3198,13 +3302,14 @@ impl Ctx {
                     }
                     let s = c.player.state();
                     let color = s.track.as_ref().and_then(|t| t.color);
-                    c.sync_vibe(s.playing && c.st.borrow().started, color);
+                    let started = c.st.borrow().started;
+                    c.sync_vibe(if started { color } else { None });
                 })
             });
             return;
         };
         self.st.borrow_mut().vibe_key = Some(key);
-        if playing {
+        if color.is_some() {
             app.set_blob(recolor(&src, bucket.4[2]));
         } else {
             app.set_blob(Image::from_rgba8(src));
@@ -3261,6 +3366,7 @@ impl Ctx {
         let ui = self.ui();
         let app = ui.global::<App>();
         let mut st = self.st.borrow_mut();
+        let net = st.net.clone();
         match page {
             Page::List => {
                 st.list_shown = None;
@@ -3311,7 +3417,26 @@ impl Ctx {
                 app.set_top_artists(ModelRc::default());
                 app.set_my_artists(ModelRc::default());
             }
+            Page::Wave => {
+                st.blob_src = None;
+                drop(st);
+                app.set_blob(Image::default());
+            }
             _ => {}
+        }
+        // Ушли со страницы: не держим её блоки/поиск в кэше сети и клоны треков в состоянии.
+        if let Some(net) = net {
+            match page {
+                Page::Trends | Page::Concerts | Page::Nonmusic => net.release_prefix("lblock:"),
+                Page::Search => net.release_prefix("search:"),
+                _ => {}
+            }
+        }
+        {
+            let mut st = self.st.borrow_mut();
+            st.results.clear();
+            st.chart.clear();
+            st.artist_tracks.clear();
         }
         self.images.trim();
         if self.lite.get() {
@@ -3377,7 +3502,7 @@ impl Ctx {
                         });
                         c.player.send(Cmd::PlayList {
                             source: Source::List { kind: ListKind::Tracks, id: format!("trailer:{path}"), title },
-                            tracks,
+                            tracks: Arc::new(tracks),
                             start: 0,
                             after: After::Wave(Source::Wave),
                         });
@@ -3494,7 +3619,12 @@ fn music_dir(cfg: &Config) -> std::path::PathBuf {
     if !cfg.download_dir.is_empty() {
         return cfg.download_dir.clone().into();
     }
-    std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into())).join("Music").join("Яндекс Музыка")
+    // Windows: %USERPROFILE%\Music; macOS: ~/Music.
+    #[cfg(windows)]
+    let home = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into()));
+    #[cfg(not(windows))]
+    let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()));
+    home.join("Music").join("Яндекс Музыка")
 }
 
 /// Расширение по первым байтам: mp3, AAC (ADTS), MP4 или FLAC.
@@ -3659,6 +3789,12 @@ fn register_extra(app: &App) {
                 }
             });
         })
+    });
+    app.on_fullscreen_closed(|| {
+        with_ctx(|c| c.ui().global::<App>().set_cover_big(Image::default()));
+    });
+    app.on_cover_closed(|| {
+        with_ctx(|c| c.ui().global::<App>().set_cover_view(Image::default()));
     });
     app.on_toggle_navbar(|| {
         with_ctx(|c| {
@@ -3933,7 +4069,7 @@ fn register_extra(app: &App) {
         with_ctx(|c| {
             let Some(data) = c.list() else { return };
             let Data::List(l) = &*data else { return };
-            c.download_tracks(l.title.clone(), l.tracks.clone());
+            c.download_tracks(l.title.clone(), l.tracks.to_vec());
         })
     });
     app.set_eq_presets(ModelRc::from(Rc::new(VecModel::from(

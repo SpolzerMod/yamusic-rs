@@ -13,6 +13,13 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         resources::embed();
     }
+    // macOS: MediaPlayer (медиа-клавиши, «Сейчас играет»), Foundation и objc runtime
+    // для прямых вызовов в src/mac.rs.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rustc-link-lib=objc");
+        println!("cargo:rustc-link-lib=framework=MediaPlayer");
+        println!("cargo:rustc-link-lib=framework=Foundation");
+    }
 }
 
 /// Ресурсы exe: описание (его показывают диспетчер задач и свойства файла) и значок из
@@ -31,7 +38,8 @@ mod resources {
         let icon = Path::new(env!("CARGO_MANIFEST_DIR")).join("icons").join("app.ico");
         println!("cargo:rerun-if-changed={}", icon.display());
         std::fs::copy(&icon, out.join("app.ico")).expect("icons/app.ico");
-        let script = format!("#pragma code_page(65001)\n1 ICON \"app.ico\"\n{}", version_info());
+        std::fs::write(out.join("app.manifest"), manifest()).unwrap();
+        let script = format!("#pragma code_page(65001)\n1 ICON \"app.ico\"\n1 24 \"app.manifest\"\n{}", version_info());
         std::fs::write(out.join("app.rc"), script).unwrap();
 
         let res = out.join("app.res");
@@ -80,6 +88,23 @@ BEGIN
 END
 "#
         )
+    }
+
+    /// Манифест приложения: Segment Heap (Windows 10 2004+) — современная куча, обычно
+    /// снижающая Private Bytes при множестве мелких аллокаций. На более старых ОС элемент
+    /// игнорируется. Эксперимент: эффект подтверждается замером памяти на Windows.
+    fn manifest() -> String {
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0" xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">
+  <assemblyIdentity type="win32" name="yamusic-rs" version="1.0.0.0" processorArchitecture="*"/>
+  <asmv3:application>
+    <asmv3:windowsSettings xmlns="http://schemas.microsoft.com/SMI/2020/WindowsSettings">
+      <heapType>SegmentHeap</heapType>
+    </asmv3:windowsSettings>
+  </asmv3:application>
+</assembly>
+"#
+        .to_string()
     }
 
     fn find_rc() -> Option<PathBuf> {

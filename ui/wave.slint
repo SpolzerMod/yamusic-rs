@@ -206,7 +206,6 @@ export component WavePage inherits Rectangle {
     property <length> text-w: root.width - text-x - 48px;
     property <length> cx: text-x + text-w / 2;
     property <length> blob: root.width * 0.6 * 1.107;
-    property <bool> paused: App.has-track && !App.playing;
     property <length> title-y: App.wave-context ? 84px : 98px;
     // Высота окна и сдвиги по замерам оригинала при 700–1100: плеер прижат к низу (H − 248),
     // заголовок и пятно — к середине; ниже 800 отступы меньше.
@@ -296,8 +295,8 @@ export component WavePage inherits Rectangle {
         reset => { App.reset-wave(); }
     }
 
-    // «Моя волна» без трека и на паузе — замер оригинала: 103 px в одну строку.
-    if !App.has-track || paused: Text {
+    // «Моя волна» — только когда трека нет. На паузе остаётся имя исполнителя.
+    if !App.has-track: Text {
         x: text-x;
         y: 171px + dt;
         width: text-w;
@@ -323,8 +322,8 @@ export component WavePage inherits Rectangle {
     if !App.has-track: Icon { x: cx - 76px - 12px; y: 600px + dp; source: Icons.prev; size: 24px; colorize: #ffffff14; }
     if !App.has-track: Icon { x: cx - 76px + 140px; y: 600px + dp; source: Icons.next; size: 24px; colorize: #ffffff14; }
 
-    // Исполнитель крупно: клик открывает его страницу.
-    if App.has-track && !paused: FitTitle {
+    // Исполнитель крупно (и на паузе): клик открывает его страницу.
+    if App.has-track: FitTitle {
         x: text-x;
         y: title-y;
         width: text-w;
@@ -406,7 +405,10 @@ export component WavePage inherits Rectangle {
                         root.drag-progress = max(0, min(1, self.mouse-x / self.width));
                     }
                     if e.button == PointerEventButton.left && e.kind == PointerEventKind.up && root.drag-progress >= 0 {
-                        App.seek(root.drag-progress * App.duration);
+                        // Цель показываем в тот же кадр: иначе заполнение отскочит
+                        // к старой позиции, пока движок не применит перемотку.
+                        App.position = root.drag-progress * App.duration;
+                        App.seek(App.position);
                         root.drag-progress = -1;
                     }
                 }
