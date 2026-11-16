@@ -2651,6 +2651,14 @@ impl Ctx {
                     "GPU-ускорение выключится после перезапуска"
                 });
             }
+            "restart" => {
+                // Новый процесс ждёт освобождения single-instance (AFTER_UPDATE),
+                // поэтому spawn до exit безопасен и на Windows, и на macOS.
+                if let Ok(exe) = std::env::current_exe() {
+                    let _ = crate::update::relaunch(&exe);
+                }
+                std::process::exit(0);
+            }
             "autostart" => {
                 let on = !app.get_autostart();
                 if win::set_autostart(on) {
