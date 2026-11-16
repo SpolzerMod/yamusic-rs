@@ -1,6 +1,6 @@
 [package]
 name = "yamusic-rs"
-version = "1.0.0"
+version = "1.0.2"
 edition = "2021"
 rust-version = "1.92"
 license = "GPL-3.0-only"
@@ -41,6 +41,8 @@ features = [
   "Win32_System_Registry",
   "Win32_Security_Cryptography",
   "Win32_UI_Controls_Dialogs",
+  "Win32_UI_Shell_Common",
+  "Win32_System_Com",
 ]
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]

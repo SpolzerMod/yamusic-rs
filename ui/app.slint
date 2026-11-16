@@ -3,7 +3,7 @@
 import { Theme } from "theme.slint";
 import { Icons, Icon, IconButton, CircleButton, PillButton, Cover, Shimmer, Fade } from "widgets.slint";
 import { Navbar } from "navbar.slint";
-import { PlayerBar } from "playerbar.slint";
+import { PlayerBar, MiniPlayer } from "playerbar.slint";
 import { ListPage } from "list.slint";
 import { CollectionPage } from "collection.slint";
 import { WavePage } from "wave.slint";
@@ -20,7 +20,7 @@ import { LandingPage, ChartPage } from "landing.slint";
 export { Theme, Icons, App, T, Page, TrackItem, PinItem, CardItem, TopArtistItem, WheelEntry, ChartRow, LyricLine, MenuEntry }
 
 component CaptionButton inherits Rectangle {
-    in property <int> kind; // 0 свернуть, 1 развернуть, 2 закрыть
+    in property <int> kind; // 0 свернуть, 1 развернуть, 2 закрыть, 3 мини-плеер
     in property <bool> maximized;
     callback clicked;
     width: 46px;
@@ -41,6 +41,11 @@ component CaptionButton inherits Rectangle {
         commands: "M 2 2.5 H 7.5 V 10 H 0 V 2.5 Z M 2.5 2.5 V 0.5 H 9.5 V 7.5 H 7.5";
         stroke: ink; stroke-width: 1px;
         viewbox-width: 10; viewbox-height: 10;
+    }
+    if kind == 3: Rectangle {
+        width: 10px; height: 8px;
+        border-width: 1px; border-color: ink; border-radius: 1px;
+        Rectangle { x: 4px; y: 3px; width: 4px; height: 3px; background: ink; }
     }
     if kind == 2: Path {
         width: 10px; height: 10px;
@@ -73,10 +78,11 @@ component ResizeEdge inherits TouchArea {
 export component AppWindow inherits Window {
     title: App.app-name;
     no-frame: true;
+    always-on-top: App.mini;
     preferred-width: 1280px;
     preferred-height: 800px;
-    min-width: 960px;
-    min-height: 640px;
+    min-width: App.mini ? 320px : 960px;
+    min-height: App.mini ? 88px : 640px;
     default-font-family: "YS Text";
     default-font-size: 16px;
     background: Theme.background-color-primary-enabled-basic;
@@ -241,7 +247,7 @@ export component AppWindow inherits Window {
     TouchArea {
         x: App.fullscreen ? 0 : content.x;
         y: 0;
-        width: parent.width - self.x - 3 * 46px;
+        width: parent.width - self.x - 4 * 46px;
         height: new-vibe && !App.fullscreen ? 20px : top;
         pointer-event(e) => {
             if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
@@ -252,15 +258,16 @@ export component AppWindow inherits Window {
     }
 
     HorizontalLayout {
-        x: parent.width - 3 * 46px;
+        x: parent.width - 4 * 46px;
         y: 0;
         height: 32px;
+        CaptionButton { kind: 3; clicked => { App.toggle-mini(); } }
         CaptionButton { kind: 0; clicked => { App.minimize(); } }
         CaptionButton { kind: 1; maximized: App.maximized; clicked => { App.toggle-maximize(); } }
         CaptionButton { kind: 2; clicked => { App.close(); } }
     }
 
-    if !App.maximized: ResizeEdge { dir: 0; x: 8px; y: 0; width: parent.width - 16px - 3 * 46px; height: 4px; }
+    if !App.maximized: ResizeEdge { dir: 0; x: 8px; y: 0; width: parent.width - 16px - 4 * 46px; height: 4px; }
     if !App.maximized: ResizeEdge { dir: 4; x: 8px; y: parent.height - 4px; width: parent.width - 16px; height: 4px; }
     if !App.maximized: ResizeEdge { dir: 6; x: 0; y: 8px; width: 4px; height: parent.height - 16px; }
     if !App.maximized: ResizeEdge { dir: 2; x: parent.width - 4px; y: 32px; width: 4px; height: parent.height - 40px; }
@@ -372,5 +379,12 @@ export component AppWindow inherits Window {
             font-weight: 500;
             color: #ffffffe6;
         }
+    }
+
+    if App.mini: MiniPlayer {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: parent.height;
     }
 }

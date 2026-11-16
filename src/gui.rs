@@ -1238,6 +1238,27 @@ fn finish_reveal(weak: slint::Weak<AppWindow>, first: bool, tries: u32) {
     }
 }
 
+/// Рабочая область монитора с окном (лево, верх, право, низ) в физических пикселях.
+/// Windows учитывает панель задач, Linux — весь монитор: winit не отдаёт рабочую область.
+fn work_area(ui: &AppWindow) -> (i32, i32, i32, i32) {
+    #[cfg(windows)]
+    {
+        win::work_area(hwnd(ui))
+    }
+    #[cfg(not(windows))]
+    {
+        let mut area = (0, 0, 1920, 1080);
+        ui.window().with_winit_window(|w| {
+            if let Some(m) = w.current_monitor().or_else(|| w.available_monitors().next()) {
+                let p = m.position();
+                let s = m.size();
+                area = (p.x, p.y, p.x + s.width as i32, p.y + s.height as i32);
+            }
+        });
+        area
+    }
+}
+
 fn hwnd(ui: &AppWindow) -> isize {
     #[cfg(windows)]
     {
@@ -1555,6 +1576,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     app.set_autostart(win::autostart_enabled());
     // MPRIS-виджет GNOME Shell и медиа-клавиши (Windows: no-op-заглушка).
     let mpris = crate::mpris::spawn(player.clone());
+    app.set_download_dir(music_dir(&cfg).display().to_string().into());
     let ctx = Rc::new(Ctx {
         ui: ui.as_weak(),
         lite: Cell::new(lite),
@@ -1811,6 +1833,48 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             ui.window().with_winit_window(|w| {
                 let _ = w.drag_window();
             });
+        }
+    });
+    let weak = ui.as_weak();
+    // Место и размер обычного окна до мини-плеера и последнее место самой плашки.
+    let normal = std::cell::Cell::new(None::<(slint::PhysicalPosition, slint::PhysicalSize, bool)>);
+    let mini_pos = std::cell::Cell::new(None::<slint::PhysicalPosition>);
+    app.on_toggle_mini(move || {
+        use winit::dpi::LogicalSize;
+        let Some(ui) = weak.upgrade() else { return };
+        let app = ui.global::<App>();
+        let w = ui.window();
+        if !app.get_mini() {
+            normal.set(Some((w.position(), w.size(), w.is_maximized())));
+            app.set_mini(true);
+            app.set_maximized(false);
+            w.set_maximized(false);
+            // Slint обновит ограничения размера только на следующем кадре, а Windows без этого не даст ужать окно.
+            w.with_winit_window(|ww| {
+                ww.set_maximized(false);
+                ww.set_min_inner_size(Some(LogicalSize::new(320.0, 88.0)));
+            });
+            w.set_size(slint::LogicalSize::new(400.0, 88.0));
+            let k = w.scale_factor();
+            let (mw, mh, gap) = ((400.0 * k) as i32, (88.0 * k) as i32, (16.0 * k) as i32);
+            let (l, t, r, b) = work_area(&ui);
+            let p = mini_pos.get().unwrap_or(slint::PhysicalPosition::new(r - mw - gap, b - mh - gap));
+            w.set_position(slint::PhysicalPosition::new(p.x.min(r - mw).max(l), p.y.min(b - mh).max(t)));
+        } else {
+            mini_pos.set(Some(w.position()));
+            app.set_mini(false);
+            w.with_winit_window(|ww| ww.set_min_inner_size(Some(LogicalSize::new(960.0, 640.0))));
+            match normal.take() {
+                Some((pos, size, max)) => {
+                    w.set_size(size);
+                    w.set_position(pos);
+                    if max {
+                        w.set_maximized(true);
+                        app.set_maximized(true);
+                    }
+                }
+                None => w.set_size(slint::LogicalSize::new(1280.0, 800.0)),
+            }
         }
     });
     let weak = ui.as_weak();
@@ -2758,6 +2822,14 @@ impl Ctx {
                     }
                 });
             }
+            "download-dir" => {
+                let cur = music_dir(&self.st.borrow().cfg).display().to_string();
+                let Some(dir) = win::pick_folder(hwnd(&ui), &crate::i18n::tr("Папка для скачивания"), &cur) else { return };
+                app.set_download_dir(dir.clone().into());
+                let mut st = self.st.borrow_mut();
+                st.cfg.download_dir = dir;
+                st.cfg.save();
+            }
             "about" => win::open_url(env!("CARGO_PKG_REPOSITORY")),
             "discord" => {
                 #[cfg(not(target_os = "windows"))]
@@ -2818,6 +2890,9 @@ impl Ctx {
             let vibe = if l.album.is_some() { "Моя волна по альбому" } else { "Моя волна по плейлисту" };
             items.push(self.menu_entry("list-vibe", vibe, icons.get_m_vibe(), false));
         }
+        if !l.tracks.is_empty() {
+            items.push(self.menu_entry("list-playlist", "Добавить в плейлист", icons.get_m_add_playlist(), true));
+        }
         items.push(self.menu_entry("list-share", "Поделиться", icons.get_m_share(), true));
         if app.get_list_own() {
             items.push(self.menu_entry("list-rename", "Изменить название", icons.get_pencil(), false));
@@ -2827,7 +2902,10 @@ impl Ctx {
             items.push(self.menu_entry("list-cover", poster, icons.get_upload(), false));
             items.push(self.menu_entry("list-delete", "Удалить плейлист", icons.get_bucket_small(), false));
         }
+        // Без трека menu_playlist добавит весь открытый список.
+        self.st.borrow_mut().menu_track = None;
         self.show_menu(items, x, y, true);
+        self.load_menu_playlists();
     }
 
     /// Цель закрепа открытого списка; «Мне нравится» — плейлист 3 владельца.
@@ -3129,9 +3207,10 @@ impl Ctx {
             "download" => {
                 let Some(net) = net else { return };
                 let api = net.api.clone();
+                let dir = music_dir(&self.st.borrow().cfg);
                 self.toast(format!("Скачиваем «{}»", t.title));
                 std::thread::spawn(move || {
-                    let res = save_track(&api, &music_dir(), &t);
+                    let res = save_track(&api, &dir, &t);
                     net.say(match res {
                         Ok(p) => format!("Сохранено: {}", p.display()),
                         Err(e) => format!("Не удалось скачать: {e}"),
@@ -3187,8 +3266,17 @@ impl Ctx {
             let st = self.st.borrow();
             (st.menu_track.clone(), st.menu_playlists.get(i).cloned(), st.net.clone())
         };
-        if let (Some(t), Some(pl), Some(net)) = (t, pl, net) {
-            net.add_to_playlist(&pl, &t);
+        let (Some(pl), Some(net)) = (pl, net) else { return };
+        if let Some(t) = t {
+            let title = t.title.clone();
+            net.add_to_playlist(&pl, vec![t], title);
+            return;
+        }
+        // Меню открыто у альбома или плейлиста — добавляем все его треки.
+        let Some(data) = self.list() else { return };
+        let Data::List(l) = &*data else { return };
+        if !l.tracks.is_empty() {
+            net.add_to_playlist(&pl, l.tracks.clone(), l.title.clone());
         }
     }
 
@@ -3686,8 +3774,8 @@ impl Ctx {
         self.st.borrow_mut().downloading = true;
         self.toast(format!("Скачиваем {}", tracks_word(tracks.len() as u64)));
         let api = net.api.clone();
+        let dir = music_dir(&self.st.borrow().cfg).join(file_name(&folder));
         std::thread::spawn(move || {
-            let dir = music_dir().join(file_name(&folder));
             let total = tracks.len();
             let (mut ok, mut failed) = (0, 0);
             for (i, t) in tracks.iter().enumerate() {
@@ -3716,7 +3804,10 @@ impl Ctx {
     }
 }
 
-fn music_dir() -> std::path::PathBuf {
+fn music_dir(cfg: &Config) -> std::path::PathBuf {
+    if !cfg.download_dir.is_empty() {
+        return cfg.download_dir.clone().into();
+    }
     #[cfg(windows)]
     {
         return std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into())).join("Music").join("Яндекс Музыка");

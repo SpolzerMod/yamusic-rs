@@ -1185,6 +1185,9 @@ impl Api {
         if !queue.is_empty() {
             body["queue"] = json!(queue);
         }
+        if LESS_AI.load(std::sync::atomic::Ordering::Relaxed) {
+            body["aiContentReductionEnabled"] = json!(true);
+        }
         let v = self.session_req("/rotor/session/new", &body)?;
         let id = str_of(&v, "radioSessionId");
         parse_batch(&v, id)
@@ -1266,7 +1269,7 @@ impl Api {
             self.req(Method::POST, &format!("/users/{uid}/dislikes/tracks/add-multiple"))
                 .form(&[("track-ids", track_full_id)]),
         )
-        .map(|_| ())
+        .map(|v| crate::config::log(format!("dislike {track_full_id}: {v}")))
     }
 
     // ---------- каталог ----------
@@ -1333,15 +1336,22 @@ impl Api {
         parse_playlist(&v).ok_or_else(|| "Яндекс не вернул новый плейлист".into())
     }
 
-    /// Добавляет трек в начало плейлиста. Ревизию берём свежую, иначе API отвечает 412.
-    pub fn add_to_playlist(&self, uid: &str, kind: &str, t: &Track) -> Res<()> {
+    /// Добавляет треки в начало плейлиста одним запросом, порядок сохраняется.
+    /// Ревизию берём свежую, иначе API отвечает 412.
+    pub fn add_to_playlist(&self, uid: &str, kind: &str, tracks: &[Track]) -> Res<()> {
         let v = self.get(&format!("/users/{uid}/playlists/{kind}"), &[])?;
         let revision = v.get("revision").and_then(|r| r.as_u64()).unwrap_or(1).to_string();
-        let mut item = json!({ "id": t.id });
-        if let Some(a) = &t.album_id {
-            item["albumId"] = json!(a);
-        }
-        let diff = json!([{ "op": "insert", "at": 0, "tracks": [item] }]).to_string();
+        let items: Vec<_> = tracks
+            .iter()
+            .map(|t| {
+                let mut item = json!({ "id": t.id });
+                if let Some(a) = &t.album_id {
+                    item["albumId"] = json!(a);
+                }
+                item
+            })
+            .collect();
+        let diff = json!([{ "op": "insert", "at": 0, "tracks": items }]).to_string();
         self.send(
             self.req(Method::POST, &format!("/users/{uid}/playlists/{kind}/change-relative"))
                 .form(&[("kind", kind), ("revision", revision.as_str()), ("diff", diff.as_str())]),

@@ -38,6 +38,8 @@ pub struct Config {
     pub navbar_collapsed: bool,
     /// smooth — все анимации, lite — без анимаций и с урезанными кэшами.
     pub mode: String,
+    /// Куда скачивать треки. Пусто — Музыка\Яндекс Музыка.
+    pub download_dir: String,
 }
 
 impl Default for Config {
@@ -63,6 +65,7 @@ impl Default for Config {
             lang: "ru".into(),
             navbar_collapsed: false,
             mode: "smooth".into(),
+            download_dir: String::new(),
         }
     }
 }

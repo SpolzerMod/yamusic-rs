@@ -376,6 +376,7 @@ export global App {
     in property <string> theme-mode: "system";
     in property <string> lang: "ru";
     in property <bool> less-ai;
+    in property <string> download-dir;
     // Режим работы: «Плавный» — анимации и кэш слоёв, «Лёгкий» — без них.
     in property <bool> motion: true;
     // Статус «Слушает» в профиле Discord и что с ним сейчас.
@@ -481,6 +482,9 @@ export global App {
     // Полный масштаб окна (DPI × ui-scale): сколько физических пикселей в 1px.
     in property <float> dpr: 1;
     callback minimize();
+    // Мини-плеер поверх всех окон.
+    in-out property <bool> mini;
+    callback toggle-mini();
     callback close();
 
     pure callback format-time(float) -> string;

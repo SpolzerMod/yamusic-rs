@@ -224,11 +224,12 @@ impl Net {
         });
     }
 
-    pub fn add_to_playlist(&self, pl: &Playlist, t: &Track) {
-        let (me, pl, t) = (self.clone(), pl.clone(), t.clone());
-        std::thread::spawn(move || match me.api.add_to_playlist(&me.uid, &pl.kind, &t) {
+    /// `what` — название для тоста: трек, альбом или плейлист целиком.
+    pub fn add_to_playlist(&self, pl: &Playlist, tracks: Vec<Track>, what: String) {
+        let (me, pl) = (self.clone(), pl.clone());
+        std::thread::spawn(move || match me.api.add_to_playlist(&me.uid, &pl.kind, &tracks) {
             Ok(()) => {
-                me.say(format!("«{}» добавлен в «{}»", t.title, pl.title));
+                me.say(format!("«{what}» добавлен в «{}»", pl.title));
                 me.refresh(&format!("playlist:{}:{}", pl.uid, pl.kind));
                 me.refresh("playlists");
             }

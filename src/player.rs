@@ -179,6 +179,7 @@ pub fn shuffle<T>(v: &mut [T]) {
 enum End {
     Finished,
     Skip,
+    Dislike,
 }
 
 struct ListPlay {
@@ -342,7 +343,7 @@ impl Engine {
         }
         let from = format!("desktop_win-radio-{}-default", station.replace(':', "-"));
         let body = crate::api::session_event(kind, track.as_deref(), played, &batch, &from);
-        if matches!(kind, "skip" | "trackFinished") {
+        if matches!(kind, "skip" | "dislike" | "trackFinished") {
             self.deferred.push(body);
             return;
         }
@@ -615,7 +616,7 @@ impl Engine {
                         }
                     }));
                 }
-                self.advance(End::Skip);
+                self.advance(End::Dislike);
             }
             Cmd::Wave(src) => self.start_wave(src, true),
             Cmd::PlayList { source, tracks, start, after } => {
@@ -807,6 +808,7 @@ impl Engine {
                 let kind = match end {
                     End::Finished => "trackFinished",
                     End::Skip => "skip",
+                    End::Dislike => "dislike",
                 };
                 self.feedback(kind, Some(cur.full_id()), Some(played));
             }

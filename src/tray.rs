@@ -18,6 +18,10 @@ use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 #[cfg(windows)]
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 #[cfg(windows)]
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    RegisterHotKey, UnregisterHotKey, VK_MEDIA_NEXT_TRACK, VK_MEDIA_PLAY_PAUSE, VK_MEDIA_PREV_TRACK,
+};
+#[cfg(windows)]
 use windows_sys::Win32::UI::Shell::{Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW};
 #[cfg(windows)]
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
@@ -30,6 +34,9 @@ const WM_TRAY: u32 = WM_APP + 1;
 /// Второй запуск просит уже работающий экземпляр показать окно.
 #[cfg(windows)]
 const WM_WAKE: u32 = WM_APP + 2;
+/// Медиаклавиши клавиатуры: id горячей клавиши и код клавиши.
+#[cfg(windows)]
+const MEDIA_KEYS: [(i32, u16); 3] = [(1, VK_MEDIA_PLAY_PAUSE), (2, VK_MEDIA_NEXT_TRACK), (3, VK_MEDIA_PREV_TRACK)];
 
 // Linux-сборка события и меню не читает (трея нет) — API сохранено для gui.rs.
 #[allow(dead_code)]
@@ -120,6 +127,11 @@ pub fn install(on_event: impl Fn(Event) + 'static, state: impl Fn() -> MenuState
         let msg = wide("TaskbarCreated");
         let taskbar_created = RegisterWindowMessageW(msg.as_ptr());
         add_icon(hwnd, icon);
+        // Глобально, чтобы клавиши работали и при свёрнутом окне. Если клавишу уже занял
+        // другой плеер, RegisterHotKey просто вернёт ошибку — тогда она остаётся за ним.
+        for (id, vk) in MEDIA_KEYS {
+            RegisterHotKey(hwnd, id, 0, vk as u32);
+        }
         TRAY.with(|t| {
             *t.borrow_mut() = Some(Tray { hwnd, icon, taskbar_created, on_event: Rc::new(on_event), state: Box::new(state) })
         });
@@ -132,6 +144,9 @@ pub fn remove() {
     let nid = notify_data(t.hwnd, t.icon);
     unsafe {
         Shell_NotifyIconW(NIM_DELETE, &nid);
+        for (id, _) in MEDIA_KEYS {
+            UnregisterHotKey(t.hwnd, id);
+        }
         DestroyWindow(t.hwnd);
     }
 }
@@ -227,6 +242,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
         WM_WAKE => {
             emit(Event::Show);
+            0
+        }
+        WM_HOTKEY => {
+            match wp {
+                1 => emit(Event::PlayPause),
+                2 => emit(Event::Next),
+                3 => emit(Event::Prev),
+                _ => {}
+            }
             0
         }
         _ => {
