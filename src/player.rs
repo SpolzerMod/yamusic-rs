@@ -462,14 +462,25 @@ impl Engine {
     }
 
     fn replay(&mut self) -> bool {
-        let (Some(url), Some(api)) = (self.current_url.clone(), self.api.clone()) else { return false };
-        let Ok(stream) = api.reopen_stream(&url) else { return false };
-        let Ok(src) = Decoder::new(stream) else { return false };
-        let src = Eq::new(src.convert_samples::<f32>(), self.eq.clone());
-        if let Some(sink) = self.sink() {
-            sink.append(src);
-            sink.play();
+        // Повтор открываем в фоне по уже известному адресу: не блокируем аудиодвижок
+        // сетью, как при обычной загрузке (результат придёт сообщением Msg::Audio).
+        let (Some(api), Some(url)) = (self.api.clone(), self.current_url.clone()) else { return false };
+        if self.current.is_none() {
+            return false;
         }
+        self.gen += 1;
+        self.loaded = false;
+        {
+            let mut s = self.sh();
+            s.position = 0.0;
+            s.loading = true;
+        }
+        let gen = self.gen;
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let res = api.reopen_stream(&url);
+            let _ = tx.send(Msg::Audio { gen, res });
+        });
         true
     }
 
