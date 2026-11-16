@@ -13,6 +13,11 @@ VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
 TARGET="${CARGO_TARGET_DIR:-target}"
 OUT="$TARGET/release/bundle/$NAME.app"
 
+case "$*" in
+  ""|--universal) ;;
+  *) echo "Использование: $0 [--universal]" >&2; exit 2 ;;
+esac
+
 if [ "${1:-}" = "--universal" ]; then
   cargo build --release --target aarch64-apple-darwin
   cargo build --release --target x86_64-apple-darwin
@@ -68,5 +73,5 @@ cat > "$OUT/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-codesign -s - --force --deep "$OUT"
+codesign -s - --force "$OUT"
 echo "$OUT"

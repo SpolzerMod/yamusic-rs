@@ -4,7 +4,7 @@
 
 use crate::config::log;
 use crate::i18n::tr;
-use crate::player::Player;
+use crate::player::{Cmd, Player};
 use objc2::rc::Retained;
 use objc2::runtime::NSObject;
 use objc2::{define_class, msg_send, sel, AnyThread};
@@ -15,7 +15,7 @@ use std::io::Write;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
@@ -51,8 +51,9 @@ struct Items {
 }
 
 struct Tray {
-    _icon: TrayIcon,
-    items: Items,
+    /// Значок и меню создаются уже в цикле событий (`create_icon`), до этого их нет.
+    _icon: Option<TrayIcon>,
+    items: Option<Items>,
     on_event: Rc<dyn Fn(Event)>,
     state: Box<dyn Fn() -> MenuState>,
 }
@@ -63,6 +64,9 @@ thread_local! {
 
 /// Управление «Сейчас играет» и медиаклавишами: им пользуются основной поток и поток метаданных.
 static MEDIA: Mutex<Option<MediaControls>> = Mutex::new(None);
+
+/// Плеер для команд из системы, которых нет среди событий трея (перемотка).
+static PLAYER: OnceLock<Player> = OnceLock::new();
 
 /// Сокет, через который второй запуск будит работающий экземпляр.
 fn wake_socket() -> PathBuf {
@@ -80,9 +84,22 @@ fn item(id: &str, text: &str) -> MenuItem {
     MenuItem::with_id(id, tr(text), true, None)
 }
 
-/// Создаёт значок. События приходят в основной поток через очередь Slint,
-/// а не из обработчика AppKit: так их обработка не вкладывается в цикл winit.
+/// Запоминает обработчики и запускает всё, что не зависит от значка: сокет второго запуска и
+/// медиаклавиши. Значок создаётся позже, в цикле событий. События приходят в основной поток
+/// через очередь Slint, а не из обработчика AppKit: так их обработка не вкладывается в цикл winit.
 pub fn install(on_event: impl Fn(Event) + 'static, state: impl Fn() -> MenuState + 'static) {
+    TRAY.with(|t| *t.borrow_mut() = Some(Tray { _icon: None, items: None, on_event: Rc::new(on_event), state: Box::new(state) }));
+    listen_for_wake();
+    attach_media_keys();
+    // Как советует tray-icon, значок создаётся, когда цикл событий уже запущен. Заодно к этому
+    // моменту AppKit поставил свои обработчики событий, и наш `reopen` их заменит, а не наоборот.
+    slint::Timer::single_shot(Duration::ZERO, || {
+        create_icon();
+        handle_reopen();
+    });
+}
+
+fn create_icon() {
     let items = Items { toggle: item("toggle", "Свернуть"), play: item("play", "Воспроизведение"), prev: item("prev", "Предыдущая песня"), next: item("next", "Следующая песня") };
     let (updates, terms, recs, support, quit) = (
         item("updates", "Проверить обновления"),
@@ -101,7 +118,10 @@ pub fn install(on_event: impl Fn(Event) + 'static, state: impl Fn() -> MenuState
         log(format!("меню в меню-баре не собралось: {e}"));
         return;
     }
-    let Some(icon) = load_icon() else { return };
+    let Some(icon) = load_icon() else {
+        log("значок меню-бара не загрузился");
+        return;
+    };
     let tray = TrayIconBuilder::new()
         .with_icon_templated(icon)
         .with_tooltip(env!("APP_NAME"))
@@ -136,12 +156,24 @@ pub fn install(on_event: impl Fn(Event) + 'static, state: impl Fn() -> MenuState
         TrayIconEvent::Click { button: MouseButton::Right, button_state: MouseButtonState::Down, .. } => refresh(),
         _ => {}
     }));
-    TRAY.with(|t| *t.borrow_mut() = Some(Tray { _icon: tray, items, on_event: Rc::new(on_event), state: Box::new(state) }));
+    TRAY.with(|t| {
+        if let Some(t) = t.borrow_mut().as_mut() {
+            t._icon = Some(tray);
+            t.items = Some(items);
+        }
+    });
     refresh();
-    listen_for_wake();
-    attach_media_keys();
-    // Свой обработчик нужно ставить, когда цикл событий уже запущен: до этого AppKit ставит свой.
-    slint::Timer::single_shot(Duration::from_millis(300), handle_reopen);
+}
+
+pub fn remove() {
+    MenuEvent::set_event_handler(None::<fn(MenuEvent)>);
+    TrayIconEvent::set_event_handler(None::<fn(TrayIconEvent)>);
+    TRAY.with(|t| t.borrow_mut().take());
+    let _ = std::fs::remove_file(wake_socket());
+    if let Some(mut c) = MEDIA.lock().unwrap().take() {
+        let _ = c.set_playback(MediaPlayback::Stopped);
+        let _ = c.detach();
+    }
 }
 
 define_class!(
@@ -176,17 +208,6 @@ fn handle_reopen() {
     }
     // Менеджер событий объект не удерживает, а обработчик нужен до конца работы.
     std::mem::forget(handler);
-}
-
-pub fn remove() {
-    MenuEvent::set_event_handler(None::<fn(MenuEvent)>);
-    TrayIconEvent::set_event_handler(None::<fn(TrayIconEvent)>);
-    TRAY.with(|t| t.borrow_mut().take());
-    let _ = std::fs::remove_file(wake_socket());
-    if let Some(mut c) = MEDIA.lock().unwrap().take() {
-        let _ = c.set_playback(MediaPlayback::Stopped);
-        let _ = c.detach();
-    }
 }
 
 /// Для второго запуска: попросить работающий экземпляр показать окно.
@@ -228,14 +249,13 @@ fn emit(e: Event) {
 /// Подписи и доступность пунктов по текущему состоянию плеера.
 fn refresh() {
     TRAY.with(|t| {
-        let Some(t) = t.borrow().as_ref().map(|t| ((t.state)(), t.items.toggle.clone(), t.items.play.clone(), t.items.prev.clone(), t.items.next.clone())) else {
-            return;
-        };
-        let (s, toggle, play, prev, next) = t;
-        toggle.set_text(tr(if s.minimized { "Развернуть" } else { "Свернуть" }));
-        play.set_text(tr(if s.playing { "Пауза" } else { "Воспроизведение" }));
-        prev.set_enabled(s.can_prev);
-        next.set_enabled(s.can_next);
+        let t = t.borrow();
+        let Some((t, items)) = t.as_ref().and_then(|t| Some((t, t.items.as_ref()?))) else { return };
+        let s = (t.state)();
+        items.toggle.set_text(tr(if s.minimized { "Развернуть" } else { "Свернуть" }));
+        items.play.set_text(tr(if s.playing { "Пауза" } else { "Воспроизведение" }));
+        items.prev.set_enabled(s.can_prev);
+        items.next.set_enabled(s.can_next);
     });
 }
 
@@ -257,6 +277,13 @@ fn attach_media_keys() {
 }
 
 fn on_media(e: MediaControlEvent) {
+    // Перемотка из Пункта управления: позиция в секундах, команда плееру напрямую.
+    if let MediaControlEvent::SetPosition(MediaPosition(pos)) = e {
+        if let Some(p) = PLAYER.get() {
+            p.send(Cmd::Seek(pos.as_secs_f32()));
+        }
+        return;
+    }
     let _ = slint::invoke_from_event_loop(move || {
         let Some((f, playing)) = TRAY.with(|t| t.borrow().as_ref().map(|t| (t.on_event.clone(), (t.state)().playing))) else { return };
         // Событий «играть» и «пауза» в меню нет, поэтому сверяемся с состоянием плеера.
@@ -274,6 +301,7 @@ fn on_media(e: MediaControlEvent) {
 /// «Сейчас играет» в Пункте управления и на экране блокировки: трек, исполнитель, альбом,
 /// обложка, пауза и позиция. Как и Discord, смотрит на состояние плеера из своего потока.
 pub fn now_playing(player: Player) {
+    let _ = PLAYER.set(player.clone());
     std::thread::Builder::new()
         .name("now-playing".into())
         .spawn(move || {
@@ -301,6 +329,8 @@ pub fn now_playing(player: Player) {
                             });
                         }
                         None => {
+                            // Вышли из аккаунта или очередь пуста: старый трек из Пункта управления убираем.
+                            let _ = media.set_metadata(MediaMetadata::default());
                             let _ = media.set_playback(MediaPlayback::Stopped);
                         }
                     }

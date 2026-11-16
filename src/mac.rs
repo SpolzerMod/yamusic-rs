@@ -44,8 +44,7 @@ pub fn hide(hwnd: isize) {
 }
 
 /// Сделать приложение активным: окно, спрятанное в меню-бар, иначе не выйдет на передний план.
-pub fn force_foreground(hwnd: isize) {
-    let _ = hwnd;
+pub fn force_foreground(_hwnd: isize) {
     if let Some(mtm) = MainThreadMarker::new() {
         #[allow(deprecated)]
         NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
@@ -180,6 +179,12 @@ pub fn set_autostart(on: bool) -> bool {
         };
     }
     let Ok(exe) = std::env::current_exe() else { return false };
+    // Приложение запущено из архива или с загрузок: macOS копирует его во временную папку, и путь
+    // оттуда сломается после перезагрузки. Хороший путь в агенте не затираем.
+    if exe.to_string_lossy().contains("/AppTranslocation/") {
+        crate::config::log("автозапуск не записан: приложение запущено с временного пути, перенесите его в «Программы»");
+        return false;
+    }
     let plist = agent_plist(&exe.display().to_string());
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);

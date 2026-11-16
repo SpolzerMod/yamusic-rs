@@ -58,7 +58,7 @@
 - Скачивание треков с обложкой и тегами ID3. По умолчанию в `Музыка\Яндекс Музыка`, папку можно
   сменить в настройках.
 - Эквалайзер на 10 полос, светлая и тёмная тема, русский, английский, узбекский и казахский языки.
-- Трей и автозапуск вместе с Windows. Если закрыть окно во время игры, музыка не остановится.
+- Трей (на macOS — меню-бар) и автозапуск при старте системы. Если закрыть окно во время игры, музыка не остановится.
 - Мини-плеер поверх всех окон: обложка, название и три кнопки. Включается кнопкой рядом
   с «Свернуть».
 - Медиаклавиши клавиатуры работают, даже когда окно свёрнуто.
@@ -120,7 +120,7 @@
 | Windows на ARM | Должна запускаться через эмуляцию x64. Не проверялась. |
 | Windows 7 и 8.1 | Не поддерживаются: текущий Rust под них не собирает. |
 | **Linux** | В планах. Сборки AppImage будут выходить пре-релизами, тестировать будем вместе с пользователями. |
-| **macOS** 11+ | Сборка `yamusic-rs-macos-universal.zip` в релизе, один `.app` для Apple Silicon и Intel. Приложение не подписано у Apple: при первом запуске macOS его заблокирует, разрешите запуск в «Системные настройки → Конфиденциальность и безопасность → Всё равно открыть». Токен хранится в Связке ключей. Обновляется вручную, статуса в Discord нет. |
+| **macOS** 11+ | Сборка `yamusic-rs-macos-universal.zip` в релизе, один `.app` для Apple Silicon и Intel. Приложение не подписано у Apple: при первом запуске macOS его заблокирует, разрешите запуск в «Системные настройки → Конфиденциальность и безопасность → Всё равно открыть». Токен хранится в Связке ключей. Обновляется вручную, статуса в Discord нет. Лучше перенести приложение в «Программы»: из архива и других временных мест macOS запускает его с изолированным путём, и автозапуск не включится. |
 
 **Нужно ещё:**
 - аккаунт Яндекса. Без Плюса сервер отдаёт только 30-секундные отрывки;
@@ -137,12 +137,13 @@
 
 Вход идёт по коду устройства через ya.ru/device, пароль приложение не видит. Полученный токен
 шифруется средствами Windows (DPAPI) и хранится в `%APPDATA%\yamusic-rs\config.json`. Расшифровать
-его может только ваша учётная запись Windows на этом компьютере.
+его может только ваша учётная запись Windows на этом компьютере. На macOS токен лежит в Связке
+ключей, а в `~/Library/Application Support/yamusic-rs/config.json` только ссылка на него.
 
 Токен отправляется только по https и только на домены `yandex.ru` и `yandex.net`. Проверка
 встроена в код (`src/client.rs`). Кроме Яндекса приложение ходит только к `api.github.com`,
-чтобы проверить обновления, и к Discord на этом же компьютере (локальный канал), если включён
-статус. Аналитики и телеметрии нет.
+чтобы проверить обновления, и к Discord на этом же компьютере (локальный канал, только на Windows),
+если включён статус. Аналитики и телеметрии нет.
 </details>
 
 <details>
@@ -278,6 +279,7 @@ SKIA_BINARIES_URL=file://C:/путь/к/skia.tar.gz cargo build --release
 | `src/assets.rs`, `src/i18n.rs` | Шрифты, спрайт иконок и словари переводов из `app.asar` оригинала или с music.yandex.ru. |
 | `src/images.rs`, `src/net.rs` | Фоновая загрузка обложек и данных страниц, кэши с бюджетом памяти. |
 | `src/tray.rs`, `src/win.rs` | Трей, окна, автозапуск и прочий Win32. |
+| `src/tray_mac.rs`, `src/mac.rs` | То же для macOS: меню-бар, медиаклавиши, «Сейчас играет», окна и автозапуск через AppKit. |
 | `src/discord.rs` | Rich Presence через локальный канал Discord, без сторонних библиотек. |
 | `src/update.rs` | Проверка релизов на GitHub и замена exe на лету. |
 | `ui/theme.slint`, `src/palette.rs` | Сгенерированы `tools/gen_theme.py` и `tools/gen_palette.py` из CSS и JS оригинала. Руками не править. |
@@ -310,8 +312,10 @@ git tag v1.0.1          # версия должна совпадать с Cargo.
 git push origin v1.0.1
 ```
 
-Сборка прогоняет clippy и тесты, собирает `yamusic-rs.exe` и выкладывает его в релиз. На каждый
-push и pull request exe тоже собирается, его можно скачать из артефактов сборки. Встроенная
+Сборка прогоняет clippy и тесты на Windows и macOS и собирает `yamusic-rs.exe` и
+`yamusic-rs-macos-universal.zip` (один `.app` для Apple Silicon и Intel). Отдельное задание `release`
+ждёт обе сборки и выкладывает оба файла в релиз. На каждый push и pull request файлы тоже
+собираются, их можно скачать из артефактов сборки. Встроенная
 обновлялка ищет в релизе файл с именем ровно `yamusic-rs.exe` и сверяет его с `digest`, который
 GitHub считает при загрузке.
 
@@ -335,12 +339,12 @@ uses about 65 MB in one process.
 
 - **Download** `yamusic-rs.exe` from the [latest release](https://github.com/SpolzerMod/yamusic-rs/releases/latest)
   and run it; there is no installer. Sign in with the code shown at [ya.ru/device](https://ya.ru/device).
-  The app updates itself from GitHub releases.
+  The Windows app updates itself from GitHub releases; the macOS build does not.
 - **Requirements:** Windows 11 (Windows 10 should work but is not tested regularly), a Yandex account,
   and Yandex Plus for full-length tracks. A universal macOS build (Apple Silicon and Intel) is in the
   releases; Linux builds are planned.
-- **Privacy:** the token is encrypted with Windows DPAPI and only sent over HTTPS to `yandex.ru` /
-  `yandex.net`. Besides Yandex, the app only talks to `api.github.com` (update checks) and the local
+- **Privacy:** the token is encrypted with Windows DPAPI (on macOS it is stored in the Keychain) and
+  only sent over HTTPS to `yandex.ru` / `yandex.net`. Besides Yandex, the app only talks to `api.github.com` (update checks) and the local
   Discord client (optional status). There is no telemetry.
 - **Build:** Rust 1.92+, MSVC Build Tools with the Windows SDK, then `cargo build --release`.
 - **Bugs:** open an [issue](https://github.com/SpolzerMod/yamusic-rs/issues/new/choose) with the app

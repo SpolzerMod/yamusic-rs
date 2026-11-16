@@ -209,7 +209,7 @@ impl Ctx {
             // Токен отозван или истёк — обратно на экран входа.
             if self.st.borrow().net.is_none() && e.contains("токен") && !app.get_logged_out() {
                 self.st.borrow_mut().cfg.token = None;
-                self.st.borrow().cfg.save();
+                self.st.borrow().cfg.save_explicit();
                 self.login_start();
             } else if app.get_toast().is_empty() && !app.get_logged_out() {
                 self.toast(e.clone());
@@ -2098,7 +2098,7 @@ impl Ctx {
                 st.cfg.refresh_token = t.refresh;
             }
             st.cfg.token_expires = t.expires_in.map(|s| crate::config::now_secs() + s);
-            st.cfg.save();
+            st.cfg.save_explicit();
         }
         let ui = self.ui();
         let app = ui.global::<App>();
@@ -2142,7 +2142,7 @@ impl Ctx {
             st.cfg.token = None;
             st.cfg.refresh_token = None;
             st.cfg.token_expires = None;
-            st.cfg.save();
+            st.cfg.save_explicit();
             st.net = None;
             st.started = false;
             st.uid.clear();

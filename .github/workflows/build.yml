@@ -81,6 +81,8 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+          # Без этого zip с .app распаковался бы и в релиз ушёл бы не архив.
+          skip-decompress: true
 
       - name: Релиз
         env:

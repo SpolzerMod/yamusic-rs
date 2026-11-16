@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
@@ -102,7 +103,11 @@ impl Config {
         c.token = c.token_sealed.as_deref().and_then(crate::secret::open);
         c.refresh_token = c.refresh_sealed.as_deref().and_then(crate::secret::open);
         if c.token.is_none() && c.token_sealed.is_some() {
-            log("токен не расшифровался (другая учётная запись Windows?) — нужно войти заново");
+            log(if cfg!(windows) {
+                "токен не расшифровался (другая учётная запись Windows?) — нужно войти заново"
+            } else {
+                "токен не прочитан из связки ключей — нужно войти заново, следующий запуск попробует снова"
+            });
         }
         if let Some(plain) = c.token_plain.clone().filter(|t| !t.trim().is_empty()) {
             if c.token.is_none() {
@@ -114,21 +119,34 @@ impl Config {
         c
     }
 
+    /// Сохранение при входе или выходе: пользователь сам меняет аккаунт, и новое состояние
+    /// должно лечь на место старого, даже если связка ключей (macOS) при запуске не прочиталась.
+    pub fn save_explicit(&self) {
+        crate::secret::explicit_change();
+        self.save();
+    }
+
     pub fn save(&self) {
         let _ = std::fs::create_dir_all(dir());
         let mut disk = self.clone();
-        disk.token_sealed = self.token.as_deref().and_then(|t| crate::secret::seal("token", t));
-        disk.refresh_sealed = self.refresh_token.as_deref().and_then(|t| crate::secret::seal("refresh", t));
-        // Вышли из аккаунта — запись в связке ключей (macOS) больше не нужна.
-        if self.token.is_none() {
-            crate::secret::forget("token");
-        }
-        if self.refresh_token.is_none() {
-            crate::secret::forget("refresh");
+        // Связка ключей не прочиталась — ссылки на токены остаются как были, чтобы следующий запуск
+        // попробовал снова; иначе вход пришлось бы повторять.
+        if !(self.token.is_none() && crate::secret::unreadable()) {
+            let [token, refresh] = crate::secret::seal_all([("token", self.token.as_deref()), ("refresh", self.refresh_token.as_deref())]);
+            disk.token_sealed = token;
+            disk.refresh_sealed = refresh;
+            // Пишем в лог только первую неудачу подряд: save() зовётся на каждое движение ползунка громкости.
+            static REFRESH_FAILED: AtomicBool = AtomicBool::new(false);
+            let failed = self.refresh_token.is_some() && disk.refresh_sealed.is_none();
+            if REFRESH_FAILED.swap(failed, Ordering::Relaxed) != failed && failed {
+                log("refresh-токен не удалось зашифровать — он не сохранён");
+            }
         }
         // Не вышло зашифровать — токен на диск не пишем совсем: при следующем запуске войти заново.
         disk.token_plain = None;
-        if self.token.is_some() && disk.token_sealed.is_none() {
+        static TOKEN_FAILED: AtomicBool = AtomicBool::new(false);
+        let failed = self.token.is_some() && disk.token_sealed.is_none();
+        if TOKEN_FAILED.swap(failed, Ordering::Relaxed) != failed && failed {
             log("токен не удалось зашифровать — он не сохранён, при следующем запуске нужно войти заново");
         }
         if let Ok(s) = serde_json::to_string_pretty(&disk) {
