@@ -150,6 +150,27 @@ Accurate качает промежуток). Тесты фейда: моното
 Проверка: центры совпадают с Finder попиксельно, в т.ч. после resize окна;
 release-бандл замерен тем же способом.
 
+**Исследование «более надёжного способа» (по вопросу пользователя).** На macOS 26
+публичного декларативного API для inset'а светофора нет, проверено экспериментом:
+- настоящие NSLayoutConstraint + `translatesAutoresizingMaskIntoConstraints=NO`: AppKit
+  сам ре-пинит frame кнопок на каждом лейауте (y за пределами контейнера) →
+  кнопки клиппятся и исчезают;
+- `NSTitlebarAccessoryViewController` (leading): кнопки исчезают совсем;
+- приватных сеттеров inset у NSWindow/NSTitlebarView нет (дамп method list;
+  есть только `_setCornerRadius:`, который используем для радиуса).
+Индустрия (Electron windowButtonPosition, Tauri/tao trafficLightPosition →
+`inset_traffic_lights`, readest) — все в итоге делают `setFrameOrigin:` +
+повторную постановку на событиях; это и есть наш механизм.
+
+**Live resize.** Во время drag'а AppKit сбрасывает кнопки на каждое mouse-move;
+таймеры (default mode) в event tracking mode не срабатывают, а `performSelector:
+inModes:` с псевдо-mode NSRunLoopCommonModes empirically не срабатывает вовсе.
+Итог: resize-observer ставит кнопки **синхронно** (уведомление приходит после
+лейаута AppKit в том же обороте; частота resize-событий = естественный троттл),
+becomeKey — отложенно (default + NSEventTrackingRunLoopMode таймеры), создание
+кнопок — retry. Проверка: серия из 6 кадров во время drag'а + кадр после —
+везде центры Finder, без мигания углом.
+
 ## Общие проверки (перед отчётом)
 
 - `cargo test` и `cargo test --release` — зелёные.
