@@ -372,7 +372,7 @@ export component SettingsPage inherits Rectangle {
             }
             SettingItem {
                 title: T.t("GPU-ускорение интерфейса");
-                desc: T.t("Metal на macOS, DX12/Vulkan на Windows. Применится после перезапуска");
+                desc: T.t("Видеокарта рисует интерфейс вместо процессора. Применится после перезапуска");
                 toggle: true;
                 on: App.gpu;
                 clicked => { App.setting("gpu"); }
