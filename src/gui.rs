@@ -1207,6 +1207,17 @@ fn finish_reveal(weak: slint::Weak<AppWindow>, first: bool, tries: u32) {
     }
 }
 
+/// macOS: NSView окна winit для платформенных вызовов (видимость светофора).
+#[cfg(target_os = "macos")]
+fn mac_view(w: &slint::Window) -> *mut std::ffi::c_void {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    w.with_winit_window(|ww| match ww.window_handle().map(|h| h.as_raw()) {
+        Ok(RawWindowHandle::AppKit(h)) => h.ns_view.as_ptr(),
+        _ => std::ptr::null_mut(),
+    })
+    .unwrap_or(std::ptr::null_mut())
+}
+
 fn hwnd(ui: &AppWindow) -> isize {
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     ui.window()
@@ -1505,6 +1516,8 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     // macOS: нативный «светофор» вместо виндовых кнопок, сдвиг навбара вниз.
     app.set_mac(cfg!(target_os = "macos"));
     app.set_windows(cfg!(target_os = "windows"));
+    // Запас сверху под светофор Finder-inset: только macOS, иначе вёрстка как была.
+    app.set_chrome_top(if cfg!(target_os = "macos") { 24.0 } else { 0.0 });
 
     let discord = crate::discord::Discord::spawn(
         player.clone(),
@@ -1762,6 +1775,8 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         if !app.get_mini() {
             normal.set(Some((w.position(), w.size(), w.is_maximized())));
             app.set_mini(true);
+            #[cfg(target_os = "macos")]
+            crate::mac::set_traffic_lights_hidden(mac_view(w), true);
             app.set_maximized(false);
             w.set_maximized(false);
             // Slint обновит ограничения размера только на следующем кадре, а Windows без этого не даст ужать окно.
@@ -1778,6 +1793,8 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         } else {
             mini_pos.set(Some(w.position()));
             app.set_mini(false);
+            #[cfg(target_os = "macos")]
+            crate::mac::set_traffic_lights_hidden(mac_view(w), false);
             w.with_winit_window(|ww| ww.set_min_inner_size(Some(LogicalSize::new(960.0, 640.0))));
             match normal.take() {
                 Some((pos, size, max)) => {

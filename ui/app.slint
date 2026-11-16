@@ -122,16 +122,16 @@ export component AppWindow inherits Window {
         // На волне пятно выходит за край контента: обрезка дала бы видимую границу.
         clip: !new-vibe;
 
-        if App.page == Page.list: Fade { rise: 8px; ListPage { } }
-        if App.page == Page.collection: Fade { rise: 8px; CollectionPage { } }
+        if App.page == Page.list: Fade { rise: 8px; ListPage { y: App.chrome-top; height: parent.height - App.chrome-top; } }
+        if App.page == Page.collection: Fade { rise: 8px; CollectionPage { y: App.chrome-top; height: parent.height - App.chrome-top; } }
         if App.page == Page.wave: Fade { rise: 8px; WavePage { } }
-        if App.page == Page.search: Fade { rise: 8px; SearchPage { } }
-        if App.page == Page.artist: Fade { rise: 8px; ArtistPage { } }
-        if App.page == Page.artists: Fade { rise: 8px; MyArtistsPage { } }
-        if App.page == Page.settings: Fade { rise: 8px; SettingsPage { } }
-        if App.page == Page.grid: Fade { rise: 8px; GridPage { } }
-        if App.page == Page.trends || App.page == Page.concerts || App.page == Page.nonmusic: Fade { rise: 8px; LandingPage { } }
-        if App.page == Page.chart: Fade { rise: 8px; ChartPage { } }
+        if App.page == Page.search: Fade { rise: 8px; SearchPage { y: App.chrome-top; height: parent.height - App.chrome-top; } }
+        if App.page == Page.artist: Fade { rise: 8px; ArtistPage { y: App.chrome-top; height: parent.height - App.chrome-top; } }
+        if App.page == Page.artists: Fade { rise: 8px; MyArtistsPage { y: App.chrome-top; height: parent.height - App.chrome-top; } }
+        if App.page == Page.settings: Fade { rise: 8px; SettingsPage { y: App.chrome-top; height: parent.height - App.chrome-top; } }
+        if App.page == Page.grid: Fade { rise: 8px; GridPage { y: App.chrome-top; height: parent.height - App.chrome-top; } }
+        if App.page == Page.trends || App.page == Page.concerts || App.page == Page.nonmusic: Fade { rise: 8px; LandingPage { y: App.chrome-top; height: parent.height - App.chrome-top; } }
+        if App.page == Page.chart: Fade { rise: 8px; ChartPage { y: App.chrome-top; height: parent.height - App.chrome-top; } }
         if App.page != Page.list && App.page != Page.collection && App.page != Page.wave && App.page != Page.search && App.page != Page.artist && App.page != Page.artists && App.page != Page.settings && App.page != Page.grid && App.page != Page.trends && App.page != Page.concerts && App.page != Page.nonmusic && App.page != Page.chart: Text {
             text: T.t("Раздел в разработке");
             color: Theme.controls-color-primary-text-enabled;

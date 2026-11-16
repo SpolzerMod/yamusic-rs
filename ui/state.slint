@@ -140,6 +140,9 @@ export global App {
     in property <bool> windows;
     // GPU-рендер интерфейса: opt-in в настройках, применится после перезапуска.
     in property <bool> gpu;
+    // macOS: запас сверху под светофор с Finder-inset (кнопки y19–33); страницы
+    // сдвинуты на эту величину, градиенты шапок растянуты вверх. Иначе 0.
+    in property <length> chrome-top;
     in property <string> toast;
     in property <image> toast-cover;
     in property <bool> toast-has-cover;
