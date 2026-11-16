@@ -117,6 +117,8 @@ enum Msg {
     Batch { res: Res<Batch>, replace: bool, gen: u64 },
     Audio { gen: u64, res: Res<HttpStream> },
     Prefetch { id: String, res: Res<HttpStream> },
+    /// Результат фоновой перемотки: готовый декодер уже стоит на нужной позиции.
+    Seeked { gen: u64, seq: u64, pos: f32, res: Result<Decoder<HttpStream>, String> },
     Error(String),
 }
 
@@ -215,6 +217,8 @@ struct Engine {
     batch_gen: u64,
     retry_at: Option<Instant>,
     gen: u64,
+    /// Счётчик запросов перемотки: применяем только последний результат.
+    seek_seq: u64,
     loaded: bool,
     paused: bool,
     volume: f32,
@@ -263,6 +267,7 @@ impl Engine {
             batch_gen: 0,
             retry_at: None,
             gen: 0,
+            seek_seq: 0,
             loaded: false,
             paused: true,
             volume: 0.6,
@@ -555,6 +560,38 @@ impl Engine {
                     }
                 }
             }
+            Msg::Seeked { gen, seq, pos, res } => {
+                // Применяем только последнюю перемотку для того же трека.
+                if gen != self.gen || seq != self.seek_seq {
+                    return;
+                }
+                match res {
+                    Ok(dec) => {
+                        let eq = self.eq.clone();
+                        let vol = self.volume * self.volume;
+                        let paused = self.paused;
+                        let src = Eq::new(dec.convert_samples::<f32>(), eq);
+                        if let Some(sink) = self.sink() {
+                            // Старый источник снимаем, ставим уже спозиционированный.
+                            // Финальный try_seek нужен, чтобы rodio обновил позицию
+                            // (TrackPosition) — данные при этом уже в памяти.
+                            sink.clear();
+                            sink.set_volume(vol);
+                            sink.append(src);
+                            if paused {
+                                sink.pause()
+                            } else {
+                                sink.play()
+                            }
+                            if let Err(e) = sink.try_seek(Duration::from_secs_f32(pos)) {
+                                log(format!("seek: {e:?}"));
+                            }
+                        }
+                        self.sh().position = pos;
+                    }
+                    Err(e) => log(format!("seek: {e}")),
+                }
+            }
             Msg::Error(e) => self.error(e),
         }
     }
@@ -615,13 +652,26 @@ impl Engine {
             }
             Cmd::Prev => self.prev(),
             Cmd::Seek(sec) => {
-                if self.loaded {
-                    if let Some(s) = self.sink() {
-                        if let Err(e) = s.try_seek(Duration::from_secs_f32(sec.max(0.0))) {
-                            log(format!("seek: {e:?}"));
-                        }
-                    }
+                // Перемотку делаем в фоне. Sink::try_seek применяет seek на аудиопотоке,
+                // а symphonia при Accurate сразу читает из HttpStream — сетевой fetch
+                // в аудиоколбэке даёт underrun и щелчки. Поэтому ссылку/поток/точный
+                // seek готовим отдельным потоком и подменяем источник (Msg::Seeked).
+                if !self.loaded {
+                    return;
                 }
+                let (Some(api), Some(url)) = (self.api.clone(), self.current_url.clone()) else { return };
+                let pos = sec.max(0.0);
+                self.seek_seq += 1;
+                let (seq, gen, tx) = (self.seek_seq, self.gen, self.tx.clone());
+                thread::spawn(move || {
+                    let res = (|| -> Result<Decoder<HttpStream>, String> {
+                        let stream = api.reopen_stream(&url)?;
+                        let mut dec = Decoder::new(stream).map_err(|e| format!("декодер: {e}"))?;
+                        dec.try_seek(Duration::from_secs_f32(pos)).map_err(|e| format!("seek: {e:?}"))?;
+                        Ok(dec)
+                    })();
+                    let _ = tx.send(Msg::Seeked { gen, seq, pos, res });
+                });
             }
             Cmd::Volume(v) => {
                 self.volume = v.clamp(0.0, 1.0);

@@ -195,13 +195,17 @@ mod tests {
     }
 
     /// Мини-сервер с поддержкой Range: 206 + Content-Range, как CDN Яндекса.
-    /// Слушает 127.0.0.1 — внешняя сеть не нужна.
-    fn serve(data: Vec<u8>) -> String {
+    /// Слушает 127.0.0.1 — внешняя сеть не нужна. Возвращает URL и счётчик запросов.
+    fn serve(data: Vec<u8>) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let url = format!("http://{}/track", listener.local_addr().expect("addr"));
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
         std::thread::spawn(move || {
             for sock in listener.incoming() {
                 let Ok(mut sock) = sock else { break };
+                counter.fetch_add(1, Ordering::SeqCst);
                 let Ok(mut reader) = sock.try_clone().map(BufReader::new) else { continue };
                 let (mut start, mut end) = (0usize, data.len().saturating_sub(1));
                 loop {
@@ -231,7 +235,7 @@ mod tests {
                 let _ = sock.flush();
             }
         });
-        url
+        (url, hits)
     }
 
     /// Перемотка вперёд, когда следующий кусок уже качается заранее, не должна
@@ -240,7 +244,7 @@ mod tests {
     fn seek_forward_past_pending_prefetch_keeps_reading() {
         let len = 2 * 1024 * 1024 + 300_000;
         let data = pattern(len);
-        let url = serve(data.clone());
+        let (url, _hits) = serve(data.clone());
         let client = reqwest::blocking::Client::new();
         let mut s = HttpStream::open(client, url).expect("open");
 
@@ -260,5 +264,32 @@ mod tests {
         let n = s.read(&mut buf).expect("read after seek");
         assert!(n > 0, "после перемотки чтение вернуло EOF");
         assert_eq!(&buf[..n], &data[target as usize..target as usize + n]);
+    }
+
+    /// Ключевой инвариант фикса перемотки: повторный seek в уже загруженный кусок
+    /// не должен снова идти в сеть. Иначе финальный `Sink::try_seek` (он выполняется
+    /// на аудиопотоке) снова качал бы данные и давал щелчки.
+    #[test]
+    fn second_seek_into_loaded_chunk_does_not_refetch() {
+        use std::sync::atomic::Ordering;
+        let len = 2 * 1024 * 1024 + 300_000;
+        let data = pattern(len);
+        let (url, hits) = serve(data.clone());
+        let client = reqwest::blocking::Client::new();
+        let mut s = HttpStream::open(client, url).expect("open");
+        let mut buf = [0u8; 4096];
+
+        // Первый seek в середину трека: кусок докачивается (сеть — здесь допустима).
+        let at = 700_000u64;
+        s.seek(SeekFrom::Start(at)).expect("seek");
+        let n = s.read(&mut buf).expect("read");
+        assert_eq!(&buf[..n], &data[at as usize..at as usize + n]);
+        let after_first = hits.load(Ordering::SeqCst);
+
+        // Тот же seek ещё раз: данные уже в куске, запросов быть не должно.
+        s.seek(SeekFrom::Start(at)).expect("seek");
+        let n = s.read(&mut buf).expect("read");
+        assert_eq!(&buf[..n], &data[at as usize..at as usize + n]);
+        assert_eq!(hits.load(Ordering::SeqCst), after_first, "повторный seek снова сходил в сеть");
     }
 }
