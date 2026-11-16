@@ -17,6 +17,10 @@ use std::time::{Duration, Instant};
 type Id = *mut c_void;
 type Sel = *mut c_void;
 
+/// Наблюдатель окна (создаётся в init_window_observers) — цель отложенных
+/// performSelector для постановки «светофора».
+static OBSERVER: std::sync::atomic::AtomicPtr<c_void> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
 extern "C" {
     fn objc_getClass(name: *const c_char) -> Id;
     fn sel_registerName(name: *const c_char) -> Sel;
@@ -303,6 +307,60 @@ unsafe fn restyle_window(win: Id) {
     if msg_responds(win, corner_sel) {
         msg_set_double(win, "_setCornerRadius:", 24.0);
     }
+    place_traffic_lights(win);
+}
+
+/// Центры «светофора» как у Finder macOS 26 (pt от левого верхнего угла окна):
+/// замер захватом — (26,26), (49,26), (72,26). Дефолт AppKit (~14,16) с радиусом
+/// 24pt выглядит зажатым в углу, поэтому переставляем кнопки вручную.
+const LIGHT_CENTERS: [(f64, f64); 3] = [(26.0, 26.0), (49.0, 26.0), (72.0, 26.0)];
+
+unsafe fn place_traffic_lights(win: Id) {
+    if win.is_null() || !msg_responds(win, sel_registerName(c("standardWindowButton:").as_ptr())) {
+        return;
+    }
+    for (idx, (cx, cy)) in LIGHT_CENTERS.iter().enumerate() {
+        // NSWindowCloseButton = 0, NSWindowMiniaturizeButton = 1, NSWindowZoomButton = 2.
+        let get: unsafe extern "C" fn(Id, Sel, c_long) -> Id = std::mem::transmute(objc_msgSend as unsafe extern "C" fn() as usize);
+        let btn = get(win, sel_registerName(c("standardWindowButton:").as_ptr()), idx as c_long);
+        if btn.is_null() {
+            // Кнопки ещё не созданы AppKit — повторим попытку позже (с лимитом).
+            static RETRIES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if RETRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 100 {
+                schedule_place_lights(win, 0.1);
+            }
+            return;
+        }
+        let sup = msg0(btn, "superview");
+        if sup.is_null() {
+            continue;
+        }
+        let bf = ns_rect(btn, "frame");
+        let sf = ns_rect(sup, "frame");
+        // Контейнер тайтлбара не flipped, но его родитель (theme frame) flipped:
+        // верх контейнера совпадает с верхом окна, y кнопки — от низа контейнера.
+        let x = cx - bf.w / 2.0;
+        let y = sf.h - cy - bf.h / 2.0;
+        let set: unsafe extern "C" fn(Id, Sel, f64, f64) = std::mem::transmute(objc_msgSend as unsafe extern "C" fn() as usize);
+        set(btn, sel_registerName(c("setFrameOrigin:").as_ptr()), x, y);
+    }
+}
+
+/// Отложенная постановка «светофора» на main run loop: AppKit раскладывает кнопки
+/// в своём лейауте (создание кнопок, resize, becomeKey), наша постановка — после.
+unsafe fn schedule_place_lights(win: Id, delay: f64) {
+    let observer = OBSERVER.load(std::sync::atomic::Ordering::Relaxed);
+    if observer.is_null() {
+        return;
+    }
+    let p: unsafe extern "C" fn(Id, Sel, Sel, Id, f64) = std::mem::transmute(objc_msgSend as unsafe extern "C" fn() as usize);
+    p(
+        observer,
+        sel_registerName(c("performSelector:withObject:afterDelay:").as_ptr()),
+        sel_registerName(c("placeLights:").as_ptr()),
+        win,
+        delay,
+    );
 }
 
 /// Первичная стилизация окна. `ns_view` — NSView окна winit; вызывать из главного
@@ -327,6 +385,8 @@ pub fn init_window_observers() {
         };
         add("windowDidExitFullScreen:", on_exit_fullscreen);
         add("restyleNow:", on_restyle_now);
+        add("placeLights:", on_place_lights);
+        add("windowDidResize:", on_window_resize);
         objc_registerClassPair(cls);
         let observer = msg0(msg0(cls, "alloc"), "init");
         let center = msg0(objc_getClass(c("NSNotificationCenter").as_ptr()), "defaultCenter");
@@ -344,6 +404,53 @@ pub fn init_window_observers() {
             name,
             std::ptr::null_mut(),
         );
+        // AppKit перекладывает «светофор» при лейауте/resize/becomeKey — возвращаем наши отступы.
+        let rname = msg_string(objc_getClass(c("NSString").as_ptr()), "NSWindowDidResizeNotification");
+        f(
+            center,
+            sel_registerName(c("addObserver:selector:name:object:").as_ptr()),
+            observer,
+            sel_registerName(c("windowDidResize:").as_ptr()),
+            rname,
+            std::ptr::null_mut(),
+        );
+        let kname = msg_string(objc_getClass(c("NSString").as_ptr()), "NSWindowDidBecomeKeyNotification");
+        f(
+            center,
+            sel_registerName(c("addObserver:selector:name:object:").as_ptr()),
+            observer,
+            sel_registerName(c("windowDidResize:").as_ptr()),
+            kname,
+            std::ptr::null_mut(),
+        );
+        OBSERVER.store(observer, std::sync::atomic::Ordering::Relaxed);
+        // Первичная постановка после лейаута окна: сразу и с задержкой (AppKit
+        // дораскладывает кнопки уже после нашего вызова).
+        let app = msg0(objc_getClass(c("NSApplication").as_ptr()), "sharedApplication");
+        let wins = msg0(app, "windows");
+        let win = if wins.is_null() { std::ptr::null_mut() } else { msg0(wins, "firstObject") };
+        if !win.is_null() {
+            place_traffic_lights(win);
+            schedule_place_lights(win, 0.15);
+        }
+    }
+}
+
+extern "C" fn on_place_lights(_self: Id, _sel: Sel, win: Id) {
+    unsafe {
+        place_traffic_lights(win);
+    }
+}
+
+/// Resize/becomeKey-уведомление приносит NSNotification, а не окно: объект берём
+/// из object. Ставим с задержкой 0 (следующий оборот run loop): AppKit раскладывает
+/// кнопки в своём лейауте после уведомления, наша постановка должна идти последней.
+extern "C" fn on_window_resize(_self: Id, _sel: Sel, note: Id) {
+    unsafe {
+        let win = msg0(note, "object");
+        if !win.is_null() {
+            schedule_place_lights(win, 0.0);
+        }
     }
 }
 
