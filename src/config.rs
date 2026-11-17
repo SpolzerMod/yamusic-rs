@@ -130,7 +130,7 @@ impl Config {
             disk.refresh_sealed = crate::secret::seal("refresh", t);
         }
         // Спрятать некуда (Linux без связки ключей) — открытым текстом, в файле только для владельца.
-        disk.token_plain = if disk.token_sealed.is_none() { self.token.clone() } else { None };
+        disk.token_plain = if !cfg!(target_os = "macos") && disk.token_sealed.is_none() { self.token.clone() } else { None };
         if let Ok(s) = serde_json::to_string_pretty(&disk) {
             let path = dir().join("config.json");
             let tmp = dir().join("config.json.tmp");

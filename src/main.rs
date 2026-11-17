@@ -22,6 +22,7 @@ mod player;
 mod secret;
 #[cfg_attr(windows, path = "sys/windows.rs")]
 #[cfg_attr(target_os = "linux", path = "sys/linux.rs")]
+#[cfg_attr(target_os = "macos", path = "sys/macos/mod.rs")]
 mod sys;
 mod tags;
 #[cfg(windows)]

@@ -1421,6 +1421,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     app.set_discord_on(cfg.discord_enabled);
     app.set_autostart(sys::autostart_enabled());
     app.set_linux(cfg!(target_os = "linux"));
+    app.set_macos(cfg!(target_os = "macos"));
     app.set_translations(crate::i18n::available());
     app.set_download_dir(music_dir(&cfg).display().to_string().into());
     let ctx = Rc::new(Ctx {
@@ -1746,12 +1747,18 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     #[cfg(not(windows))]
     {
         app.on_close(quit);
-        let weak = ui.as_weak();
-        sys::on_wake(move || {
-            let _ = weak.upgrade_in_event_loop(|ui| reveal(&ui));
-        });
-        install_mpris(&ui, &player);
+        #[cfg(target_os = "linux")]
+        {
+            let weak = ui.as_weak();
+            sys::on_wake(move || {
+                let _ = weak.upgrade_in_event_loop(|ui| reveal(&ui));
+            });
+            install_mpris(&ui, &player);
+        }
     }
+
+    #[cfg(target_os = "macos")]
+    let macos = install_macos(&ui);
 
     ui.window().on_winit_window_event(|_, ev| {
         use slint::winit_030::EventResult;
@@ -1816,11 +1823,44 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     if !start_hidden {
         reveal(&ui);
     }
-    slint::run_event_loop_until_quit()?;
+    let result = slint::run_event_loop_until_quit();
+    #[cfg(target_os = "macos")]
+    drop(macos);
     sys::cleanup();
+    result?;
     // Фоновые потоки (аудио, сеть, обложки) не ждём: иначе процесс может остаться
     // без окна и держать мьютекс, и следующий запуск молча закроется.
     std::process::exit(0)
+}
+
+/// Единый вход для меню, Dock и системных медиакоманд. Вызывается в потоке Slint.
+#[cfg(target_os = "macos")]
+fn install_macos(ui: &AppWindow) -> sys::MacIntegration {
+    sys::MacIntegration::install(ui, |ui, command| {
+        use sys::MacCommand;
+        let app = ui.global::<App>();
+        match command {
+            MacCommand::ShowWindow => reveal(&ui),
+            // Пока сохраняем существующее поведение крестика. Меняется на этапе 2.
+            MacCommand::CloseWindow => app.invoke_close(),
+            MacCommand::Quit => quit(),
+            MacCommand::Settings => {
+                reveal(&ui);
+                with_ctx(|c| c.navigate(Page::Settings, None, true));
+            }
+            MacCommand::PlayPause => app.invoke_play_pause(),
+            MacCommand::Play => with_ctx(|c| {
+                if !c.player.state().playing { app.invoke_play_pause(); }
+            }),
+            MacCommand::Pause => with_ctx(|c| {
+                if c.player.state().playing { app.invoke_play_pause(); }
+            }),
+            MacCommand::Next => app.invoke_next(),
+            MacCommand::Prev => app.invoke_prev(),
+            MacCommand::Seek(seconds) if seconds.is_finite() => app.invoke_seek(seconds.max(0.0)),
+            MacCommand::Seek(_) => {}
+        }
+    })
 }
 
 /// Медиаклавиши и плеер в панели Linux. Команды выполняются так же, как кнопки в окне.

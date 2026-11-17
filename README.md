@@ -149,7 +149,7 @@ AppImage монтирует себя через FUSE. Если пишет `Canno
 | Windows на ARM | Должна запускаться через эмуляцию x64. Не проверялась. |
 | Windows 7 и 8.1 | Не поддерживаются: текущий Rust под них не собирает. |
 | **Linux** x86_64 | Бета. Нужна glibc 2.35 или новее: Ubuntu 22.04+, Debian 12+, Mint 21+, Fedora, openSUSE, Arch и другие. Проверено на Ubuntu 22.04, Debian 13, Fedora 45 и Arch, в Wayland и X11. Звук через PipeWire, PulseAudio или ALSA. Медиаклавиши и плеер в панели GNOME и KDE работают через MPRIS. Трея пока нет, поэтому закрытие окна закрывает приложение. О проблемах пишите в [issues](https://github.com/SpolzerMod/yamusic-rs/issues). |
-| macOS | Пока не планируется. |
+| macOS (Apple Silicon) | Экспериментальный порт. Инструкции сборки ниже. |
 
 **Нужно ещё:**
 - аккаунт Яндекса. Без Плюса сервер отдаёт только 30-секундные отрывки;
@@ -292,6 +292,26 @@ cargo build --release
 Нужны Visual Studio Build Tools с компонентом «Разработка классических приложений на C++»
 (MSVC и Windows SDK: из SDK берётся `rc.exe` для значка и описания exe).
 Готовый файл: `target\release\yamusic-rs.exe`.
+
+#### macOS (Apple Silicon)
+
+Нужны Xcode Command Line Tools (`xcode-select --install`) и Rust 1.92+.
+Skia обычно скачивается готовой; для сборки из исходников нужны Python 3 и Ninja
+(`brew install ninja`). Python можно установить через pyenv.
+
+```bash
+cargo build --release --locked
+python3 tools/macos-app.py
+open "target/macos/Яндекс Музыка RS.app"
+```
+
+Для упаковки нужен Python 3.11+. Пакет подписывается локальной ad-hoc подписью,
+не является notarized-релизом. Для запуска из терминала: `target/release/yamusic-rs`.
+Настройки лежат в `~/Library/Application Support/yamusic-rs`, кэш — в
+`~/Library/Caches/yamusic-rs`, токены — в Keychain. При недоступном Keychain
+токен не сохраняется открытым текстом; после перезапуска потребуется повторный вход.
+Закрытие окна завершает приложение. Автозапуск, меню в строке состояния и системные
+медиаклавиши пока не реализованы.
 
 #### Linux
 

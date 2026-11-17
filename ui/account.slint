@@ -370,7 +370,7 @@ export component SettingsPage inherits Rectangle {
                 on: App.discord-on;
                 clicked => { App.setting("discord"); }
             }
-            SettingItem {
+            if !App.macos: SettingItem {
                 title: App.linux ? T.t("Запускать вместе с системой") : T.t("Запускать вместе с Windows");
                 desc: App.linux ? T.t("Приложение откроется при входе в систему") : T.t("Приложение откроется в трее, без окна");
                 toggle: true;

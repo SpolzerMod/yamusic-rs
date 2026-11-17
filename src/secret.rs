@@ -142,6 +142,11 @@ const IN_KEYRING: &str = "keyring:";
 /// Спрятать секрет для хранения в конфиге. `name` различает секреты в связке ключей Linux,
 /// DPAPI на Windows он не нужен. None — спрятать негде.
 pub fn seal(name: &str, plain: &str) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        security_framework::passwords::set_generic_password("yamusic-rs", name, plain.as_bytes()).ok()?;
+        Some(format!("keychain:{name}"))
+    }
     #[cfg(windows)]
     {
         let _ = name;
@@ -155,6 +160,11 @@ pub fn seal(name: &str, plain: &str) -> Option<String> {
 
 /// Достать секрет из конфига; None — чужая учётная запись, нет записи или испорченные данные.
 pub fn open(sealed: &str) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let name = sealed.strip_prefix("keychain:")?;
+        String::from_utf8(security_framework::passwords::get_generic_password("yamusic-rs", name).ok()?).ok()
+    }
     #[cfg(windows)]
     {
         let raw = base64::engine::general_purpose::STANDARD.decode(sealed.trim()).ok()?;
@@ -168,6 +178,8 @@ pub fn open(sealed: &str) -> Option<String> {
 
 /// Секрет больше не нужен (вышли из аккаунта). DPAPI ничего не хранит, связку ключей чистим.
 pub fn forget(name: &str) {
+    #[cfg(target_os = "macos")]
+    let _ = security_framework::passwords::delete_generic_password("yamusic-rs", name);
     #[cfg(target_os = "linux")]
     keyring::remove(name);
     #[cfg(windows)]

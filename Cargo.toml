@@ -52,6 +52,11 @@ futures-lite = "2"
 # Токен в связке ключей (GNOME Keyring, KWallet) через тот же zbus.
 secret-service = { version = "5.2", default-features = false, features = ["rt-async-io-crypto-rust"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", default-features = false, features = ["std"] }
+security-framework = "3"
+rfd = "0.15"
+
 [build-dependencies]
 slint-build = "1.18"
 
