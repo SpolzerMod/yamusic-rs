@@ -4,6 +4,9 @@ const APP_NAME: &str = "Яндекс Музыка RS";
 
 fn main() {
     println!("cargo:rustc-env=APP_NAME={APP_NAME}");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        macos_bridge();
+    }
     slint_build::compile_with_config(
         "ui/app.slint",
         slint_build::CompilerConfiguration::new().with_style("fluent".into()),
@@ -88,4 +91,31 @@ END
         vers.sort();
         vers.into_iter().rev().map(|v| v.join("x64").join("rc.exe")).find(|p| p.exists())
     }
+}
+
+/// Нативный мост статически включается в основной бинарник.
+fn macos_bridge() {
+    use std::{path::PathBuf, process::Command};
+    let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").unwrap().as_str() {
+        "aarch64" => "arm64", "x86_64" => "x86_64", other => panic!("macOS architecture: {other}"),
+    };
+    let mut objects = Vec::new();
+    for name in ["app", "media", "autostart"] {
+        let source = format!("src/sys/macos/native/{name}.m");
+        let object = out.join(format!("{name}.o"));
+        println!("cargo:rerun-if-changed={source}");
+        assert!(Command::new("xcrun").args(["clang", "-arch", arch, "-fobjc-arc", "-fblocks",
+            "-mmacosx-version-min=13.0", "-Wall", "-Wextra", "-Wno-unused-parameter", "-Werror",
+            "-c", &source, "-o"]).arg(&object).status().expect("Xcode Command Line Tools").success());
+        objects.push(object);
+    }
+    assert!(Command::new("xcrun").args(["ar", "crs"]).arg(out.join("libyamacos.a"))
+        .args(objects).status().unwrap().success());
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=yamacos");
+    for framework in ["Cocoa", "MediaPlayer", "ServiceManagement"] {
+        println!("cargo:rustc-link-lib=framework={framework}");
+    }
+    println!("cargo:rustc-link-arg=-mmacosx-version-min=13.0");
 }

@@ -53,6 +53,8 @@ futures-lite = "2"
 secret-service = { version = "5.2", default-features = false, features = ["rt-async-io-crypto-rust"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# Прямой backend нужен для отключения стандартного меню Slint.
+i-slint-backend-winit = { version = "=1.18.1", default-features = false, features = ["renderer-skia"] }
 objc2 = { version = "0.6", default-features = false, features = ["std"] }
 security-framework = "3"
 rfd = "0.15"

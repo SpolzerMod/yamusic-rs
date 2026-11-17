@@ -8,7 +8,6 @@ use std::sync::{
 
 /// Общий протокол системной интеграции. Источники остальных команд добавляются
 /// на этапах подключения меню и MediaPlayer; сейчас подключён повторный запуск.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MacCommand {
     ShowWindow,
@@ -21,6 +20,9 @@ pub enum MacCommand {
     Next,
     Prev,
     Seek(f32),
+    Mini,
+    Edit(char),
+    EnsureVisible,
 }
 
 #[derive(Clone)]
@@ -58,6 +60,7 @@ impl CommandSender {
 pub struct MacIntegration {
     lifetime: Lifetime,
     _main_thread: MainThreadMarker,
+    native_started: bool,
 }
 
 impl MacIntegration {
@@ -74,6 +77,14 @@ impl MacIntegration {
             }
             let active = active.clone();
             let callback = callback.clone();
+            // Действия текстового меню должны завершиться до следующего нажатия.
+            // AppKit вызывает их в главном потоке; остальные команды остаются в очереди.
+            if matches!(command, MacCommand::Edit(_)) && MainThreadMarker::new().is_some() {
+                if let Some(ui) = weak.upgrade() {
+                    active.dispatch(|| callback(ui, command));
+                }
+                return;
+            }
             if let Err(error) = weak.upgrade_in_event_loop(move |ui| {
                 // Команда могла попасть в очередь непосредственно перед shutdown.
                 active.dispatch(|| callback(ui, command));
@@ -81,9 +92,14 @@ impl MacIntegration {
                 crate::config::log(format!("команда macOS не доставлена: {error}"));
             }
         }));
+        let native_started = super::native::start(sender.clone());
+        if !native_started {
+            crate::config::log("macOS: неподдерживаемый NSApplicationDelegate; нативная интеграция не установлена");
+        }
         super::instance::on_wake(move || sender.send(MacCommand::ShowWindow));
         Self {
             lifetime,
+            native_started,
             _main_thread: main_thread,
         }
     }
@@ -94,6 +110,10 @@ impl Drop for MacIntegration {
         // Сначала отзываем команды; будущие нативные подписки снимаются здесь же,
         // в главном потоке, до уничтожения окна и выхода из процесса.
         self.lifetime.invalidate();
+        super::media::reset();
+        if self.native_started {
+            super::native::stop();
+        }
     }
 }
 

@@ -370,12 +370,17 @@ export component SettingsPage inherits Rectangle {
                 on: App.discord-on;
                 clicked => { App.setting("discord"); }
             }
-            if !App.macos: SettingItem {
-                title: App.linux ? T.t("Запускать вместе с системой") : T.t("Запускать вместе с Windows");
-                desc: App.linux ? T.t("Приложение откроется при входе в систему") : T.t("Приложение откроется в трее, без окна");
+            SettingItem {
+                title: App.linux || App.macos ? T.t("Запускать вместе с системой") : T.t("Запускать вместе с Windows");
+                desc: App.macos ? App.autostart-detail : App.linux ? T.t("Приложение откроется при входе в систему") : T.t("Приложение откроется в трее, без окна");
                 toggle: true;
                 on: App.autostart;
                 clicked => { App.setting("autostart"); }
+            }
+            if App.macos: SettingItem {
+                title: T.t("Объекты входа macOS");
+                desc: T.t("Открыть системные настройки автозапуска");
+                clicked => { App.setting("autostart-settings"); }
             }
             SettingItem {
                 title: T.t("Выйти из аккаунта");

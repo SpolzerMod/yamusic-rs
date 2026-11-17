@@ -51,7 +51,16 @@ fn main() -> Result<(), slint::PlatformError> {
     // Skia без видеокарты: память не зависит от драйвера (с OpenGL или D3D окно занимает
     // в 2–3 раза больше). Режим работы («Плавный» или «Лёгкий») меняет только анимации
     // и кэши и переключается на лету (gui::apply_mode).
+    #[cfg(not(target_os = "macos"))]
     slint::BackendSelector::new().backend_name("winit".into()).renderer_name("skia-software".into()).select()?;
+    #[cfg(target_os = "macos")]
+    {
+        let backend = i_slint_backend_winit::Backend::builder()
+            .with_renderer_name("skia-software")
+            .with_default_menu_bar(false)
+            .build()?;
+        slint::platform::set_platform(Box::new(backend)).map_err(|e| slint::PlatformError::from(e.to_string()))?;
+    }
     // По app_id (Wayland) и WM_CLASS (X11) окружение находит .desktop и значок.
     #[cfg(target_os = "linux")]
     slint::set_xdg_app_id("yamusic-rs")?;

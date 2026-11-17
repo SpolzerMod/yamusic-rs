@@ -202,6 +202,8 @@ impl Ctx {
 
     fn sync_player(self: &Rc<Self>) {
         let s = self.player.state();
+        #[cfg(target_os = "macos")]
+        sys::media::update(&s);
         let ui = self.ui();
         let app = ui.global::<App>();
 
@@ -217,6 +219,11 @@ impl Ctx {
         }
         if app.get_page() == Page::Settings {
             app.set_discord_status(self.discord.status().into());
+            #[cfg(target_os = "macos")]
+            {
+                app.set_autostart(sys::autostart_enabled());
+                app.set_autostart_detail(sys::autostart::detail().into());
+            }
         }
         if s.status == Status::Ready && self.st.borrow().net.is_none() {
             self.on_ready(&s.uid);
@@ -1096,6 +1103,7 @@ const SUPPORT_CHAT: &str =
     "https://yandex.ru/chat?context=%7B%22entrypoint%22%3A%22web_desktop%22%7D#/user/ee219503-b69b-9484-405b-6877a510e13c";
 
 fn quit() {
+    with_ctx(|c| c.player.send(Cmd::Pause));
     #[cfg(windows)]
     crate::tray::remove();
     let _ = slint::quit_event_loop();
@@ -1667,6 +1675,11 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         let Some(ui) = weak.upgrade() else { return };
         let app = ui.global::<App>();
         let w = ui.window();
+        #[cfg(target_os = "macos")]
+        if sys::is_fullscreen() {
+            with_ctx(|c| c.toast("Сначала выйдите из полноэкранного режима"));
+            return;
+        }
         if !app.get_mini() {
             normal.set(Some((w.position(), w.size(), w.is_maximized())));
             app.set_mini(true);
@@ -1699,6 +1712,8 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
                 None => w.set_size(slint::LogicalSize::new(1280.0, 800.0)),
             }
         }
+        #[cfg(target_os = "macos")]
+        sys::set_mini(app.get_mini());
     });
     let weak = ui.as_weak();
     app.on_resize_window(move |dir| {
@@ -1746,7 +1761,18 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     }
     #[cfg(not(windows))]
     {
+        #[cfg(target_os = "linux")]
         app.on_close(quit);
+        #[cfg(target_os = "macos")]
+        {
+            let weak = ui.as_weak();
+            app.on_close(move || { if let Some(ui) = weak.upgrade() { sys::hide(ui.window()); } });
+            let weak = ui.as_weak();
+            ui.window().on_close_requested(move || {
+                if let Some(ui) = weak.upgrade() { sys::hide(ui.window()); }
+                slint::CloseRequestResponse::KeepWindowShown
+            });
+        }
         #[cfg(target_os = "linux")]
         {
             let weak = ui.as_weak();
@@ -1760,10 +1786,18 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     #[cfg(target_os = "macos")]
     let macos = install_macos(&ui);
 
-    ui.window().on_winit_window_event(|_, ev| {
+    let window_weak = ui.as_weak();
+    ui.window().on_winit_window_event(move |_, ev| {
         use slint::winit_030::EventResult;
         use winit::event::{ElementState, MouseButton, WindowEvent};
         match ev {
+            WindowEvent::ScaleFactorChanged { .. } => {
+                let weak = window_weak.clone();
+                Timer::single_shot(Duration::ZERO, move || {
+                    if let Some(ui) = weak.upgrade() { apply_ui_scale(&ui); }
+                });
+                EventResult::Propagate
+            }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Back, .. } => {
                 with_ctx(|c| c.go_back());
                 EventResult::PreventDefault
@@ -1792,9 +1826,9 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
 
     // «Как в системе» следит за темой Windows и на ходу. На Linux её отдаёт портал через
     // gdbus, запускать его каждые пару секунд не стоит.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     let theme_tick = Timer::default();
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     theme_tick.start(TimerMode::Repeated, Duration::from_secs(2), || {
         with_ctx(|c| {
             if c.st.borrow().cfg.theme != "system" {
@@ -1827,6 +1861,8 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     #[cfg(target_os = "macos")]
     drop(macos);
     sys::cleanup();
+    #[cfg(target_os = "macos")]
+    sys::finish_termination();
     result?;
     // Фоновые потоки (аудио, сеть, обложки) не ждём: иначе процесс может остаться
     // без окна и держать мьютекс, и следующий запуск молча закроется.
@@ -1841,20 +1877,21 @@ fn install_macos(ui: &AppWindow) -> sys::MacIntegration {
         let app = ui.global::<App>();
         match command {
             MacCommand::ShowWindow => reveal(&ui),
-            // Пока сохраняем существующее поведение крестика. Меняется на этапе 2.
             MacCommand::CloseWindow => app.invoke_close(),
             MacCommand::Quit => quit(),
+            MacCommand::Mini => { reveal(&ui); app.invoke_toggle_mini(); }
+            MacCommand::Edit(key) => sys::edit(ui.window(), key),
+            MacCommand::EnsureVisible => sys::ensure_visible(),
             MacCommand::Settings => {
                 reveal(&ui);
                 with_ctx(|c| c.navigate(Page::Settings, None, true));
             }
             MacCommand::PlayPause => app.invoke_play_pause(),
             MacCommand::Play => with_ctx(|c| {
-                if !c.player.state().playing { app.invoke_play_pause(); }
+                if c.player.state().track.is_some() { c.player.send(Cmd::Resume); }
+                else { app.invoke_play_pause(); }
             }),
-            MacCommand::Pause => with_ctx(|c| {
-                if c.player.state().playing { app.invoke_play_pause(); }
-            }),
+            MacCommand::Pause => with_ctx(|c| c.player.send(Cmd::Pause)),
             MacCommand::Next => app.invoke_next(),
             MacCommand::Prev => app.invoke_prev(),
             MacCommand::Seek(seconds) if seconds.is_finite() => app.invoke_seek(seconds.max(0.0)),
@@ -1877,8 +1914,8 @@ fn install_mpris(ui: &AppWindow, player: &Player) {
             match e {
                 Event::PlayPause => app.invoke_play_pause(),
                 Event::Play if !s.playing => app.invoke_play_pause(),
-                Event::Pause if s.playing => app.invoke_play_pause(),
-                Event::Play | Event::Pause => {}
+                Event::Pause => p.send(Cmd::Pause),
+                Event::Play => {}
                 Event::Next => p.send(Cmd::Next),
                 Event::Prev => p.send(Cmd::Prev),
                 Event::Seek(sec) => p.send(Cmd::Seek(sec)),
@@ -2629,6 +2666,8 @@ impl Ctx {
                 st.cfg.discord_enabled = on;
                 st.cfg.save();
             }
+            #[cfg(target_os = "macos")]
+            "autostart-settings" => sys::autostart::open_settings(),
             "autostart" => {
                 let on = !app.get_autostart();
                 if sys::set_autostart(on) {

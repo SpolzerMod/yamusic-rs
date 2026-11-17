@@ -90,6 +90,8 @@ pub enum Cmd {
     PlayPause,
     /// Снять с паузы (если уже играет — ничего не делать).
     Resume,
+    /// Пауза без переключения: повторная системная команда безопасна.
+    Pause,
     Next,
     Prev,
     Seek(f32),
@@ -572,6 +574,10 @@ impl Engine {
                     s.play();
                 }
             }
+            Cmd::Pause => {
+                self.paused = true;
+                if let Some(s) = self.sink() { s.pause(); }
+            }
             Cmd::PlayPause => {
                 self.paused = !self.paused;
                 if let Some(s) = self.sink() {
@@ -1003,6 +1009,19 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_pause_and_resume_are_idempotent() {
+        let (tx, _rx) = mpsc::channel();
+        let mut engine = Engine::new(tx, Default::default(), Default::default(), Arc::new(|| {}), Arc::new(EqParams::default()));
+        engine.cmd(Cmd::Resume);
+        engine.cmd(Cmd::Resume);
+        assert!(!engine.paused);
+        engine.cmd(Cmd::Pause);
+        engine.cmd(Cmd::Pause);
+        assert!(engine.paused);
+    }
+
 
     /// Сетевой тест: ссылка на поток → скачивание → декодирование (без токена — 30-сек превью).
     #[test]

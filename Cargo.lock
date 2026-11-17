@@ -6667,6 +6667,7 @@ dependencies = [
  "base64 0.22.1",
  "futures-lite",
  "hmac 0.12.1",
+ "i-slint-backend-winit",
  "image",
  "md-5",
  "miniz_oxide 0.8.9",
