@@ -9,7 +9,11 @@ import tomllib
 root = pathlib.Path(__file__).resolve().parent.parent
 version = tomllib.loads((root / 'Cargo.toml').read_text())['package']['version']
 app = root / 'target' / 'macos' / 'Яндекс Музыка RS.app'
-contents = app / 'Contents'
+# Собираем во временной папке: старый пакет не теряется при ошибке сборки.
+staging = app.with_name(app.stem + '.staging.app')
+if staging.exists():
+    shutil.rmtree(staging)
+contents = staging / 'Contents'
 (contents / 'MacOS').mkdir(parents=True, exist_ok=True)
 (contents / 'Resources').mkdir(exist_ok=True)
 shutil.copy2(root / 'target/release/yamusic-rs', contents / 'MacOS/yamusic-rs')
@@ -28,6 +32,11 @@ with (contents / 'Info.plist').open('wb') as f:
     plistlib.dump(dict(CFBundleName='Яндекс Музыка RS', CFBundleDisplayName='Яндекс Музыка RS',
         CFBundleIdentifier='io.github.spolzermod.yamusic-rs', CFBundleExecutable='yamusic-rs',
         CFBundlePackageType='APPL', CFBundleIconFile='AppIcon', CFBundleShortVersionString=version, CFBundleVersion=version,
-        NSHighResolutionCapable=True, NSPrincipalClass='NSApplication'), f)
-subprocess.run(['codesign', '--force', '--deep', '--sign', '-', str(app)], check=True)
+        NSHighResolutionCapable=True, NSPrincipalClass='NSApplication', LSMinimumSystemVersion='13.0',
+        LSApplicationCategoryType='public.app-category.music', NSHumanReadableCopyright='Unofficial client · GPL-3.0-only'), f)
+subprocess.run(['codesign', '--force', '--deep', '--sign', '-', str(staging)], check=True)
+subprocess.run(['codesign', '--verify', '--deep', '--strict', str(staging)], check=True)
+if app.exists():
+    shutil.rmtree(app)
+staging.rename(app)
 print(app)

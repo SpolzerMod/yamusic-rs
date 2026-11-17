@@ -295,7 +295,9 @@ cargo build --release
 
 #### macOS (Apple Silicon)
 
-Нужны Xcode Command Line Tools (`xcode-select --install`) и Rust 1.92+.
+Нужны macOS 13+, Xcode Command Line Tools (`xcode-select --install`) и Rust 1.92+.
+AppKit/MediaPlayer/ServiceManagement подключены через небольшой статический Objective-C мост;
+отдельный Swift toolchain и дополнительные исполняемые файлы не нужны.
 Skia обычно скачивается готовой; для сборки из исходников нужны Python 3 и Ninja
 (`brew install ninja`). Python можно установить через pyenv.
 
@@ -310,8 +312,18 @@ open "target/macos/Яндекс Музыка RS.app"
 Настройки лежат в `~/Library/Application Support/yamusic-rs`, кэш — в
 `~/Library/Caches/yamusic-rs`, токены — в Keychain. При недоступном Keychain
 токен не сохраняется открытым текстом; после перезапуска потребуется повторный вход.
-Закрытие окна завершает приложение. Автозапуск, меню в строке состояния и системные
-медиаклавиши пока не реализованы.
+Крестик и `⌘W` скрывают окно, музыка продолжает играть. Нажатие на Dock или повторный
+запуск возвращают окно. `⌘Q` завершает приложение, `⌘,` открывает настройки.
+Нативное меню содержит управление воспроизведением, мини-плеером и полноэкранным режимом.
+Медиаклавиши и «Сейчас играет» подключены через MediaPlayer.
+
+Для автозапуска поместите `.app` в `/Applications` или `~/Applications`, затем включите
+«Запускать вместе с системой» в настройках. При необходимости разрешите запуск в
+системных настройках macOS → Основные → Объекты входа. При обычном запуске приложение
+не меняет регистрацию автоматически. Developer ID и нотарификация не используются.
+Поддержка macOS 13 заявлена по API и deployment target; фактически проверенная система
+и оставшиеся ручные проверки перечислены в `docs/macos-development.md`.
+
 
 #### Linux
 
@@ -433,7 +445,7 @@ uses about 65 MB in one process.
   Needs glibc 2.35 or newer. Sound goes through PipeWire, PulseAudio or ALSA, media keys and
   the GNOME/KDE player widget work via MPRIS. There is no tray icon yet.
 - **Requirements:** Windows 11 (Windows 10 should work but is not tested regularly) or Linux, a Yandex
-  account, and Yandex Plus for full-length tracks. macOS is not planned.
+  account, and Yandex Plus for full-length tracks. macOS has an experimental Apple Silicon port; see the build instructions above.
 - **Privacy:** the token is encrypted with Windows DPAPI or kept in the Linux keyring (Secret Service)
   and only sent over HTTPS to `yandex.ru` / `yandex.net`. Besides Yandex, the app only talks to
   `api.github.com` (update checks) and the local Discord client (optional status). There is no telemetry.
