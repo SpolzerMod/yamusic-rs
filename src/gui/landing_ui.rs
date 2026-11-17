@@ -445,7 +445,11 @@ impl Ctx {
                 self.player.send(Cmd::Wave(src));
                 self.start();
             }
-            "url" => sys::open_url(arg),
+            // Адрес из ответа сервера: открываем только https (см. client::browser_url).
+            "url" => match crate::client::browser_url(arg) {
+                Some(u) => sys::open_url(&u),
+                None => crate::config::log(format!("ссылка не открыта: {arg}")),
+            },
             "concert" => sys::open_url(&format!("https://music.yandex.ru/concert/{arg}")),
             "album" | "playlist" if play => self.play_target(target, title),
             "artist" if play => {
@@ -504,7 +508,10 @@ impl Ctx {
                 })
             });
             if let Some(u) = url.filter(|u| !u.is_empty()) {
-                sys::open_url(&u);
+                match crate::client::browser_url(&u) {
+                    Some(safe) => sys::open_url(&safe),
+                    None => crate::config::log(format!("ссылка баннера не открыта: {u}")),
+                }
             }
             return;
         }
