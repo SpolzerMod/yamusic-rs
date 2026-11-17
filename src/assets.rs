@@ -22,9 +22,22 @@ fn asar_path() -> Option<PathBuf> {
 }
 
 /// На macOS бандл называется «Yandex Music.app» (с неразрывным пробелом) или по-русски,
-/// в зависимости от версии, поэтому ищем по словам в имени в /Applications и ~/Applications.
+/// в зависимости от версии. Сначала быстрый перебор /Applications и ~/Applications по словам
+/// в имени, затем Spotlight по bundle id: так приложение найдётся в любой папке и под любым
+/// именем. Ответ запоминается: архив открывают несколько модулей, а mdfind — внешний процесс.
 #[cfg(target_os = "macos")]
 fn asar_path() -> Option<PathBuf> {
+    static PATH: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| asar_by_name().or_else(asar_by_bundle_id)).clone()
+}
+
+#[cfg(target_os = "macos")]
+fn asar_in(app: &std::path::Path) -> Option<PathBuf> {
+    Some(app.join("Contents").join("Resources").join("app.asar")).filter(|p| p.is_file())
+}
+
+#[cfg(target_os = "macos")]
+fn asar_by_name() -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Applications"));
     [Some(PathBuf::from("/Applications")), home]
         .into_iter()
@@ -36,8 +49,18 @@ fn asar_path() -> Option<PathBuf> {
             let name = e.file_name().to_string_lossy().to_lowercase();
             (name.contains("yandex") && name.contains("music")) || (name.contains("яндекс") && name.contains("музык"))
         })
-        .map(|e| e.path().join("Contents").join("Resources").join("app.asar"))
-        .find(|p| p.is_file())
+        .find_map(|e| asar_in(&e.path()))
+}
+
+/// Spotlight может быть выключен или ещё не проиндексировать диск — тогда просто ничего.
+#[cfg(target_os = "macos")]
+fn asar_by_bundle_id() -> Option<PathBuf> {
+    let out = std::process::Command::new("mdfind")
+        .arg("kMDItemCFBundleIdentifier == 'ru.yandex.desktop.music'")
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).lines().find_map(|l| asar_in(std::path::Path::new(l)))
 }
 
 #[cfg(target_os = "linux")]
