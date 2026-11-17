@@ -1420,7 +1420,8 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     );
     app.set_discord_on(cfg.discord_enabled);
     app.set_autostart(sys::autostart_enabled());
-    app.set_linux(cfg!(target_os = "linux"));
+    // Без трея (Linux, macOS) автозапуск открывает окно.
+    app.set_linux(cfg!(unix));
     app.set_translations(crate::i18n::available());
     app.set_download_dir(music_dir(&cfg).display().to_string().into());
     let ctx = Rc::new(Ctx {
@@ -1724,7 +1725,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         }
     });
     // Как у оригинала на Windows: пока играет трек, окно прячется в трей, иначе приложение закрывается.
-    // На Linux трея пока нет, там закрытие всегда выход.
+    // На Linux и macOS трея пока нет, там закрытие всегда выход.
     #[cfg(windows)]
     {
         let weak = ui.as_weak();
@@ -1750,7 +1751,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         sys::on_wake(move || {
             let _ = weak.upgrade_in_event_loop(|ui| reveal(&ui));
         });
-        install_mpris(&ui, &player);
+        install_media_keys(&ui, &player);
     }
 
     ui.window().on_winit_window_event(|_, ev| {
@@ -1764,6 +1765,12 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Forward, .. } => {
                 with_ctx(|c| c.go_forward());
                 EventResult::PreventDefault
+            }
+            #[cfg(target_os = "macos")]
+            WindowEvent::ThemeChanged(t) => {
+                let dark = *t == winit::window::Theme::Dark;
+                Timer::single_shot(Duration::ZERO, move || follow_system_theme(dark));
+                EventResult::Propagate
             }
             _ => EventResult::Propagate,
         }
@@ -1784,24 +1791,12 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     });
 
     // «Как в системе» следит за темой Windows и на ходу. На Linux её отдаёт портал через
-    // gdbus, запускать его каждые пару секунд не стоит.
+    // gdbus, запускать его каждые пару секунд не стоит. На macOS о смене темы сообщает
+    // winit (ThemeChanged выше).
     #[cfg(windows)]
     let theme_tick = Timer::default();
     #[cfg(windows)]
-    theme_tick.start(TimerMode::Repeated, Duration::from_secs(2), || {
-        with_ctx(|c| {
-            if c.st.borrow().cfg.theme != "system" {
-                return;
-            }
-            let dark = !sys::system_light_theme();
-            if c.st.borrow().dark == dark {
-                return;
-            }
-            c.st.borrow_mut().dark = dark;
-            let ui = c.ui();
-            ui.global::<Theme>().set_dark(ui.global::<App>().get_page() == Page::Wave || dark);
-        })
-    });
+    theme_tick.start(TimerMode::Repeated, Duration::from_secs(2), || follow_system_theme(!sys::system_light_theme()));
 
     let weak = ui.as_weak();
     app.on_window_resized(move || {
@@ -1823,15 +1818,33 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     std::process::exit(0)
 }
 
-/// Медиаклавиши и плеер в панели Linux. Команды выполняются так же, как кнопки в окне.
-#[cfg(target_os = "linux")]
-fn install_mpris(ui: &AppWindow, player: &Player) {
+/// Тема «Как в системе» сменилась в самой системе.
+#[cfg(any(windows, target_os = "macos"))]
+fn follow_system_theme(dark: bool) {
+    with_ctx(|c| {
+        if c.st.borrow().cfg.theme != "system" || c.st.borrow().dark == dark {
+            return;
+        }
+        c.st.borrow_mut().dark = dark;
+        let ui = c.ui();
+        ui.global::<Theme>().set_dark(ui.global::<App>().get_page() == Page::Wave || dark);
+    })
+}
+
+/// Медиаклавиши и плеер в панели: MPRIS на Linux, «Исполняется» на macOS. Команды
+/// выполняются так же, как кнопки в окне.
+#[cfg(unix)]
+fn install_media_keys(ui: &AppWindow, player: &Player) {
+    #[cfg(target_os = "linux")]
+    use crate::mpris as media;
+    #[cfg(target_os = "macos")]
+    use crate::nowplaying as media;
     let weak = ui.as_weak();
     let p = player.clone();
-    crate::mpris::spawn(player.clone(), move |e| {
+    media::spawn(player.clone(), move |e| {
         let p = p.clone();
         let _ = weak.upgrade_in_event_loop(move |ui| {
-            use crate::mpris::Event;
+            use media::Event;
             let app = ui.global::<App>();
             let s = p.state();
             match e {

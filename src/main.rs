@@ -17,11 +17,14 @@ mod landing;
 #[cfg(target_os = "linux")]
 mod mpris;
 mod net;
+#[cfg(target_os = "macos")]
+mod nowplaying;
 mod palette;
 mod player;
 mod secret;
 #[cfg_attr(windows, path = "sys/windows.rs")]
 #[cfg_attr(target_os = "linux", path = "sys/linux.rs")]
+#[cfg_attr(target_os = "macos", path = "sys/macos.rs")]
 mod sys;
 mod tags;
 #[cfg(windows)]
@@ -56,7 +59,7 @@ fn main() -> Result<(), slint::PlatformError> {
     slint::set_xdg_app_id("yamusic-rs")?;
     update::cleanup();
     sys::refresh_autostart();
-    // Без трея на Linux спрятанное окно было бы не вернуть.
+    // Без трея (Linux, macOS) спрятанное окно было бы не вернуть.
     let start_hidden = cfg!(windows) && std::env::args().any(|a| a == "--tray");
     gui::run(start_hidden)
 }

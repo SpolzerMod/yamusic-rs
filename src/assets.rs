@@ -15,12 +15,34 @@ pub struct Asar {
 }
 
 /// Официального клиента под Linux нет, там ассеты только с сайта.
+#[cfg(windows)]
 fn asar_path() -> Option<PathBuf> {
-    if cfg!(not(windows)) {
-        return None;
-    }
     let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
     Some(PathBuf::from(local).join("Programs").join("YandexMusic").join("resources").join("app.asar"))
+}
+
+/// На macOS бандл называется «Yandex Music.app» (с неразрывным пробелом) или по-русски,
+/// в зависимости от версии, поэтому ищем по словам в имени в /Applications и ~/Applications.
+#[cfg(target_os = "macos")]
+fn asar_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Applications"));
+    [Some(PathBuf::from("/Applications")), home]
+        .into_iter()
+        .flatten()
+        .filter_map(|d| std::fs::read_dir(d).ok())
+        .flatten()
+        .flatten()
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_lowercase();
+            (name.contains("yandex") && name.contains("music")) || (name.contains("яндекс") && name.contains("музык"))
+        })
+        .map(|e| e.path().join("Contents").join("Resources").join("app.asar"))
+        .find(|p| p.is_file())
+}
+
+#[cfg(target_os = "linux")]
+fn asar_path() -> Option<PathBuf> {
+    None
 }
 
 impl Asar {

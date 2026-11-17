@@ -52,6 +52,18 @@ futures-lite = "2"
 # Токен в связке ключей (GNOME Keyring, KWallet) через тот же zbus.
 secret-service = { version = "5.2", default-features = false, features = ["rt-async-io-crypto-rust"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+arboard = { version = "3.7", default-features = false }
+# Токен в связке ключей macOS (Keychain).
+security-framework = "3"
+# Медиаклавиши и «Исполняется» в Пункте управления. objc2 0.6 уже приходит с winit.
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSDictionary", "NSValue", "NSData", "NSGeometry", "NSObject"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSImage"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes"] }
+objc2-media-player = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-app-kit", "objc2-core-foundation", "MPRemoteCommandCenter", "MPRemoteCommand", "MPRemoteCommandEvent", "MPNowPlayingInfoCenter", "MPMediaItem", "MPMediaItemCollection", "MPMediaEntity"] }
+
 [build-dependencies]
 slint-build = "1.18"
 
