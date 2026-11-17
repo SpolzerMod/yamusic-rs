@@ -1422,6 +1422,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     app.set_autostart(sys::autostart_enabled());
     // Без трея (Linux, macOS) автозапуск открывает окно.
     app.set_linux(cfg!(unix));
+    app.set_mac(cfg!(target_os = "macos"));
     app.set_translations(crate::i18n::available());
     app.set_download_dir(music_dir(&cfg).display().to_string().into());
     let ctx = Rc::new(Ctx {
@@ -1668,6 +1669,11 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         let app = ui.global::<App>();
         let w = ui.window();
         if !app.get_mini() {
+            // Из полноэкранного режима macOS плашку поверх окон не сделать: сначала выходим.
+            #[cfg(target_os = "macos")]
+            w.with_winit_window(|ww| ww.set_fullscreen(None));
+            #[cfg(target_os = "macos")]
+            sys::set_window_buttons(w, false);
             normal.set(Some((w.position(), w.size(), w.is_maximized())));
             app.set_mini(true);
             app.set_maximized(false);
@@ -1686,6 +1692,8 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         } else {
             mini_pos.set(Some(w.position()));
             app.set_mini(false);
+            #[cfg(target_os = "macos")]
+            sys::set_window_buttons(w, true);
             w.with_winit_window(|ww| ww.set_min_inner_size(Some(LogicalSize::new(960.0, 640.0))));
             match normal.take() {
                 Some((pos, size, max)) => {
@@ -1747,6 +1755,12 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     #[cfg(not(windows))]
     {
         app.on_close(quit);
+        // Красная кнопка «светофора» на macOS: то же, что своя кнопка «Закрыть».
+        #[cfg(target_os = "macos")]
+        ui.window().on_close_requested(|| {
+            quit();
+            slint::CloseRequestResponse::KeepWindowShown
+        });
         let weak = ui.as_weak();
         sys::on_wake(move || {
             let _ = weak.upgrade_in_event_loop(|ui| reveal(&ui));

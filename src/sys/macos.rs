@@ -20,6 +20,25 @@ pub fn created(w: &slint::Window) -> bool {
 /// Значок в Dock берётся из бандла .app, у окна на macOS своего значка нет.
 pub fn prepare(_: &slint::Window) {}
 
+/// Показать или спрятать «светофор» (закрыть, свернуть, на весь экран). У мини-плеера
+/// свои кнопки, а системные залезли бы на обложку.
+pub fn set_window_buttons(w: &slint::Window, visible: bool) {
+    use objc2_app_kit::{NSView, NSWindowButton};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    w.with_winit_window(|w| {
+        let Ok(handle) = w.window_handle() else { return };
+        let RawWindowHandle::AppKit(h) = handle.as_raw() else { return };
+        // SAFETY: winit отдаёт живой NSView своего окна, а мы в главном потоке.
+        let view: &NSView = unsafe { h.ns_view.cast().as_ref() };
+        let Some(window) = view.window() else { return };
+        for kind in [NSWindowButton::CloseButton, NSWindowButton::MiniaturizeButton, NSWindowButton::ZoomButton] {
+            if let Some(b) = window.standardWindowButton(kind) {
+                b.setHidden(!visible);
+            }
+        }
+    });
+}
+
 /// winit на macOS вместе с фокусом активирует и само приложение.
 pub fn raise(w: &slint::Window) {
     w.set_minimized(false);

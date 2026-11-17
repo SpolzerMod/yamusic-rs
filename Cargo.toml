@@ -60,7 +60,8 @@ security-framework = "3"
 objc2 = "0.6"
 block2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSDictionary", "NSValue", "NSData", "NSGeometry", "NSObject"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSImage"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSImage", "NSWindow", "NSView", "NSResponder", "NSButton", "NSControl"] }
+raw-window-handle = "0.6"
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes"] }
 objc2-media-player = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-app-kit", "objc2-core-foundation", "MPRemoteCommandCenter", "MPRemoteCommand", "MPRemoteCommandEvent", "MPNowPlayingInfoCenter", "MPMediaItem", "MPMediaItemCollection", "MPMediaEntity"] }
 
