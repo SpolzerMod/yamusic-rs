@@ -1,5 +1,4 @@
-//! Discord Rich Presence через локальный IPC Discord (named pipe на Windows, Unix-сокет
-//! на macOS) — без сторонних библиотек.
+//! Discord Rich Presence через локальный IPC Discord (named pipe на Windows, unix-сокет на Linux) — без сторонних библиотек.
 //! Показывает «Слушает …»: трек, исполнитель, обложка, полоска прогресса, кнопка на трек.
 
 use crate::api::Track;
@@ -10,25 +9,6 @@ use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-/// Локальный канал Discord: named pipe на Windows, Unix-сокет на macOS/Linux.
-#[cfg(windows)]
-type Ipc = std::fs::File;
-#[cfg(not(windows))]
-type Ipc = std::os::unix::net::UnixStream;
-
-/// Открыть канал с номером `i` (Discord слушает до 10 штук).
-#[cfg(windows)]
-fn open_ipc(i: u32) -> std::io::Result<Ipc> {
-    std::fs::OpenOptions::new().read(true).write(true).open(format!(r"\\.\pipe\discord-ipc-{i}"))
-}
-
-#[cfg(not(windows))]
-fn open_ipc(i: u32) -> std::io::Result<Ipc> {
-    let base = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into());
-    let base = base.trim_end_matches('/');
-    std::os::unix::net::UnixStream::connect(format!("{base}/discord-ipc-{i}"))
-}
 
 /// Приложение Discord, под которым все пользователи показывают статус «Слушает».
 /// Его имя видно в профиле («Слушает …»), картинка `logo` — значок в углу обложки.
@@ -48,9 +28,28 @@ pub struct Discord {
     pub status: Mutex<String>,
 }
 
+#[cfg(windows)]
+type Pipe = std::fs::File;
+#[cfg(unix)]
+type Pipe = std::os::unix::net::UnixStream;
+
 struct Conn {
-    pipe: Ipc,
+    pipe: Pipe,
     nonce: u64,
+}
+
+#[cfg(windows)]
+fn open_pipe(i: u32) -> Option<Pipe> {
+    std::fs::OpenOptions::new().read(true).write(true).open(format!(r"\\.\pipe\discord-ipc-{i}")).ok()
+}
+
+/// Сокет лежит в XDG_RUNTIME_DIR, у Flatpak и Snap — в своих подпапках.
+#[cfg(unix)]
+fn open_pipe(i: u32) -> Option<Pipe> {
+    let dirs = ["XDG_RUNTIME_DIR", "TMPDIR"].into_iter().filter_map(std::env::var_os).map(std::path::PathBuf::from);
+    dirs.chain([std::path::PathBuf::from("/tmp")])
+        .flat_map(|d| ["", "app/com.discordapp.Discord", "snap.discord"].map(|sub| d.join(sub).join(format!("discord-ipc-{i}"))))
+        .find_map(|p| Pipe::connect(p).ok())
 }
 
 fn now_ms() -> i64 {
@@ -61,7 +60,7 @@ impl Conn {
     fn connect(app_id: &str) -> Result<Conn, String> {
         let mut last = "Discord не запущен".to_string();
         for i in 0..10 {
-            let Ok(pipe) = open_ipc(i) else {
+            let Some(pipe) = open_pipe(i) else {
                 continue;
             };
             let mut c = Conn { pipe, nonce: 0 };

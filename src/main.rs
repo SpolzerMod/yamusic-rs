@@ -17,40 +17,22 @@ mod images;
 mod landing;
 #[cfg(target_os = "macos")]
 mod mac;
+#[cfg(target_os = "linux")]
+mod mpris;
 mod net;
 mod palette;
 mod player;
 mod secret;
 mod stream;
+#[cfg_attr(windows, path = "sys/windows.rs")]
+#[cfg_attr(target_os = "linux", path = "sys/linux.rs")]
+#[cfg_attr(target_os = "macos", path = "sys/macos.rs")]
+mod sys;
 mod tags;
+#[cfg(windows)]
 mod tray;
 mod update;
-mod win;
 mod yandex_id;
-
-/// Занять мьютекс единственного экземпляра. Если он уже чей-то — отпустить свою ссылку,
-/// чтобы мьютекс исчез вместе с тем процессом.
-#[cfg(windows)]
-fn claim_instance() -> bool {
-    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
-    use windows_sys::Win32::System::Threading::CreateMutexW;
-    let name = win::wide(r"Local\yamusic_rs_single_instance");
-    unsafe {
-        let m = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
-        if GetLastError() == ERROR_ALREADY_EXISTS {
-            CloseHandle(m);
-            return false;
-        }
-        true
-    }
-}
-
-/// На macOS второй запуск .app не создаёт процесс (LaunchServices показывает уже
-/// открытое окно), отдельного мьютекса не нужно: считаем себя первым.
-#[cfg(not(windows))]
-fn claim_instance() -> bool {
-    true
-}
 
 fn main() -> Result<(), slint::PlatformError> {
     // В release stderr теряется: панику пишем в лог (сообщение + место),
@@ -58,26 +40,21 @@ fn main() -> Result<(), slint::PlatformError> {
     std::panic::set_hook(Box::new(|info| {
         config::log(format!("PANIC: {info}"));
     }));
+    #[cfg(target_os = "linux")]
+    sys::audio_identity();
     // После обновления старая версия ещё закрывается: ждём её до 15 секунд.
     let after_update = std::env::args().any(|a| a == update::AFTER_UPDATE);
-    let mut claimed = claim_instance();
+    let mut claimed = sys::claim_instance();
     for _ in 0..60 {
         if claimed || !after_update {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
-        claimed = claim_instance();
+        claimed = sys::claim_instance();
     }
     if !claimed {
         // Второй запуск просто показывает уже открытое окно.
-        if tray::wake_existing() {
-            return Ok(());
-        }
-        let h: isize = std::fs::read_to_string(config::dir().join("hwnd")).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
-        if h != 0 && win::is_window(h) {
-            win::show(h);
-            win::force_foreground(h);
-        }
+        sys::wake_existing();
         return Ok(());
     }
     // Дефолт — CPU (skia-software): так задумал автор (память и совместимость
@@ -85,6 +62,8 @@ fn main() -> Result<(), slint::PlatformError> {
     // DX12/Vulkan) включается в настройках; замер на macOS дал CPU 25.1% → 4.3%,
     // RSS 178 → 137 МБ, но на слабых машинах решение остаётся за пользователем.
     // Env YAMUSIC_RENDERER перекрывает конфиг; при ошибке выбора GPU — fallback.
+    // Режим работы («Плавный» или «Лёгкий») меняет только анимации и кэши
+    // и переключается на лету (gui::apply_mode).
     let want = std::env::var("YAMUSIC_RENDERER").unwrap_or_default();
     let gpu_on = config::Config::load().gpu;
     let renderer = match want.as_str() {
@@ -92,22 +71,19 @@ fn main() -> Result<(), slint::PlatformError> {
         _ => if gpu_on { "skia-wgpu".to_string() } else { "skia-software".to_string() },
     };
     config::log(format!("renderer: {renderer}"));
-    let selected = slint::BackendSelector::new()
-        .backend_name("winit".into())
-        .renderer_name(renderer.clone())
-        .select();
+    let selected = slint::BackendSelector::new().backend_name("winit".into()).renderer_name(renderer.clone()).select();
     if selected.is_err() && renderer != "skia-software" {
         config::log(format!("renderer {renderer} недоступен, fallback на skia-software"));
         slint::BackendSelector::new().backend_name("winit".into()).renderer_name("skia-software".into()).select()?;
     } else {
         selected?;
     }
+    // По app_id (Wayland) и WM_CLASS (X11) окружение находит .desktop и значок.
+    #[cfg(target_os = "linux")]
+    slint::set_xdg_app_id("yamusic-rs")?;
     update::cleanup();
-    win::refresh_autostart();
-    // На macOS трея нет: --tray игнорируем, иначе окно спрячется без возможности вернуть.
-    #[cfg(windows)]
-    let start_hidden = std::env::args().any(|a| a == "--tray");
-    #[cfg(not(windows))]
-    let start_hidden = false;
+    sys::refresh_autostart();
+    // Без трея на Linux и macOS спрятанное окно было бы не вернуть из --tray.
+    let start_hidden = cfg!(windows) && std::env::args().any(|a| a == "--tray");
     gui::run(start_hidden)
 }

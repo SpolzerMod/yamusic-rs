@@ -3,7 +3,7 @@
 //! скачивает `yamusic-rs.exe` нового релиза, сверяет SHA-256 с тем, что показывает GitHub,
 //! и подменяет собой запущенный файл: Windows не даёт перезаписать работающий exe, но даёт
 //! его переименовать. Старый файл (`*.old.exe`) удаляется при следующем запуске.
-//! Если папка недоступна для записи, кнопка открывает страницу релиза.
+//! Если папка недоступна для записи, кнопка открывает страницу релиза. На Linux — всегда её.
 
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
@@ -48,7 +48,7 @@ fn parse_version(s: &str) -> Option<(u32, u32, u32)> {
 /// Последний релиз, если он новее запущенной версии.
 pub fn check() -> Result<Option<Release>, String> {
     let api = env!("CARGO_PKG_REPOSITORY").replace("https://github.com/", "https://api.github.com/repos/");
-    let resp = client()?.get(format!("{api}/releases/latest")).send().map_err(|e| e.to_string())?;
+    let resp = client()?.get(format!("{api}/releases/latest")).send().map_err(|e| crate::config::chain(&e))?;
     // 404 — релизов ещё нет.
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
@@ -64,22 +64,14 @@ pub fn check() -> Result<Option<Release>, String> {
     if latest <= current {
         return Ok(None);
     }
-    let exe = v.get("assets").and_then(|a| a.as_array()).and_then(|assets| {
-        #[cfg(windows)]
-        {
-            let a = assets.iter().find(|a| a.get("name").and_then(|n| n.as_str()) == Some(ASSET))?;
-            let url = a.get("browser_download_url")?.as_str()?.to_string();
-            let size = a.get("size")?.as_u64()?;
-            let sha = a.get("digest")?.as_str()?.strip_prefix("sha256:")?.to_ascii_lowercase();
-            Some((url, size, sha))
-        }
-        // Самообновление пока только для Windows: в релизе лежит exe, а на macOS
-        // бинарник и Gatekeeper. Кнопка «Обновить» просто откроет страницу релиза.
-        #[cfg(not(windows))]
-        {
-            let _ = assets;
-            None
-        }
+    // Самообновление exe только на Windows. На Linux и macOS кнопка открывает страницу релиза.
+    let assets = v.get("assets").and_then(|a| a.as_array()).filter(|_| cfg!(windows));
+    let exe = assets.and_then(|assets| {
+        let a = assets.iter().find(|a| a.get("name").and_then(|n| n.as_str()) == Some(ASSET))?;
+        let url = a.get("browser_download_url")?.as_str()?.to_string();
+        let size = a.get("size")?.as_u64()?;
+        let sha = a.get("digest")?.as_str()?.strip_prefix("sha256:")?.to_ascii_lowercase();
+        Some((url, size, sha))
     });
     Ok(Some(Release {
         version: tag.trim_start_matches('v').to_string(),
@@ -103,14 +95,14 @@ pub fn install(r: &Release) -> Result<PathBuf, String> {
         .timeout(Duration::from_secs(600))
         .send()
         .and_then(|r| r.error_for_status())
-        .map_err(|e| format!("загрузка: {e}"))?;
+        .map_err(|e| format!("загрузка: {}", crate::config::chain(&e)))?;
     let mut f = std::fs::File::create(&new).map_err(|e| format!("нет доступа к папке {}: {e}", exe.parent().unwrap_or(&exe).display()))?;
     // Стримим чанками на диск с инкрементальным SHA-256 — не держим весь exe в памяти.
     let mut hasher = Sha256::new();
     let mut n: u64 = 0;
     let mut buf = [0u8; 64 * 1024];
     loop {
-        let k = resp.read(&mut buf).map_err(|e| format!("загрузка: {e}"))?;
+        let k = resp.read(&mut buf).map_err(|e| format!("загрузка: {}", crate::config::chain(&e)))?;
         if k == 0 {
             break;
         }
