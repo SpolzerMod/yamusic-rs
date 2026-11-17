@@ -6,8 +6,7 @@ use std::sync::{
     Arc,
 };
 
-/// Общий протокол системной интеграции. Источники остальных команд добавляются
-/// на этапах подключения меню и MediaPlayer; сейчас подключён повторный запуск.
+/// Общий протокол меню, Dock, повторного запуска и MediaPlayer.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MacCommand {
     ShowWindow,
@@ -45,7 +44,7 @@ impl Lifetime {
     }
 }
 
-/// Клонируемый отправитель для сокета, а затем меню и MediaPlayer.
+/// Клонируемый отправитель для сокета, меню и MediaPlayer.
 #[derive(Clone)]
 pub(super) struct CommandSender(Arc<dyn Fn(MacCommand) + Send + Sync>);
 
@@ -107,7 +106,7 @@ impl MacIntegration {
 
 impl Drop for MacIntegration {
     fn drop(&mut self) {
-        // Сначала отзываем команды; будущие нативные подписки снимаются здесь же,
+        // Сначала отзываем команды; нативные подписки снимаются здесь же,
         // в главном потоке, до уничтожения окна и выхода из процесса.
         self.lifetime.invalidate();
         super::media::reset();
