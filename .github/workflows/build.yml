@@ -1,5 +1,7 @@
-# Каждый push и PR: clippy, тесты и артефакты (Windows exe + macOS .app).
-# Тег v* (например v1.0.2): релиз GitHub с yamusic-rs.exe и yamusic-rs-macos-universal.zip.
+# Каждый push и PR: clippy, тесты и сборки в артефактах: exe для Windows,
+# universal .app для macOS, .deb, .rpm и AppImage для Linux.
+# Тег v* (например v1.1.1): то же и релиз со всеми файлами. Его создаёт отдельное задание
+# после всех сборок. Встроенная обновлялка на Windows ищет в релизе yamusic-rs.exe.
 name: Сборка
 
 on:
@@ -65,14 +67,65 @@ jobs:
           name: macos-app
           path: yamusic-rs-macos-universal.zip
 
+  # Ubuntu 22.04 — самая старая glibc (2.35) среди поддерживаемых: собранное здесь
+  # запускается и на ней, и на всех более новых дистрибутивах.
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Зависимости сборки
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libfontconfig1-dev libfreetype-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-dev libx11-xcb-dev \
+            libxcursor-dev libxi-dev libxrandr-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo clippy --release --all-targets -- -D warnings
+      - run: cargo test --release
+      - run: cargo build --release
+
+      - name: Пакеты
+        id: pkg
+        run: |
+          command -v cargo-deb >/dev/null || cargo install --locked cargo-deb
+          command -v cargo-generate-rpm >/dev/null || cargo install --locked cargo-generate-rpm
+          tools/appimage.sh
+          cargo deb --no-build
+          cargo generate-rpm
+          echo "deb=$(ls target/debian/*.deb)" >> "$GITHUB_OUTPUT"
+          echo "rpm=$(ls target/generate-rpm/*.rpm)" >> "$GITHUB_OUTPUT"
+
+      - name: SHA-256
+        run: sha256sum target/release/yamusic-rs target/appimage/*.AppImage ${{ steps.pkg.outputs.deb }} ${{ steps.pkg.outputs.rpm }}
+
+      # По файлу на артефакт: без zip каждый скачивается как есть.
+      - uses: actions/upload-artifact@v7
+        with:
+          path: target/appimage/yamusic-rs-x86_64.AppImage
+          archive: false
+      - uses: actions/upload-artifact@v7
+        with:
+          path: ${{ steps.pkg.outputs.deb }}
+          archive: false
+      - uses: actions/upload-artifact@v7
+        with:
+          path: ${{ steps.pkg.outputs.rpm }}
+          archive: false
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [windows, macos]
+    needs: [windows, linux, macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -80,9 +133,5 @@ jobs:
       - name: Релиз
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          ls -la dist
-          gh release create "$GITHUB_REF_NAME" \
-            dist/yamusic-rs.exe dist/yamusic-rs-macos-universal.zip \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "Яндекс Музыка RS ${GITHUB_REF_NAME#v}" --generate-notes
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "Яндекс Музыка RS ${GITHUB_REF_NAME#v}" --generate-notes
