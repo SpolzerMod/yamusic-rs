@@ -2866,7 +2866,7 @@ impl Ctx {
             return;
         };
         std::thread::spawn(move || {
-            match net.api.remove_from_playlist(&uid, &kind, at, &t) {
+            match net.api.remove_from_playlist(&uid, &kind, &t) {
                 Ok(()) => net.say(format!("Трек «{}» удален из плейлиста «{title}»", t.title)),
                 Err(e) => net.say(format!("{}: {e}", crate::i18n::tr("Не удалось удалить трек из плейлиста"))),
             }
