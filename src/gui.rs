@@ -20,7 +20,32 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[derive(Clone, Copy)]
+struct EntityLike {
+    confirmed: bool,
+    desired: bool,
+}
+
+impl EntityLike {
+    fn complete(&mut self, sent: bool, success: bool) -> Option<bool> {
+        if success { self.confirmed = sent; }
+        if self.desired == sent && !success { self.desired = self.confirmed; }
+        (self.desired != self.confirmed).then_some(self.desired)
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn repeated_entity_clicks_settle_on_the_last_choice() {
+    let mut pending = EntityLike { confirmed: false, desired: false };
+    assert_eq!(pending.complete(true, true), Some(false));
+    assert_eq!(pending.complete(false, false), None);
+    assert!(pending.desired && pending.confirmed);
+}
+
 struct State {
+    entity_likes: HashMap<(&'static str, String), EntityLike>,
+    saved_entities: std::collections::HashSet<(&'static str, String)>,
     cfg: Config,
     dark: bool,
     uid: String,
@@ -317,17 +342,20 @@ impl Ctx {
         let weak = self.ui.clone();
         let api = net.api.clone();
         let uid = uid.to_string();
+        let session = net.clone();
         std::thread::spawn(move || {
             let about = api.about();
             let pins = api.pins();
             let wheel = api.wheel();
             let liked_albums = api.liked_album_ids(&uid);
+            let artists = api.liked_artists(&uid);
             let liked_playlists = api.liked_playlist_keys(&uid);
             let less_ai = api.account_settings().ok().and_then(|v| v.get("aiContentReductionEnabled").and_then(|b| b.as_bool()));
             let _ = slint::invoke_from_event_loop(move || {
                 with_ctx(|c| {
                     let Some(ui) = weak.upgrade() else { return };
                     let app = ui.global::<App>();
+                    if !c.st.borrow().net.as_ref().is_some_and(|net| Arc::ptr_eq(&net.toast, &session.toast)) { return; }
                     match about {
                         Ok((name, avatar)) => {
                             app.set_login(name.into());
@@ -346,12 +374,13 @@ impl Ctx {
                         Ok(p) => c.set_pins(p),
                         Err(e) => log(format!("pins: {e}")),
                     }
+                    if let Ok(artists) = artists { c.merge_entity_snapshot("artists", artists.into_iter().map(|a| a.id).collect()); }
                     match liked_albums {
-                        Ok(ids) => c.st.borrow_mut().liked_albums = ids.into_iter().collect(),
+                        Ok(ids) => c.merge_entity_snapshot("albums", ids),
                         Err(e) => log(format!("понравившиеся альбомы: {e}")),
                     }
                     match liked_playlists {
-                        Ok(keys) => c.st.borrow_mut().liked_playlists = keys.into_iter().collect(),
+                        Ok(keys) => c.merge_entity_snapshot("playlists", keys),
                         Err(e) => log(format!("понравившиеся плейлисты: {e}")),
                     }
                     if let Some(on) = less_ai {
@@ -1487,6 +1516,8 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         images: Images::new(lite),
         tracks,
         st: RefCell::new(State {
+            entity_likes: HashMap::new(),
+            saved_entities: Default::default(),
             cfg,
             dark,
             uid: String::new(),
@@ -2237,6 +2268,8 @@ impl Ctx {
             st.cfg.token_expires = None;
             st.cfg.save();
             st.net = None;
+            st.entity_likes.clear();
+            st.saved_entities.clear();
             st.started = false;
             st.uid.clear();
             st.pins.clear();
@@ -2898,33 +2931,118 @@ impl Ctx {
     fn list_like(self: &Rc<Self>) {
         let Some(data) = self.list() else { return };
         let Data::List(l) = &*data else { return };
-        let Some(net) = self.st.borrow().net.clone() else { return };
-        let uid = self.st.borrow().uid.clone();
-        let ui = self.ui();
-        let app = ui.global::<App>();
-        let (kind, id, key) = match (&l.playlist, &l.album) {
-            (Some(p), _) => ("playlists", format!("{}:{}", p.uid, p.kind), format!("playlist:{}:{}", p.uid, p.kind)),
-            (_, Some(a)) => ("albums", a.id.clone(), a.id.clone()),
+        let (kind, id) = match (&l.playlist, &l.album) {
+            (Some(p), _) => ("playlists", format!("{}:{}", p.uid, p.kind)),
+            (_, Some(a)) => ("albums", a.id.clone()),
             _ => return,
         };
-        let liked = !app.get_list_liked();
-        app.set_list_liked(liked);
-        {
-            let st = &mut *self.st.borrow_mut();
-            let set = if kind == "albums" { &mut st.liked_albums } else { &mut st.liked_playlists };
-            if liked {
-                set.insert(key);
-            } else {
-                set.remove(&key);
+        self.toggle_entity_like(kind, id, l.title.clone());
+    }
+
+    fn toggle_entity_like(self: &Rc<Self>, kind: &'static str, id: String, title: String) {
+        let Some(net) = self.st.borrow().net.clone() else { return };
+        let key = if kind == "playlists" { format!("playlist:{id}") } else { id.clone() };
+        let (desired, start) = {
+            let mut st = self.st.borrow_mut();
+            let had = match kind {
+                "albums" => st.liked_albums.contains(&key),
+                "playlists" => st.liked_playlists.contains(&key),
+                _ => st.liked_artists.contains(&key),
+            };
+            let entry = st.entity_likes.entry((kind, id.clone()));
+            let start = matches!(entry, std::collections::hash_map::Entry::Vacant(_));
+            let pending = entry.or_insert(EntityLike { confirmed: had, desired: had });
+            pending.desired = !pending.desired;
+            (pending.desired, start)
+        };
+        self.show_entity_like(kind, &key, desired);
+        if start { Self::save_entity_like(net, kind, id, key, title, desired); }
+    }
+
+    fn merge_entity_snapshot(&self, kind: &'static str, ids: Vec<String>) {
+        let mut st = self.st.borrow_mut();
+        let mut fresh: std::collections::HashSet<String> = ids.into_iter().collect();
+        let old = match kind {
+            "albums" => &st.liked_albums,
+            "playlists" => &st.liked_playlists,
+            _ => &st.liked_artists,
+        };
+        for (k, key) in &st.saved_entities {
+            if *k == kind {
+                if old.contains(key) { fresh.insert(key.clone()); } else { fresh.remove(key); }
             }
         }
-        let title = l.title.clone();
+        for ((k, id), pending) in &mut st.entity_likes {
+            if *k == kind {
+                let key = if kind == "playlists" { format!("playlist:{id}") } else { id.clone() };
+                pending.confirmed = fresh.contains(&key);
+                if pending.desired { fresh.insert(key); } else { fresh.remove(&key); }
+            }
+        }
+        let selected = match kind {
+            "albums" => st.list_key.as_deref().and_then(|k| k.strip_prefix("album:")),
+            "playlists" => st.list_key.as_deref().filter(|k| k.starts_with("playlist:")),
+            _ => st.artist_key.as_deref().map(|k| k.strip_prefix("artist:").unwrap_or(k)),
+        }.map(|key| fresh.contains(key));
+        match kind {
+            "albums" => st.liked_albums = fresh,
+            "playlists" => st.liked_playlists = fresh,
+            _ => st.liked_artists = fresh,
+        }
+        drop(st);
+        if let Some(liked) = selected {
+            let ui = self.ui();
+            let app = ui.global::<App>();
+            if kind == "artists" { app.set_ar_liked(liked); } else { app.set_list_liked(liked); }
+        }
+    }
+
+    fn show_entity_like(&self, kind: &str, key: &str, liked: bool) {
+        let mut st = self.st.borrow_mut();
+        let set = match kind {
+            "albums" => &mut st.liked_albums,
+            "playlists" => &mut st.liked_playlists,
+            _ => &mut st.liked_artists,
+        };
+        if liked { set.insert(key.into()); } else { set.remove(key); }
+        let visible = match kind {
+            "albums" => st.list_key.as_deref().and_then(|k| k.strip_prefix("album:")) == Some(key),
+            "playlists" => st.list_key.as_deref() == Some(key),
+            _ => st.artist_key.as_deref().and_then(|k| k.strip_prefix("artist:")).unwrap_or_default() == key
+                || st.artist_key.as_deref() == Some(key),
+        };
+        drop(st);
+        if visible {
+            let ui = self.ui();
+            let app = ui.global::<App>();
+            if kind == "artists" { app.set_ar_liked(liked); } else { app.set_list_liked(liked); }
+        }
+    }
+
+    fn save_entity_like(net: Net, kind: &'static str, id: String, key: String, title: String, sent: bool) {
         std::thread::spawn(move || {
-            net.say(match net.api.like_entity(&uid, kind, &id, !liked) {
-                Ok(()) if liked => format!("«{title}» в коллекции"),
-                Ok(()) => format!("«{title}» удалён из коллекции"),
-                Err(e) => format!("Не удалось сохранить: {e}"),
-            });
+            let result = net.api.like_entity(&net.uid, kind, &id, !sent);
+            let _ = slint::invoke_from_event_loop(move || with_ctx(|c| {
+                let mut st = c.st.borrow_mut();
+                if !st.net.as_ref().is_some_and(|active| Arc::ptr_eq(&active.toast, &net.toast)) { return; }
+                let request = (kind, id.clone());
+                if result.is_ok() { st.saved_entities.insert((kind, key.clone())); }
+                let Some(pending) = st.entity_likes.get_mut(&request) else { return };
+                let next = pending.complete(sent, result.is_ok());
+                let desired = pending.desired;
+                if next.is_none() { st.entity_likes.remove(&request); }
+                drop(st);
+                c.show_entity_like(kind, &key, desired);
+                if let Some(next) = next {
+                    Self::save_entity_like(net, kind, id, key, title, next);
+                } else {
+                    net.say(match result {
+                        Ok(()) if desired => format!("«{title}» в коллекции"),
+                        Ok(()) => format!("«{title}» удалён из коллекции"),
+                        Err(e) => format!("Не удалось сохранить: {e}"),
+                    });
+                }
+            }));
         });
     }
 
@@ -3959,21 +4077,7 @@ fn register_extra(app: &App) {
     app.on_artist_like(|| {
         with_ctx(|c| {
             let Some((id, name)) = c.current_artist() else { return };
-            let liked = !c.st.borrow().liked_artists.contains(&id);
-            if liked {
-                c.st.borrow_mut().liked_artists.insert(id.clone());
-            } else {
-                c.st.borrow_mut().liked_artists.remove(&id);
-            }
-            c.ui().global::<App>().set_ar_liked(liked);
-            let Some(net) = c.st.borrow().net.clone() else { return };
-            std::thread::spawn(move || {
-                match net.api.like_entity(&net.uid, "artists", &id, !liked) {
-                    Ok(()) if liked => net.say(format!("{name} в коллекции")),
-                    Ok(()) => net.say(format!("{name} удалён из коллекции")),
-                    Err(e) => net.say(format!("Не удалось сохранить: {e}")),
-                }
-            });
+            c.toggle_entity_like("artists", id, name);
         })
     });
     app.on_artist_pin(|| {
