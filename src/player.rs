@@ -110,11 +110,11 @@ pub enum Cmd {
 
 enum Msg {
     Cmd(Cmd),
-    Account(Res<Account>),
-    Likes(Res<Vec<String>>),
+    Account(u64, Res<Account>),
+    Likes(u64, Res<Vec<String>>),
     Batch { res: Res<Batch>, replace: bool, gen: u64 },
     Audio { gen: u64, res: Res<Vec<u8>> },
-    Prefetch { id: String, res: Res<Vec<u8>> },
+    Prefetch { generation: u64, id: String, res: Res<Vec<u8>> },
     Error(String),
 }
 
@@ -226,6 +226,7 @@ struct Engine {
     eq: Arc<EqParams>,
     audio: Option<(OutputStream, Sink)>,
     api: Option<Api>,
+    account_generation: u64,
     uid: String,
     source: Source,
     list: Option<ListPlay>,
@@ -283,6 +284,7 @@ impl Engine {
             eq,
             audio: None,
             api: None,
+            account_generation: 0,
             uid: String::new(),
             source: Source::Wave,
             list: None,
@@ -439,6 +441,7 @@ impl Engine {
     }
 
     fn reset(&mut self) {
+        self.account_generation += 1;
         self.stop_audio();
         self.gen += 1;
         self.clear_queue();
@@ -518,7 +521,8 @@ impl Engine {
     fn handle(&mut self, msg: Msg) {
         match msg {
             Msg::Cmd(c) => self.cmd(c),
-            Msg::Account(res) => match res {
+            Msg::Account(gen, _) | Msg::Likes(gen, _) if gen != self.account_generation => {}
+            Msg::Account(gen, res) => match res {
                 Ok(acc) => {
                     self.uid = acc.uid.clone();
                     {
@@ -535,7 +539,7 @@ impl Engine {
                         let tx = self.tx.clone();
                         let uid = acc.uid;
                         thread::spawn(move || {
-                            let _ = tx.send(Msg::Likes(api.liked_ids(&uid)));
+                            let _ = tx.send(Msg::Likes(gen, api.liked_ids(&uid)));
                         });
                     }
                 }
@@ -545,7 +549,7 @@ impl Engine {
                     self.sh().status = Status::Failed(e);
                 }
             },
-            Msg::Likes(res) => match res {
+            Msg::Likes(_, res) => match res {
                 Ok(ids) => self.likes.lock().unwrap().extend(ids),
                 Err(e) => log(format!("likes: {e}")),
             },
@@ -570,7 +574,8 @@ impl Engine {
                     }
                 }
             }
-            Msg::Prefetch { id, res } => {
+            Msg::Prefetch { generation, id, res } => {
+                if generation != self.account_generation { return; }
                 if self.prefetching.as_deref() == Some(id.as_str()) {
                     self.prefetching = None;
                 }
@@ -602,8 +607,9 @@ impl Engine {
                     s.error = None;
                 }
                 let tx = self.tx.clone();
+                let gen = self.account_generation;
                 thread::spawn(move || {
-                    let _ = tx.send(Msg::Account(api.account()));
+                    let _ = tx.send(Msg::Account(gen, api.account()));
                 });
             }
             Cmd::Logout => {
@@ -1090,11 +1096,12 @@ impl Engine {
             return;
         }
         let Some(api) = self.api.clone() else { return };
+        let generation = self.account_generation;
         self.prefetching = Some(next.id.clone());
         let tx = self.tx.clone();
         thread::spawn(move || {
             let res = load_track(&api, &next);
-            let _ = tx.send(Msg::Prefetch { id: next.id, res });
+            let _ = tx.send(Msg::Prefetch { generation, id: next.id, res });
         });
     }
 
@@ -1203,6 +1210,16 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn late_account_reply_after_logout_keeps_media_closed() {
+        let (tx, _) = mpsc::channel();
+        let mut engine = Engine::new(tx, Arc::default(), Arc::default(), Arc::new(|| {}), Arc::default());
+        let gen = engine.account_generation;
+        engine.cmd(Cmd::Logout);
+        engine.handle(Msg::Account(gen, Ok(Account { uid: "old".into(), login: "old".into(), has_plus: false })));
+        assert_eq!(engine.sh().status, Status::LoggedOut);
+    }
 
     /// Сетевой тест: ссылка на поток → скачивание → декодирование (без токена — 30-сек превью).
     #[test]

@@ -218,7 +218,7 @@ impl Ctx {
         if app.get_page() == Page::Settings {
             app.set_discord_status(self.discord.status().into());
         }
-        if s.status == Status::Ready && self.st.borrow().net.is_none() {
+        if s.status == Status::Ready && self.st.borrow().cfg.token.is_some() && self.st.borrow().net.is_none() {
             self.on_ready(&s.uid);
         }
 
@@ -306,6 +306,10 @@ impl Ctx {
         }
     }
 
+    fn same_session(&self, session: &Net) -> bool {
+        self.st.borrow().net.as_ref().is_some_and(|net| net.same_session(session))
+    }
+
     fn on_ready(self: &Rc<Self>, uid: &str) {
         let token = self.st.borrow().cfg.token.clone().unwrap_or_default();
         let notify = notifier();
@@ -317,6 +321,7 @@ impl Ctx {
         let weak = self.ui.clone();
         let api = net.api.clone();
         let uid = uid.to_string();
+        let session = net.clone();
         std::thread::spawn(move || {
             let about = api.about();
             let pins = api.pins();
@@ -328,15 +333,18 @@ impl Ctx {
                 with_ctx(|c| {
                     let Some(ui) = weak.upgrade() else { return };
                     let app = ui.global::<App>();
+                    if !c.same_session(&session) { return; }
                     match about {
                         Ok((name, avatar)) => {
                             app.set_login(name.into());
                             if let Some(url) = avatar {
                                 let w = weak.clone();
                                 c.images.get(&url, 100, move |img| {
-                                    if let Some(ui) = w.upgrade() {
-                                        ui.global::<App>().set_avatar(img.clone());
-                                    }
+                                    with_ctx(|c| {
+                                        if c.same_session(&session) {
+                                            if let Some(ui) = w.upgrade() { ui.global::<App>().set_avatar(img.clone()); }
+                                        }
+                                    });
                                 });
                             }
                         }
@@ -516,7 +524,7 @@ impl Ctx {
             };
             let _ = slint::invoke_from_event_loop(move || {
                 with_ctx(|c| {
-                    if c.ui().global::<App>().get_page() != Page::Grid || c.st.borrow().grid_key.as_deref() != Some(key.as_str()) {
+                    if !c.same_session(&net) || c.ui().global::<App>().get_page() != Page::Grid || c.st.borrow().grid_key.as_deref() != Some(key.as_str()) {
                         return;
                     }
                     match res {
@@ -563,7 +571,7 @@ impl Ctx {
             Ok(list) => {
                 let _ = slint::invoke_from_event_loop(move || {
                     with_ctx(|c| {
-                        if c.ui().global::<App>().get_page() != Page::Artists {
+                        if !c.same_session(&net) || c.ui().global::<App>().get_page() != Page::Artists {
                             return;
                         }
                         let cards: Vec<Card> = list
@@ -1646,6 +1654,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
                     let key = format!("playlist:{}:{}", pl.uid, pl.kind);
                     let _ = slint::invoke_from_event_loop(move || {
                         with_ctx(|c| {
+                            if !c.same_session(&net) { return; }
                             c.st.borrow_mut().rename_key = Some(key.clone());
                             c.navigate(Page::List, Some(key), true);
                         })
@@ -2240,6 +2249,16 @@ impl Ctx {
             st.started = false;
             st.uid.clear();
             st.pins.clear();
+            st.wheel.clear();
+            st.liked_artists.clear();
+            st.liked_albums.clear();
+            st.liked_playlists.clear();
+            st.cards.clear();
+            st.menu_playlists.clear();
+            st.playlists.clear();
+            st.albums.clear();
+            st.coll_shown = None;
+            st.track_id = None;
             st.history.clear();
             st.forward.clear();
         }
@@ -2248,6 +2267,8 @@ impl Ctx {
         app.set_login(SharedString::new());
         app.set_avatar(Image::default());
         app.set_pins(ModelRc::default());
+        app.set_wheel(ModelRc::default());
+        app.set_my_artists(ModelRc::default());
         app.set_fullscreen(false);
         self.navigate(Page::Wave, None, false);
         self.login_start();
@@ -2830,7 +2851,10 @@ impl Ctx {
 
     fn reload_pins(net: &Net) {
         if let Ok(p) = net.api.pins() {
-            let _ = slint::invoke_from_event_loop(move || with_ctx(|c| c.set_pins(p)));
+            let session = net.clone();
+            let _ = slint::invoke_from_event_loop(move || with_ctx(|c| {
+                if c.same_session(&session) { c.set_pins(p); }
+            }));
         }
     }
 
@@ -2889,9 +2913,7 @@ impl Ctx {
             }
             net.refresh("playlists");
             net.refresh("collection");
-            if let Ok(p) = net.api.pins() {
-                let _ = slint::invoke_from_event_loop(move || with_ctx(|c| c.set_pins(p)));
-            }
+            Self::reload_pins(&net);
         });
     }
 

@@ -162,6 +162,10 @@ fn fetch(api: &Api, uid: &str, key: &str) -> Res<Data> {
 }
 
 impl Net {
+    pub(crate) fn same_session(&self, other: &Net) -> bool {
+        Arc::ptr_eq(&self.store, &other.store)
+    }
+
     pub fn new(api: Api, uid: String, notify: Notify) -> Self {
         Net { api, uid, store: Default::default(), notify, toast: Default::default() }
     }
@@ -268,4 +272,13 @@ mod tests {
         assert_eq!(tracks_word(11), "11 треков");
         assert_eq!(listeners_word(1964082), "1\u{2008}964\u{2008}082 слушателя в месяц");
     }
+}
+
+#[cfg(test)]
+#[test]
+fn second_login_has_a_new_session_even_for_the_same_uid() {
+    let make = || Net::new(Api::new(""), "1".into(), Arc::new(|| {}));
+    let first = make();
+    assert!(first.same_session(&first.clone()));
+    assert!(!first.same_session(&make()));
 }
