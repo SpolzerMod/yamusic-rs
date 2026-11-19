@@ -75,6 +75,7 @@ pub struct Shared {
     pub source: Source,
     pub upcoming: Vec<Track>,
     pub playing: bool,
+    pub(crate) paused: bool,
     pub loading: bool,
     pub position: f32,
     pub duration: f32,
@@ -468,6 +469,7 @@ impl Engine {
         let upcoming: Vec<Track> = self.queue.iter().take(30).cloned().collect();
         let mut s = self.shared.lock().unwrap();
         s.playing = playing;
+        s.paused = self.paused;
         s.position = pos;
         s.volume = self.volume;
         s.repeat = self.repeat;
@@ -1049,11 +1051,14 @@ impl Engine {
         let Some(t) = self.current.clone() else { return };
         {
             let mut s = self.sh();
+            s.playing = false;
+            s.paused = self.paused;
             s.track = Some(t.clone());
             s.position = 0.0;
             s.duration = t.duration_ms as f32 / 1000.0;
             s.loading = true;
         }
+        (self.notify)();
         if self.prefetch.as_ref().map(|(id, _)| *id == t.id).unwrap_or(false) {
             let (_, b) = self.prefetch.take().unwrap();
             self.play_loaded(b);
@@ -1203,6 +1208,26 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn next_track_notifies_with_text_before_audio_is_ready() {
+        let (tx, _) = mpsc::channel();
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let observed = shared.clone();
+        let (events, rx) = mpsc::channel();
+        let notify = Arc::new(move || {
+            let state = observed.lock().unwrap();
+            if let Some(track) = &state.track {
+                events.send((track.title.clone(), track.artists.clone(), state.loading)).unwrap();
+            }
+        });
+        let mut engine = Engine::new(tx, shared, Arc::default(), notify, Arc::default());
+        engine.current = crate::api::parse_track(&serde_json::json!({
+            "id": "2", "title": "Новый трек", "artists": [{ "id": "3", "name": "Исполнитель" }]
+        }));
+        engine.start_current();
+        assert_eq!(rx.try_recv(), Ok(("Новый трек".into(), "Исполнитель".into(), true)));
+    }
 
     /// Сетевой тест: ссылка на поток → скачивание → декодирование (без токена — 30-сек превью).
     #[test]

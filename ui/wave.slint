@@ -206,7 +206,7 @@ export component WavePage inherits Rectangle {
     property <length> text-w: root.width - text-x - 48px;
     property <length> cx: text-x + text-w / 2;
     property <length> blob: root.width * 0.6 * 1.107;
-    property <bool> paused: App.has-track && !App.playing;
+    property <bool> paused: App.has-track && App.playback-paused;
     property <length> title-y: App.wave-context ? 84px : 98px;
     // Высота окна и сдвиги по замерам оригинала при 700–1100: плеер прижат к низу (H − 248),
     // заголовок и пятно — к середине; ниже 800 отступы меньше.

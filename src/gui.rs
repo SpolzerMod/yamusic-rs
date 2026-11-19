@@ -225,6 +225,7 @@ impl Ctx {
         let started = self.st.borrow().started;
         app.set_has_track(started && s.track.is_some());
         app.set_playing(s.playing);
+        app.set_playback_paused(s.paused);
         app.set_loading(s.loading);
         app.set_position(s.position);
         app.set_duration(s.duration);
@@ -262,15 +263,15 @@ impl Ctx {
         if app.get_fullscreen() && app.get_fs_mode() == 2 {
             self.sync_lyrics();
         }
-        let Some(t) = s.track.filter(|_| started) else {
+        let track = s.track.filter(|_| started);
+        let changed = track_label_changed(&mut self.st.borrow_mut().track_id, track.as_ref().map(|t| t.id.as_str()));
+        let Some(t) = track else {
             app.set_title(SharedString::new());
             app.set_artists(SharedString::new());
             return;
         };
         app.set_liked(self.player.is_liked(&t.id));
-        let changed = self.st.borrow().track_id.as_deref() != Some(t.id.as_str());
         if changed {
-            self.st.borrow_mut().track_id = Some(t.id.clone());
             app.set_title(t.title.clone().into());
             app.set_artists(t.artists.clone().into());
             let names: Vec<SharedString> = t.artist_list.iter().map(|a| SharedString::from(a.name.as_str())).collect();
@@ -1176,6 +1177,23 @@ fn finish_reveal(weak: slint::Weak<AppWindow>, first: bool, tries: u32) {
         sys::prepare(ui.window());
     }
     sys::raise(ui.window());
+}
+
+fn track_label_changed(previous: &mut Option<String>, current: Option<&str>) -> bool {
+    if previous.as_deref() == current {
+        return false;
+    }
+    *previous = current.map(String::from);
+    true
+}
+
+#[cfg(test)]
+#[test]
+fn same_track_after_empty_queue_restores_the_label() {
+    let mut previous = None;
+    for (id, changed) in [(Some("a"), true), (Some("a"), false), (None, true), (Some("a"), true)] {
+        assert_eq!(track_label_changed(&mut previous, id), changed);
+    }
 }
 
 fn notifier() -> Arc<dyn Fn() + Send + Sync> {
