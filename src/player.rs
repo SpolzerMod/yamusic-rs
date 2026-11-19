@@ -204,6 +204,28 @@ pub fn shuffle<T>(v: &mut [T]) {
     }
 }
 
+/// Сортируем оставшиеся треки списка. Вставки из других источников сохраняют свои места.
+fn restore_queue_order(queue: &mut [Track], start: usize) {
+    let mut remaining: Vec<_> = queue.iter().filter_map(|t| Some((t.list_position?, t.clone()))).collect();
+    remaining.sort_by_key(|(i, _)| (i < &start, *i));
+    let mut remaining = remaining.into_iter();
+    for track in queue.iter_mut().filter(|t| t.list_position.is_some()) {
+        if let Some((_, value)) = remaining.next() { *track = value; }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn unshuffle_keeps_manual_and_consumed_tracks_in_place() {
+    let mut tracks: Vec<_> = (0..5).map(|id| crate::api::parse_track(&serde_json::json!({"id":id, "title":"T"})).unwrap()).collect();
+    for (i, track) in tracks[..4].iter_mut().enumerate() { track.list_position = Some(i); }
+    let manual = crate::api::parse_track(&serde_json::json!({"id":2, "title":"ручная вставка"})).unwrap();
+    let mut queue = vec![manual, tracks[2].clone(), tracks[4].clone(), tracks[1].clone()];
+    restore_queue_order(&mut queue, 1);
+    assert_eq!(queue[0].title, "ручная вставка");
+    assert_eq!(queue.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["2", "1", "4", "2"]);
+}
+
 enum End {
     Finished,
     Skip,
@@ -669,7 +691,8 @@ impl Engine {
                 self.advance(End::Dislike);
             }
             Cmd::Wave(src) => self.start_wave(src, true),
-            Cmd::PlayList { source, tracks, start, after } => {
+            Cmd::PlayList { source, mut tracks, start, after } => {
+                for (index, track) in tracks.iter_mut().enumerate() { track.list_position = Some(index); }
                 if tracks.is_empty() {
                     return;
                 }
@@ -709,7 +732,8 @@ impl Engine {
                 self.flush_feedback();
             }
             Cmd::Repeat(r) => self.repeat = r,
-            Cmd::Enqueue { track, next } => {
+            Cmd::Enqueue { mut track, next } => {
+                track.list_position = None;
                 if next {
                     self.queue.push_front(track);
                     self.prefetch = None;
@@ -728,8 +752,8 @@ impl Engine {
                     if on {
                         shuffle(&mut v);
                     } else if let (Some(l), Some(cur)) = (&self.list, &self.current) {
-                        let i = l.all.iter().position(|t| t.id == cur.id).map(|i| i + 1).unwrap_or(0);
-                        v = l.all[i.min(l.all.len())..].to_vec();
+                        let i = cur.list_position.map_or(0, |i| (i + 1) % l.all.len());
+                        restore_queue_order(&mut v, i);
                     }
                     self.queue.extend(v);
                     self.prefetch = None;

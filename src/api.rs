@@ -39,6 +39,8 @@ pub struct Named {
 
 #[derive(Clone, Debug)]
 pub struct Track {
+    /// Позиция в исходном списке при воспроизведении. У ручной вставки её нет.
+    pub(crate) list_position: Option<usize>,
     pub id: String,
     pub album_id: Option<String>,
     pub title: String,
@@ -258,6 +260,7 @@ pub(crate) fn parse_track(v: &Value) -> Option<Track> {
     let li = v.get("lyricsInfo");
     let flag = |k: &str| li.and_then(|l| l.get(k)).and_then(|x| x.as_bool()).unwrap_or(false);
     Some(Track {
+        list_position: None,
         id,
         album_id: album.and_then(|a| s(a.get("id"))),
         title,
