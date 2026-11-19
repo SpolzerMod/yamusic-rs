@@ -3658,7 +3658,19 @@ fn audio_ext(b: &[u8]) -> &'static str {
 }
 
 fn track_file_stem(t: &Track) -> String {
-    file_name_max(&format!("{} — {}", t.artists, t.title), 120)
+    use sha2::{Digest, Sha256};
+    let id = if !t.id.is_empty() && t.id.len() <= 24 && t.id.bytes().all(|b| b.is_ascii_digit()) {
+        t.id.clone()
+    } else {
+        format!("{:x}", Sha256::digest(t.id.as_bytes()))[..24].to_owned()
+    };
+    let name = file_name_max(&format!("{} — {}", t.artists, t.title), 120);
+    // Оставляем место для ID и расширения в пределах 255 байт файловой системы.
+    let mut end = name.len().min(255 - ".tagged.part".len() - " []".len() - id.len());
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{} [{id}]", &name[..end])
 }
 
 /// Трек уже скачан: готовый файл (не `.part`) с ненулевым размером.
@@ -4089,4 +4101,15 @@ fn register_extra(app: &App) {
         crate::eq::PRESETS.iter().map(|p| SharedString::from(p.0)).collect::<Vec<_>>(),
     ))));
     with_ctx(|c| c.apply_eq());
+}
+
+#[cfg(test)]
+#[test]
+fn downloads_with_same_title_keep_both_recordings() {
+    let first = crate::api::parse_track(&serde_json::json!({"id":1,"title":"Трек"})).unwrap();
+    let mut second = first.clone();
+    second.id = "2".into();
+    assert_ne!(track_file_stem(&first), track_file_stem(&second));
+    second.title = "я".repeat(140);
+    assert!(format!("{}.tagged.part", track_file_stem(&second)).len() <= 255);
 }
