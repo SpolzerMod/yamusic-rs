@@ -317,7 +317,7 @@ export component WavePage inherits Rectangle {
         border-radius: 32px;
         background: idle-ta.has-hover ? Theme.controls-color-primary-default-hovered : #ffff00;
         animate background { duration: App.motion ? 150ms : 0ms; }
-        Icon { source: Icons.play-big; size: 32px; colorize: #000; }
+        Icon { source: App.can-pause ? Icons.pause-big : Icons.play-big; size: 32px; colorize: #000; }
         idle-ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { App.play-pause(); } }
     }
     if !App.has-track: Icon { x: cx - 76px - 12px; y: 600px + dp; source: Icons.prev; size: 24px; colorize: #ffffff14; }
@@ -458,7 +458,7 @@ export component WavePage inherits Rectangle {
             border-radius: 32px;
             background: play-ta.has-hover ? Theme.controls-color-primary-default-hovered : #ffff00;
             animate background { duration: App.motion ? 150ms : 0ms; }
-            Icon { source: App.playing ? Icons.pause-big : Icons.play-big; size: 32px; colorize: #000; }
+            Icon { source: App.can-pause ? Icons.pause-big : Icons.play-big; size: 32px; colorize: #000; }
             play-ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { App.play-pause(); } }
         }
         Rectangle {

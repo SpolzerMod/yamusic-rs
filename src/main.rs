@@ -16,6 +16,8 @@ mod images;
 mod landing;
 #[cfg(target_os = "linux")]
 mod mpris;
+#[cfg(windows)]
+mod smtc;
 mod net;
 mod palette;
 mod player;

@@ -75,6 +75,7 @@ pub struct Shared {
     pub source: Source,
     pub upcoming: Vec<Track>,
     pub playing: bool,
+    pub(crate) paused: bool,
     pub loading: bool,
     pub position: f32,
     pub duration: f32,
@@ -84,12 +85,20 @@ pub struct Shared {
     pub error: Option<(String, Instant)>,
 }
 
+impl Shared {
+    pub(crate) fn can_pause(&self) -> bool {
+        self.playing || (self.loading && !self.paused)
+    }
+}
+
 pub enum Cmd {
     Login(String),
     Logout,
     PlayPause,
     /// Снять с паузы (если уже играет — ничего не делать).
     Resume,
+    #[cfg(any(windows, test))]
+    Pause,
     Next,
     Prev,
     Seek(f32),
@@ -468,6 +477,7 @@ impl Engine {
         let upcoming: Vec<Track> = self.queue.iter().take(30).cloned().collect();
         let mut s = self.shared.lock().unwrap();
         s.playing = playing;
+        s.paused = self.paused;
         s.position = pos;
         s.volume = self.volume;
         s.repeat = self.repeat;
@@ -616,10 +626,18 @@ impl Engine {
                 s.login.clear();
                 s.uid.clear();
             }
+            #[cfg(any(windows, test))]
+            Cmd::Pause => {
+                self.paused = true;
+                if let Some(s) = self.sink() { s.pause(); }
+            }
             Cmd::Resume => {
                 self.paused = false;
                 if let Some(s) = self.sink() {
                     s.play();
+                } else if self.current.is_none() && self.sh().status == Status::Ready && self.source.station().is_some() {
+                    self.sh().loading = true;
+                    self.fetch_batch();
                 }
             }
             Cmd::PlayPause => {
@@ -1203,6 +1221,36 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_play_keeps_pending_wave_and_reports_loading() {
+        let (tx, _) = mpsc::channel();
+        let mut engine = Engine::new(tx, Arc::default(), Arc::default(), Arc::new(|| {}), Arc::default());
+        engine.sh().status = Status::Ready;
+        engine.fetching = true;
+        let generation = engine.batch_gen;
+        engine.cmd(Cmd::Resume);
+        engine.sync();
+        assert_eq!(engine.batch_gen, generation);
+        assert!(engine.sh().loading);
+        assert!(!engine.sh().paused);
+    }
+
+    #[test]
+    fn explicit_pause_and_play_are_idempotent_during_download() {
+        let (tx, _) = mpsc::channel();
+        let mut engine = Engine::new(tx, Arc::default(), Arc::default(), Arc::new(|| {}), Arc::default());
+        engine.sh().loading = true;
+        for (cmd, paused) in [(Cmd::Resume, false), (Cmd::Resume, false), (Cmd::Pause, true), (Cmd::Pause, true)] {
+            engine.cmd(cmd);
+            engine.sync();
+            let state = engine.sh();
+            assert_eq!(state.paused, paused);
+            assert_eq!(state.can_pause(), !paused);
+            assert!(!state.playing);
+            assert!(state.loading);
+        }
+    }
 
     /// Сетевой тест: ссылка на поток → скачивание → декодирование (без токена — 30-сек превью).
     #[test]

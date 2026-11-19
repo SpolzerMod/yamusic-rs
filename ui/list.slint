@@ -425,7 +425,7 @@ export component ListPage inherits Rectangle {
                 ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { App.play-list(idx); } }
                 if hot || current: Icon {
                     x: 8px;
-                    source: current && App.playing ? Icons.pause-filled-xs : Icons.play-filled-xs;
+                    source: current && App.can-pause ? Icons.pause-filled-xs : Icons.play-filled-xs;
                     size: 28px;
                     colorize: Theme.controls-color-primary-text-enabled;
                 }

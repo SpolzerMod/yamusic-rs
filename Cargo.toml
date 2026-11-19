@@ -21,6 +21,9 @@ base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 miniz_oxide = "0.8"
 
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Foundation", "Media", "Win32_System_WinRT"] }
+
 [target.'cfg(windows)'.dependencies.windows-sys]
 version = "0.59"
 features = [
@@ -112,3 +115,6 @@ assets = [
 [package.metadata.generate-rpm.recommends]
 xdg-utils = "*"
 "(zenity or kdialog)" = "*"
+
+[target.'cfg(windows)'.dev-dependencies]
+windows = { version = "0.62", features = ["Media_Control"] }

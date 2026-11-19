@@ -225,6 +225,9 @@ impl Ctx {
         let started = self.st.borrow().started;
         app.set_has_track(started && s.track.is_some());
         app.set_playing(s.playing);
+        app.set_can_pause(started && s.can_pause());
+        #[cfg(windows)]
+        crate::tray::update_media(&s);
         app.set_loading(s.loading);
         app.set_position(s.position);
         app.set_duration(s.duration);
@@ -1551,9 +1554,6 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     let p = player.clone();
     app.on_play_pause(move || {
         let started = CTX.with(|c| c.borrow().as_ref().map(|c| c.st.borrow().started)).unwrap_or(true);
-        if p.state().track.is_none() {
-            p.send(Cmd::Wave(Source::Wave));
-        }
         if started {
             p.send(Cmd::PlayPause);
         } else {
@@ -1934,7 +1934,16 @@ fn install_tray(ui: &AppWindow, player: &Player) {
                     }
                 }
                 Event::Show => reveal(&ui),
+                Event::PlayPause | Event::Play | Event::Pause | Event::Next | Event::Prev if p.state().status != Status::Ready => {}
                 Event::PlayPause => ui.global::<App>().invoke_play_pause(),
+                Event::Play => with_ctx(|ctx| {
+                    if ctx.st.borrow().started {
+                        p.send(Cmd::Resume);
+                    } else {
+                        ctx.start();
+                    }
+                }),
+                Event::Pause => p.send(Cmd::Pause),
                 Event::Prev => p.send(Cmd::Prev),
                 Event::Next => p.send(Cmd::Next),
                 Event::Updates => sys::open_url(concat!(env!("CARGO_PKG_REPOSITORY"), "/releases")),
@@ -1952,7 +1961,7 @@ fn install_tray(ui: &AppWindow, player: &Player) {
                 let s = p.state();
                 crate::tray::MenuState {
                     minimized,
-                    playing: s.playing,
+                    playing: s.can_pause(),
                     can_prev: s.track.is_some(),
                     can_next: s.track.is_some(),
                 }
