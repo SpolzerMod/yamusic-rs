@@ -94,6 +94,10 @@ pub enum Cmd {
     Prev,
     Seek(f32),
     #[cfg(target_os = "linux")]
+    Pause,
+    #[cfg(target_os = "linux")]
+    SeekBy(f32),
+    #[cfg(target_os = "linux")]
     SeekTrack(mpris_server::TrackId, i64),
     Volume(f32),
     LikeTrack(Track),
@@ -254,6 +258,7 @@ struct Engine {
     retry_at: Option<Instant>,
     gen: u64,
     loaded: bool,
+    pending_seek: Option<Duration>,
     paused: bool,
     volume: f32,
     repeat: Repeat,
@@ -305,6 +310,7 @@ impl Engine {
             retry_at: None,
             gen: 0,
             loaded: false,
+            pending_seek: None,
             paused: true,
             volume: 0.6,
             repeat: Repeat::Off,
@@ -355,6 +361,7 @@ impl Engine {
     }
 
     fn pos(&self) -> f32 {
+        if !self.loaded { return self.pending_seek.unwrap_or_default().as_secs_f32(); }
         self.sink().map(|s| s.get_pos().as_secs_f32()).unwrap_or(0.0)
     }
 
@@ -421,6 +428,7 @@ impl Engine {
     }
 
     fn stop_audio(&mut self) {
+        self.pending_seek = None;
         if let Some(s) = self.sink() {
             s.clear();
         }
@@ -466,7 +474,7 @@ impl Engine {
     /// Состояние движка → Shared для UI.
     fn sync(&mut self) {
         let playing = self.loaded && !self.paused && self.sink().map(|s| !s.is_paused()).unwrap_or(false);
-        let pos = if self.loaded { self.pos() } else { 0.0 };
+        let pos = self.pos();
         let upcoming: Vec<Track> = self.queue.iter().take(30).cloned().collect();
         let mut s = self.shared.lock().unwrap();
         s.playing = playing;
@@ -620,6 +628,7 @@ impl Engine {
             }
             Cmd::Resume => {
                 self.paused = false;
+                if self.current.is_none() && self.list.is_none() && self.sh().status == Status::Ready { self.fetch_batch(); }
                 if let Some(s) = self.sink() {
                     s.play();
                 }
@@ -642,15 +651,25 @@ impl Engine {
             }
             Cmd::Prev => self.prev(),
             #[cfg(target_os = "linux")]
+            Cmd::Pause => {
+                self.paused = true;
+                if let Some(sink) = self.sink() { sink.pause(); }
+            }
+            #[cfg(target_os = "linux")]
+            Cmd::SeekBy(offset) => self.cmd(Cmd::Seek(self.pos() + offset)),
+            #[cfg(target_os = "linux")]
             Cmd::SeekTrack(id, micros) => {
                 if self.current.as_ref().is_some_and(|t| crate::mpris::can_set_position(t, &id, micros)) {
                     self.cmd(Cmd::Seek(micros as f32 / 1_000_000.0));
                 }
             }
             Cmd::Seek(sec) => {
-                if self.loaded {
+                let target = Duration::from_secs_f32(sec.max(0.0));
+                if !self.loaded && self.current.is_some() {
+                    self.pending_seek = Some(target);
+                } else if self.loaded {
                     if let Some(s) = self.sink() {
-                        if let Err(e) = s.try_seek(Duration::from_secs_f32(sec.max(0.0))) {
+                        if let Err(e) = s.try_seek(target) {
                             log(format!("seek: {e:?}"));
                         }
                     }
@@ -1051,6 +1070,7 @@ impl Engine {
     // ---------- загрузка ----------
 
     fn start_current(&mut self) {
+        self.pending_seek = None;
         self.gen += 1;
         self.loaded = false;
         self.current_bytes = None;
@@ -1124,10 +1144,14 @@ impl Engine {
         let src = Eq::new(src.convert_samples::<f32>(), self.eq.clone());
         let vol = self.volume * self.volume;
         let paused = self.paused;
+        let seek = self.pending_seek.take();
         if let Some(sink) = self.sink() {
             sink.clear();
             sink.set_volume(vol);
             sink.append(src);
+            if let Some(target) = seek {
+                if let Err(e) = sink.try_seek(target) { log(format!("seek: {e:?}")); }
+            }
             if paused {
                 sink.pause()
             } else {
@@ -1224,4 +1248,30 @@ mod tests {
         let samples = dec.take(44100).count();
         assert!(samples > 1000);
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn ordered_pause_resume_commands_are_idempotent() {
+    let mut engine = Engine::new(mpsc::channel().0, Default::default(), Default::default(), Arc::new(|| {}), Default::default());
+    for cmd in [Cmd::Pause, Cmd::Pause] { engine.cmd(cmd); }
+    assert!(engine.paused);
+    for cmd in [Cmd::Resume, Cmd::Resume] { engine.cmd(cmd); }
+    assert!(!engine.paused);
+}
+
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn ordered_seeks_follow_the_loading_track() {
+    let mut engine = Engine::new(mpsc::channel().0, Default::default(), Default::default(), Arc::new(|| {}), Default::default());
+    let track = crate::api::parse_track(&serde_json::json!({"id": 7, "title": "A"})).unwrap();
+    engine.history.push(track);
+    engine.cmd(Cmd::Prev);
+    let id = crate::mpris::track_id("7");
+    engine.cmd(Cmd::SeekTrack(id, 30_000_000));
+    engine.cmd(Cmd::SeekBy(2.0));
+    assert_eq!(engine.pos(), 32.0);
+    engine.start_current();
+    assert_eq!(engine.pos(), 0.0);
 }

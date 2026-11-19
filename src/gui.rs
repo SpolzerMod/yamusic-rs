@@ -1897,15 +1897,16 @@ fn install_mpris(ui: &AppWindow, player: &Player) {
         let _ = weak.upgrade_in_event_loop(move |ui| {
             use crate::mpris::Event;
             let app = ui.global::<App>();
-            let s = p.state();
             match e {
                 Event::PlayPause => app.invoke_play_pause(),
-                Event::Play if !s.playing => app.invoke_play_pause(),
-                Event::Pause if s.playing => app.invoke_play_pause(),
-                Event::Play | Event::Pause => {}
+                Event::Play => with_ctx(|c| {
+                    if c.st.borrow().started { p.send(Cmd::Resume); } else { c.start(); }
+                }),
+                Event::Pause => p.send(Cmd::Pause),
                 Event::Next => p.send(Cmd::Next),
                 Event::Prev => p.send(Cmd::Prev),
-                Event::SeekBy(sec) => p.send(Cmd::Seek((s.position + sec).max(0.0))),
+                Event::SeekTrack(id, micros) => p.send(Cmd::SeekTrack(id, micros)),
+                Event::SeekBy(sec) => p.send(Cmd::SeekBy(sec)),
                 Event::Volume(v) => app.invoke_set_volume(v),
                 Event::Raise => reveal(&ui),
                 Event::Quit => quit(),
