@@ -4,6 +4,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod api;
+#[cfg(all(windows, feature = "asio"))]
+mod asio;
 mod assets;
 mod auth;
 mod client;

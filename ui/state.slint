@@ -388,6 +388,11 @@ export global App {
     in property <string> lang: "ru";
     in property <bool> less-ai;
     in property <string> download-dir;
+    in property <bool> asio-available;
+    in property <[string]> audio-outputs;
+    in-out property <int> audio-output-index;
+    in property <bool> audio-output-pending;
+    callback select-audio-output(int);
     // Режим работы: «Плавный» — анимации и кэш слоёв, «Лёгкий» — без них.
     in property <bool> motion: true;
     // Статус «Слушает» в профиле Discord и что с ним сейчас.

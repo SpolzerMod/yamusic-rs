@@ -7,6 +7,9 @@ license = "GPL-3.0-only"
 description = "Яндекс Музыка RS — неофициальный клиент Яндекс Музыки на Rust"
 repository = "https://github.com/SpolzerMod/yamusic-rs"
 
+[features]
+asio = ["dep:winreg", "dep:cc"]
+
 [dependencies]
 skia-safe = { version = "0.153.3", default-features = false }
 slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-skia", "unstable-fontique-011", "unstable-winit-030"] }
@@ -20,6 +23,9 @@ sha2 = "0.10"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 miniz_oxide = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+winreg = { version = "0.56", optional = true }
 
 [target.'cfg(windows)'.dependencies.windows-sys]
 version = "0.59"
@@ -53,6 +59,7 @@ futures-lite = "2"
 secret-service = { version = "5.2", default-features = false, features = ["rt-async-io-crypto-rust"] }
 
 [build-dependencies]
+cc = { version = "1", optional = true }
 slint-build = "1.18"
 
 [profile.release]

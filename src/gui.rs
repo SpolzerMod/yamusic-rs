@@ -48,6 +48,7 @@ struct State {
     forward: Vec<(Page, Option<String>)>,
     track_id: Option<String>,
     toast_timer: Option<Timer>,
+    last_audio_output_error: Option<Instant>,
     cards: HashMap<String, Vec<Card>>,
     search_shown: Option<Arc<Data>>,
     results_key: Option<String>,
@@ -213,6 +214,15 @@ impl Ctx {
                 self.login_start();
             } else if app.get_toast().is_empty() && !app.get_logged_out() {
                 self.toast(e.clone());
+            }
+        }
+        if let Some((ref message, time)) = s.audio_output_error {
+            let is_new = self.st.borrow().last_audio_output_error != Some(time) && !app.get_mini();
+            #[cfg(windows)]
+            let is_new = is_new && sys::is_shown(ui.window()) && !sys::is_minimized(ui.window());
+            if is_new {
+                self.st.borrow_mut().last_audio_output_error = Some(time);
+                self.toast(message.as_str());
             }
         }
         if app.get_page() == Page::Settings {
@@ -475,6 +485,11 @@ impl Ctx {
             Page::Artists => self.refresh_my_artists(),
             Page::Trends | Page::Concerts | Page::Nonmusic => self.refresh_landing(),
             Page::Chart => self.refresh_chart(),
+            #[cfg(all(windows, feature = "asio"))]
+            Page::Settings => {
+                let configured = self.st.borrow().cfg.asio_driver.clone();
+                setup_audio_output(&app, configured.as_deref());
+            }
             Page::Grid => {
                 if let Some(k) = key {
                     self.st.borrow_mut().grid_key = Some(k);
@@ -1424,6 +1439,60 @@ fn set_icons(ui: &AppWindow, sprite: &Sprite) {
     icons.set_upload(get("upload_xxs"));
 }
 
+#[cfg(all(windows, feature = "asio"))]
+fn setup_audio_output(app: &App<'_>, configured: Option<&str>) {
+    let mut drivers = crate::asio::names(configured);
+    let mut names: Vec<SharedString> = std::iter::once(crate::i18n::tr("Системный выход").into())
+        .chain(drivers.iter().map(|name| format!("ASIO · {name}").into()))
+        .collect();
+    let current = configured.map_or(0, |name| {
+        let index = drivers.iter().position(|driver| driver == name).unwrap_or_else(|| {
+            drivers.push(name.to_string());
+            names.push(format!("ASIO · {name} (недоступен)").into());
+            drivers.len() - 1
+        });
+        index as i32 + 1
+    });
+    app.set_asio_available(true);
+    app.set_audio_outputs(ModelRc::new(VecModel::from(names)));
+    app.set_audio_output_index(current);
+    app.on_select_audio_output(move |index| {
+        with_ctx(|ctx| {
+            let ui = ctx.ui();
+            let app = ui.global::<App>();
+            let driver = match index {
+                0 => None,
+                i if i > 0 && (i as usize) <= drivers.len() => drivers.get(i as usize - 1).cloned(),
+                _ => return,
+            };
+            if app.get_audio_output_pending() { return; }
+            app.set_audio_output_pending(true);
+            ctx.player.send(Cmd::Output(driver, Box::new(|active, error| {
+                let _ = slint::invoke_from_event_loop(move || with_ctx(|ctx| {
+                    let result = {
+                        let mut state = ctx.st.borrow_mut();
+                        if error.is_none() {
+                            state.cfg.asio_driver = active.clone();
+                            state.cfg.save_to_disk()
+                        } else {
+                            Ok(())
+                        }
+                    };
+                    let ui = ctx.ui();
+                    let app = ui.global::<App>();
+                    app.set_audio_output_pending(false);
+                    setup_audio_output(&app, active.as_deref());
+                    if let Some(message) = error {
+                        ctx.toast(message);
+                    } else if let Err(e) = result {
+                        ctx.toast(format!("Аудиовыход переключён, но выбор не сохранён: {e}"));
+                    }
+                }));
+            })));
+        });
+    });
+}
+
 pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     let cfg = Config::load();
     crate::api::set_lang(&cfg.lang);
@@ -1450,7 +1519,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     start_updates(&ui);
 
     crate::api::ALLOW_EXPLICIT.store(cfg.allow_explicit, Ordering::Relaxed);
-    let player = Player::spawn(notifier());
+    let player = Player::spawn(notifier(), cfg.asio_driver.clone());
     player.send(Cmd::Volume(cfg.volume));
     if let Some(t) = cfg.token.clone() {
         player.send(Cmd::Login(t));
@@ -1512,6 +1581,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             forward: Vec::new(),
             track_id: None,
             toast_timer: None,
+            last_audio_output_error: None,
             cards: HashMap::new(),
             search_shown: None,
             results_key: None,

@@ -3,6 +3,15 @@
 const APP_NAME: &str = "Яндекс Музыка RS";
 
 fn main() {
+    #[cfg(feature = "asio")]
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        println!("cargo:rerun-if-env-changed=CPAL_ASIO_DIR");
+        let sdk = std::env::var_os("CPAL_ASIO_DIR").expect("set CPAL_ASIO_DIR to the ASIO SDK directory");
+        let headers = std::path::PathBuf::from(sdk).join("common");
+        println!("cargo:rerun-if-changed={}", headers.display());
+        println!("cargo:rerun-if-changed=src/asio_host.cpp");
+        cc::Build::new().cpp(true).std("c++17").include(headers).file("src/asio_host.cpp").compile("yamusic_asio");
+    }
     println!("cargo:rustc-env=APP_NAME={APP_NAME}");
     slint_build::compile_with_config(
         "ui/app.slint",

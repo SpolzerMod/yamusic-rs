@@ -328,6 +328,18 @@ cargo build --release
 (MSVC и Windows SDK: из SDK берётся `rc.exe` для значка и описания exe).
 Готовый файл: `target\release\yamusic-rs.exe`.
 
+Для сборки с ASIO скачайте [ASIO SDK](https://github.com/audiosdk/asio).
+Укажите папку SDK в `CPAL_ASIO_DIR`.
+
+```powershell
+$env:CPAL_ASIO_DIR = 'C:\sdk\asio'
+cargo build --locked --release --features asio
+```
+
+В «Настройки → Аудиовыход» выберите системный выход или установленный ASIO-драйвер.
+Выбор применяется сразу. Плеер сохраняет позицию и паузу; в режиме системного вывода он следует за устройством по умолчанию в Windows.
+В Windows-сборках GitHub Actions функция ASIO включена.
+
 #### Linux
 
 Нужны компилятор C и заголовки библиотек.
