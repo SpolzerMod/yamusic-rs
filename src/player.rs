@@ -461,6 +461,10 @@ impl Engine {
         self.sh().source = src;
     }
 
+    fn active_repeat(&self) -> Repeat {
+        if self.source.station().is_some() { Repeat::Off } else { self.repeat }
+    }
+
     /// Состояние движка → Shared для UI.
     fn sync(&mut self) {
         let playing = self.loaded && !self.paused && self.sink().map(|s| !s.is_paused()).unwrap_or(false);
@@ -470,7 +474,7 @@ impl Engine {
         s.playing = playing;
         s.position = pos;
         s.volume = self.volume;
-        s.repeat = self.repeat;
+        s.repeat = self.active_repeat();
         s.shuffle = self.shuffle;
         s.upcoming = upcoming;
     }
@@ -485,7 +489,7 @@ impl Engine {
             }
         }
         if self.loaded && !self.paused && self.sink().map(|s| s.empty()).unwrap_or(false) {
-            if self.repeat == Repeat::One && self.replay() {
+            if self.active_repeat() == Repeat::One && self.replay() {
                 return;
             }
             self.advance(End::Finished);
@@ -1215,5 +1219,19 @@ mod tests {
         let dec = Decoder::new(Cursor::new(bytes)).expect("decode");
         let samples = dec.take(44100).count();
         assert!(samples > 1000);
+    }
+
+    #[test]
+    fn wave_suspends_single_track_repeat_from_a_list() {
+        let mut engine = Engine::new(mpsc::channel().0, Arc::default(), Arc::default(), Arc::new(|| {}), Arc::default());
+        let album = Source::List { kind: ListKind::Album, id: "1".into(), title: "Album".into() };
+        engine.set_source(album.clone());
+        engine.cmd(Cmd::Repeat(Repeat::One));
+        engine.cmd(Cmd::Wave(Source::Wave));
+        engine.sync();
+        assert_eq!(engine.sh().repeat, Repeat::Off);
+        engine.set_source(album);
+        engine.sync();
+        assert_eq!(engine.sh().repeat, Repeat::One);
     }
 }
