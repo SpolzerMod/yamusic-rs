@@ -997,6 +997,9 @@ impl Engine {
                 _ => self.list_finished(),
             }
         }
+        if !crate::api::allow_explicit() {
+            self.queue.retain(|t| !t.explicit);
+        }
         match self.queue.pop_front() {
             Some(t) => {
                 self.current = Some(t);
@@ -1008,7 +1011,7 @@ impl Engine {
                 self.gen += 1;
                 let mut s = self.sh();
                 s.track = None;
-                s.loading = true;
+                s.loading = self.list.is_none() && self.source.station().is_some();
             }
         }
         if self.queue.len() < 2 {
@@ -1022,6 +1025,9 @@ impl Engine {
                 let _ = s.try_seek(Duration::ZERO);
             }
             return;
+        }
+        if !crate::api::allow_explicit() {
+            self.history.retain(|t| !t.explicit);
         }
         if let Some(p) = self.history.pop() {
             if let Some(c) = self.current.take() {
@@ -1216,4 +1222,22 @@ mod tests {
         let samples = dec.take(44100).count();
         assert!(samples > 1000);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn explicit_filter_survives_repeat_and_previous() {
+    let mut engine = Engine::new(mpsc::channel().0, Default::default(), Default::default(), Arc::new(|| {}), Default::default());
+    let blocked = crate::api::parse_track(&serde_json::json!({"id":1,"title":"E","explicit":true})).unwrap();
+    let allowed = crate::api::parse_track(&serde_json::json!({"id":2,"title":"A"})).unwrap();
+    let previous = crate::api::ALLOW_EXPLICIT.swap(false, std::sync::atomic::Ordering::Relaxed);
+    engine.list = Some(ListPlay { all: vec![blocked.clone(), allowed.clone()], after: After::Loop });
+    engine.repeat = Repeat::All;
+    engine.play_from_queue();
+    let repeated = engine.current.take().map(|t| t.id);
+    engine.history = vec![allowed, blocked];
+    engine.prev();
+    crate::api::ALLOW_EXPLICIT.store(previous, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(repeated.as_deref(), Some("2"));
+    assert_eq!(engine.current.unwrap().id, "2");
 }
