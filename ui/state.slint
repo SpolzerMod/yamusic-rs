@@ -134,6 +134,9 @@ export global T {
 }
 
 export global App {
+    in property <bool> fonts-loaded;
+    out property <string> text-font: fonts-loaded ? "YS Text" : "";
+    out property <string> headline-font: fonts-loaded ? "YS Music Headline" : "";
     in-out property <Page> page: Page.wave;
     in property <bool> maximized;
     // Слой на всё окно на один кадр: Slint перерисовывает место, где элемент появился и исчез,

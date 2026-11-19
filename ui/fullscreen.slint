@@ -312,7 +312,7 @@ component LyricRow inherits Rectangle {
         text: root.text;
         wrap: word-wrap;
         horizontal-alignment: center;
-        font-family: "YS Music Headline";
+        font-family: App.headline-font;
         font-size: root.font-size;
         font-weight: 700;
         color: #e6e6e6.with-alpha(root.alpha * root.fade);
@@ -373,7 +373,7 @@ component SyncLyrics inherits Rectangle {
         width: root.width;
         horizontal-alignment: center;
         text: T.t("Текста этой песни пока нет");
-        font-family: "YS Music Headline";
+        font-family: App.headline-font;
         font-size: root.font;
         font-weight: 700;
         color: #e6e6e6.with-alpha(0.5 * root.appear);
@@ -398,7 +398,7 @@ component SyncLyrics inherits Rectangle {
             if !root.scrolled && root.state == 1: Text {
                 text: App.lyric-counter;
                 horizontal-alignment: center;
-                font-family: "YS Music Headline";
+                font-family: App.headline-font;
                 font-size: root.font;
                 font-weight: 700;
                 color: #e6e6e6.with-alpha(0.5 * root.appear);
@@ -499,7 +499,7 @@ export component FullscreenPlayer inherits Rectangle {
             width: parent.width;
             text: App.queue-title;
             overflow: elide;
-            font-family: "YS Music Headline";
+            font-family: App.headline-font;
             font-size: Theme.font-size-headline-m;
             font-weight: 700;
             color: #ffffff;

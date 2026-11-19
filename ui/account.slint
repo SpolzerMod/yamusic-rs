@@ -322,7 +322,7 @@ export component SettingsPage inherits Rectangle {
             height: 32px;
             text: T.t("Настройки");
             vertical-alignment: center;
-            font-family: "YS Music Headline";
+            font-family: App.headline-font;
             font-size: Theme.font-size-headline-xl;
             font-weight: 700;
             color: Theme.controls-color-primary-text-enabled-variant;
@@ -443,7 +443,7 @@ export component LoginScreen inherits Rectangle {
         Text {
             text: T.t("Войдите в Яндекс Музыку");
             horizontal-alignment: center;
-            font-family: "YS Music Headline";
+            font-family: App.headline-font;
             font-size: Theme.font-size-headline-xl;
             font-weight: 700;
             color: root.ink;
@@ -476,7 +476,7 @@ export component LoginScreen inherits Rectangle {
                     width: 40px;
                     Text {
                         text: ch;
-                        font-family: "YS Music Headline";
+                        font-family: App.headline-font;
                         font-size: 44px;
                         font-weight: 700;
                         color: root.ink;

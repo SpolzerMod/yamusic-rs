@@ -1195,15 +1195,12 @@ fn notifier() -> Arc<dyn Fn() + Send + Sync> {
     })
 }
 
-fn load_assets() -> Option<Sprite> {
+fn load_assets() -> (Vec<Vec<u8>>, Option<Sprite>) {
     let mut src = crate::assets::Source::open();
     if matches!(src, crate::assets::Source::Web(_)) {
         log("официальное приложение не найдено — шрифты и иконки из веб-версии");
     }
-    if !crate::assets::register_fonts(&mut src) {
-        log("шрифты YS Text не найдены — будет системный шрифт");
-    }
-    Sprite::load(&mut src)
+    (crate::assets::load_fonts(&mut src), Sprite::load(&mut src))
 }
 
 thread_local! {
@@ -1433,18 +1430,25 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         "light" => false,
         _ => !sys::system_light_theme(),
     };
-    let assets = load_assets();
-    if assets.is_none() {
-        log("шрифты и иконки недоступны — нет ни оригинала, ни сети");
-    }
-
     let ui = AppWindow::new()?;
     ui.global::<Theme>().set_dark(true);
     let lite = cfg.mode == "lite";
     apply_mode(&ui, lite);
-    if let Some(sprite) = &assets {
-        set_icons(&ui, sprite);
-    }
+    let weak = ui.as_weak();
+    std::thread::spawn(move || {
+        let (fonts, sprite) = load_assets();
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            if !fonts.is_empty() {
+                crate::assets::register_fonts(fonts);
+                ui.global::<App>().set_fonts_loaded(true);
+            }
+            if let Some(sprite) = sprite {
+                set_icons(&ui, &sprite);
+                with_ctx(|c| c.refresh_menu_icons());
+            }
+            ui.window().request_redraw();
+        });
+    });
     load_id_icons(&ui);
     crate::update::ENABLED.store(cfg.check_updates, Ordering::Relaxed);
     start_updates(&ui);
@@ -2953,6 +2957,25 @@ impl Ctx {
             self.menu_entry("artist-share", "Поделиться", icons.get_m_share(), false),
         ];
         self.show_menu(items, x, y, false);
+    }
+
+    /// При первом запуске открытое меню могло скопировать ещё пустые изображения.
+    fn refresh_menu_icons(self: &Rc<Self>) {
+        let ui = self.ui();
+        let app = ui.global::<App>();
+        if !app.get_menu_open() { return; }
+        let Some(first) = app.get_menu_items().row_data(0) else { return };
+        let (x, y, submenu) = (app.get_menu_x(), app.get_menu_y(), app.get_submenu_open());
+        match first.id.as_str() {
+            "like" => {
+                let track = self.st.borrow().menu_track.clone();
+                if let Some(track) = track { self.open_menu_for(track, x, y, app.get_menu_below()); }
+            }
+            "list-pin" => self.open_list_menu(x, y),
+            "artist-vibe" => self.open_artist_menu(x, y),
+            _ => return,
+        }
+        app.set_submenu_open(submenu);
     }
 
     fn show_menu(&self, items: Vec<MenuEntry>, x: f32, y: f32, below: bool) {
