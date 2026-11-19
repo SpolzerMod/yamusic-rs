@@ -1551,9 +1551,6 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     let p = player.clone();
     app.on_play_pause(move || {
         let started = CTX.with(|c| c.borrow().as_ref().map(|c| c.st.borrow().started)).unwrap_or(true);
-        if p.state().track.is_none() {
-            p.send(Cmd::Wave(Source::Wave));
-        }
         if started {
             p.send(Cmd::PlayPause);
         } else {

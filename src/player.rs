@@ -213,6 +213,7 @@ enum End {
 }
 
 struct ListPlay {
+    deferred: VecDeque<Track>,
     all: Vec<Track>,
     after: After,
 }
@@ -616,21 +617,11 @@ impl Engine {
                 s.login.clear();
                 s.uid.clear();
             }
-            Cmd::Resume => {
-                self.paused = false;
-                if let Some(s) = self.sink() {
-                    s.play();
-                }
-            }
+            Cmd::Resume => self.resume(),
+            Cmd::PlayPause if self.paused => self.resume(),
             Cmd::PlayPause => {
-                self.paused = !self.paused;
-                if let Some(s) = self.sink() {
-                    if self.paused {
-                        s.pause()
-                    } else {
-                        s.play()
-                    }
-                }
+                self.paused = true;
+                if let Some(sink) = self.sink() { sink.pause(); }
             }
             Cmd::Next => {
                 self.errors_in_row = 0;
@@ -686,7 +677,7 @@ impl Engine {
                 }
                 self.queue.push_back(first);
                 self.queue.extend(order);
-                self.list = Some(ListPlay { all: tracks, after });
+                self.list = Some(ListPlay { deferred: VecDeque::new(), all: tracks, after });
                 self.set_source(source);
                 self.advance(End::Skip);
             }
@@ -957,7 +948,14 @@ impl Engine {
             self.queue.retain(|t| t.batch_id.is_empty());
         }
         if !allow {
-            self.queue.retain(|t| !t.explicit);
+            if self.blocked_list() {
+                if skip_current {
+                    self.queue.push_front(self.current.as_ref().unwrap().clone());
+                }
+                self.defer_explicit();
+            } else {
+                self.queue.retain(|t| !t.explicit);
+            }
         }
         self.prefetch = None;
         if skip_current {
@@ -984,11 +982,42 @@ impl Engine {
         }
     }
 
+    fn blocked_list(&self) -> bool {
+        !crate::api::allow_explicit()
+            && self.list.as_ref().is_some_and(|list| !list.all.is_empty() && list.all.iter().all(|t| t.explicit))
+    }
+
+    fn defer_explicit(&mut self) {
+        if let Some(list) = &mut self.list {
+            self.queue.retain(|track| {
+                if track.explicit { list.deferred.push_back(track.clone()); }
+                !track.explicit
+            });
+        }
+    }
+
+    fn resume(&mut self) {
+        self.paused = false;
+        if self.current.is_none() {
+            if self.list.is_some() {
+                self.play_from_queue();
+                return;
+            }
+            if self.sh().status == Status::Ready { self.fetch_batch(); }
+        }
+        if let Some(sink) = self.sink() { sink.play(); }
+    }
+
     fn play_from_queue(&mut self) {
-        if !crate::api::allow_explicit() {
+        let blocked_list = self.blocked_list();
+        if blocked_list {
+            self.defer_explicit();
+        } else if crate::api::allow_explicit() {
+            if let Some(list) = &mut self.list { self.queue.append(&mut list.deferred); }
+        } else {
             self.queue.retain(|t| !t.explicit);
         }
-        if self.queue.is_empty() && self.list.is_some() {
+        if self.queue.is_empty() && self.list.is_some() && !blocked_list {
             match (&self.list, self.repeat) {
                 (Some(l), Repeat::All) => {
                     let all = l.all.clone();
@@ -1008,6 +1037,7 @@ impl Engine {
             None => {
                 self.current = None;
                 self.current_bytes = None;
+                if self.list.is_some() { self.paused = true; }
                 self.gen += 1;
                 let mut s = self.sh();
                 s.track = None;
@@ -1231,13 +1261,33 @@ fn explicit_filter_survives_repeat_and_previous() {
     let blocked = crate::api::parse_track(&serde_json::json!({"id":1,"title":"E","explicit":true})).unwrap();
     let allowed = crate::api::parse_track(&serde_json::json!({"id":2,"title":"A"})).unwrap();
     let previous = crate::api::ALLOW_EXPLICIT.swap(false, std::sync::atomic::Ordering::Relaxed);
-    engine.list = Some(ListPlay { all: vec![blocked.clone(), allowed.clone()], after: After::Loop });
+    engine.list = Some(ListPlay { deferred: VecDeque::new(), all: vec![blocked.clone(), allowed.clone()], after: After::Loop });
     engine.repeat = Repeat::All;
     engine.play_from_queue();
     let repeated = engine.current.take().map(|t| t.id);
     engine.history = vec![allowed, blocked];
     engine.prev();
+    let previous_track = engine.current.take().unwrap().id;
+    let explicit = engine.list.as_ref().unwrap().all[0].clone();
+    engine.list.as_mut().unwrap().all = vec![explicit.clone()];
+    engine.list.as_mut().unwrap().after = After::Wave(Source::Wave);
+    engine.repeat = Repeat::Off;
+    engine.queue = VecDeque::from([explicit]);
+    engine.play_from_queue();
+    engine.set_allow_explicit(true);
+    engine.cmd(Cmd::PlayPause);
+    let resumed = engine.current.take().map(|t| t.id);
+    let mut first = engine.list.as_ref().unwrap().all[0].clone();
+    first.id = "3".into();
+    let second = engine.list.as_ref().unwrap().all[0].clone();
+    engine.set_allow_explicit(false);
+    engine.cmd(Cmd::PlayList { source: Source::Wave, tracks: vec![first, second], start: 1, after: After::Loop });
+    engine.set_allow_explicit(true);
+    engine.cmd(Cmd::Resume);
+    let selected = engine.current.as_ref().map(|t| t.id.clone());
     crate::api::ALLOW_EXPLICIT.store(previous, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(selected.as_deref(), Some("1"));
+    assert_eq!(resumed.as_deref(), Some("1"));
     assert_eq!(repeated.as_deref(), Some("2"));
-    assert_eq!(engine.current.unwrap().id, "2");
+    assert_eq!(previous_track, "2");
 }
