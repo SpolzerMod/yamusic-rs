@@ -121,13 +121,82 @@ enum Msg {
     Error(String),
 }
 
+#[derive(Clone)]
+struct AudioSender {
+    channel: Sender<Msg>,
+    #[cfg(all(windows, feature = "asio"))]
+    wake: Option<Arc<std::os::windows::io::OwnedHandle>>,
+}
+
+impl From<Sender<Msg>> for AudioSender {
+    fn from(channel: Sender<Msg>) -> Self {
+        #[cfg(all(windows, feature = "asio"))]
+        let wake = {
+            use std::os::windows::io::{FromRawHandle, OwnedHandle};
+            use windows_sys::Win32::System::Threading::CreateEventW;
+            // Auto-reset: одно пробуждение достаточно для всех накопившихся команд.
+            let handle = unsafe { CreateEventW(std::ptr::null(), 0, 0, std::ptr::null()) };
+            (!handle.is_null()).then(|| Arc::new(unsafe { OwnedHandle::from_raw_handle(handle) }))
+        };
+        Self { channel, #[cfg(all(windows, feature = "asio"))] wake }
+    }
+}
+
+impl AudioSender {
+    fn send(&self, msg: Msg) -> Result<(), ()> {
+        self.channel.send(msg).map_err(|_| ())?;
+        #[cfg(all(windows, feature = "asio"))]
+        if let Some(event) = &self.wake {
+            use std::os::windows::io::AsRawHandle;
+            unsafe { windows_sys::Win32::System::Threading::SetEvent(event.as_raw_handle()); }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(all(windows, feature = "asio")))]
+    fn recv(&self, rx: &Receiver<Msg>, timeout: Duration) -> Result<Msg, RecvTimeoutError> {
+        rx.recv_timeout(timeout)
+    }
+
+    #[cfg(all(windows, feature = "asio"))]
+    fn recv(&self, rx: &Receiver<Msg>, timeout: Duration) -> Result<Msg, RecvTimeoutError> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::{Foundation::WAIT_FAILED, UI::WindowsAndMessaging::*};
+        let deadline = Instant::now() + timeout;
+        loop {
+            // Обслуживаем HWND драйвера и окна COM на создавшем их потоке.
+            // Ограничиваем пачку, чтобы поток также успевал принять команды плеера.
+            unsafe {
+                let mut msg = std::mem::zeroed();
+                for _ in 0..32 {
+                    if PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) == 0 { break; }
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+            match rx.try_recv() {
+                Ok(msg) => return Ok(msg),
+                Err(mpsc::TryRecvError::Disconnected) => return Err(RecvTimeoutError::Disconnected),
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() { return Err(RecvTimeoutError::Timeout); }
+            let Some(event) = &self.wake else { return rx.recv_timeout(remaining); };
+            let handle = event.as_raw_handle();
+            if unsafe { MsgWaitForMultipleObjectsEx(1, &handle, remaining.as_millis().max(1) as u32, QS_ALLINPUT, MWMO_INPUTAVAILABLE) } == WAIT_FAILED {
+                return rx.recv_timeout(remaining);
+            }
+        }
+    }
+}
+
 type Notify = Arc<dyn Fn() + Send + Sync>;
 type Job = Box<dyn FnOnce() + Send>;
 pub type Likes = Arc<Mutex<HashSet<String>>>;
 
 #[derive(Clone)]
 pub struct Player {
-    tx: Sender<Msg>,
+    tx: AudioSender,
     shared: Arc<Mutex<Shared>>,
     likes: Likes,
     pub eq: Arc<EqParams>,
@@ -136,6 +205,7 @@ pub struct Player {
 impl Player {
     pub fn spawn(notify: Notify, asio_driver: Option<String>) -> Player {
         let (tx, rx) = mpsc::channel();
+        let tx = AudioSender::from(tx);
         let shared = Arc::new(Mutex::new(Shared { volume: 0.6, ..Default::default() }));
         let likes: Likes = Default::default();
         let eq: Arc<EqParams> = Default::default();
@@ -249,8 +319,7 @@ fn open_output(asio_driver: Option<&str>) -> Result<Output, String> {
     let _ = asio_driver;
     #[cfg(windows)]
     {
-        let device = system_device().ok_or("Системный аудиовыход недоступен")?;
-        open_system_device(device.clone(), Some(device))
+        open_system_output(None)
     }
     #[cfg(not(windows))]
     {
@@ -258,6 +327,45 @@ fn open_output(asio_driver: Option<&str>) -> Result<Output, String> {
             .map_err(|e| format!("Не удалось открыть системный аудиовыход: {e}"))?;
         Ok(Output::System { _stream: stream, handle })
     }
+}
+
+#[cfg(windows)]
+fn open_system_output(previous: Option<rodio::cpal::platform::WasapiDevice>) -> Result<Output, String> {
+    use rodio::cpal::{platform::DeviceInner, traits::HostTrait};
+    let default = system_device();
+    first_system_output(previous, default.clone(), || {
+        rodio::cpal::default_host().output_devices().into_iter().flatten().filter_map(|device| {
+            #[allow(unreachable_patterns)]
+            match device.into_inner() { DeviceInner::Wasapi(d) => Some(d), _ => None }
+        })
+    }, |device| open_system_device(device, default.clone()))
+}
+
+#[cfg(any(windows, test))]
+fn first_system_output<D: Clone + PartialEq, O, I: IntoIterator<Item = D>>(previous: Option<D>, default: Option<D>,
+    others: impl FnOnce() -> I, open: impl FnMut(D) -> Result<O, String>) -> Result<O, String> {
+    let mut open = open;
+    let mut tried = Vec::new();
+    let mut error = String::from("Системный аудиовыход недоступен");
+    let mut try_device = |device: D| {
+        if tried.contains(&device) { return None; }
+        tried.push(device.clone());
+        open(device).map_err(|e| error = e).ok()
+    };
+    if let Some(output) = previous.into_iter().chain(default).find_map(&mut try_device) { return Ok(output); }
+    others().into_iter().find_map(try_device).ok_or(error)
+}
+
+#[cfg(test)]
+#[test]
+fn system_falls_back_to_third_device_in_order() {
+    let mut tried = Vec::new();
+    let out = first_system_output(Some("old"), Some("busy"), || ["busy", "old", "free"], |d| {
+        tried.push(d);
+        if d == "free" { Ok(d) } else { Err(d.to_string()) }
+    });
+    assert_eq!(out.as_deref(), Ok("free"));
+    assert_eq!(tried, ["old", "busy", "free"]);
 }
 
 #[cfg(windows)]
@@ -330,7 +438,7 @@ struct ListPlay {
 }
 
 struct Engine {
-    tx: Sender<Msg>,
+    tx: AudioSender,
     bg: Sender<Job>,
     shared: Arc<Mutex<Shared>>,
     likes: Likes,
@@ -380,7 +488,7 @@ struct Engine {
 }
 
 impl Engine {
-    fn new(tx: Sender<Msg>, shared: Arc<Mutex<Shared>>, likes: Likes, notify: Notify, eq: Arc<EqParams>, asio_driver: Option<String>) -> Self {
+    fn new(tx: impl Into<AudioSender>, shared: Arc<Mutex<Shared>>, likes: Likes, notify: Notify, eq: Arc<EqParams>, asio_driver: Option<String>) -> Self {
         // Фидбек и лайки — по порядку в отдельном потоке, чтобы не блокировать плеер.
         let (bg, bg_rx) = mpsc::channel::<Job>();
         thread::Builder::new()
@@ -392,7 +500,7 @@ impl Engine {
             })
             .expect("bg thread");
         Engine {
-            tx,
+            tx: tx.into(),
             bg,
             shared,
             likes,
@@ -438,7 +546,7 @@ impl Engine {
 
     fn run(mut self, rx: Receiver<Msg>) {
         loop {
-            match rx.recv_timeout(Duration::from_millis(200)) {
+            match self.tx.recv(&rx, Duration::from_millis(200)) {
                 Ok(msg) => {
                     self.handle(msg);
                     self.sync();
@@ -465,18 +573,9 @@ impl Engine {
         if self.audio.is_none() {
             let output = open_output(self.asio_driver.as_deref());
             #[cfg(windows)]
-            let output = output.or_else(|error| {
-                use rodio::cpal::{platform::DeviceInner, traits::HostTrait};
-                if self.asio_driver.is_some() { return Err(error); }
-                let default = system_device();
-                rodio::cpal::default_host().output_devices().ok().and_then(|mut devices| devices.find_map(|other| {
-                    match other.into_inner() {
-                        DeviceInner::Wasapi(device) if Some(&device) != default.as_ref() =>
-                            open_system_device(device, default.clone()).ok(),
-                        _ => None,
-                    }
-                })).ok_or(error)
-            });
+            let output = if self.loaded && self.asio_driver.is_some() {
+                output.or_else(|_| open_system_output(None))
+            } else { output };
             self.audio = Some(output?);
         }
         Ok(())
@@ -541,7 +640,7 @@ impl Engine {
     #[cfg(windows)]
     fn change_output(&mut self, driver: Option<String>, manual: bool) {
         let previous_system = match &self.audio {
-            Some(Output::System { device, observed_default, .. }) => Some((device.clone(), observed_default.clone())),
+            Some(Output::System { device, .. }) => Some(device.clone()),
             _ => None,
         };
         self.detach_output();
@@ -553,20 +652,21 @@ impl Engine {
             Err(mut message) => {
                 self.audio = None;
                 let old = self.asio_driver.clone();
-                let previous = if let Some((device, observed_default)) = previous_system {
-                    Some(open_system_device(device, observed_default))
-                } else if manual && old != driver {
-                    Some(open_output(old.as_deref()))
-                } else {
-                    None
-                };
-                let restored = previous.is_some_and(|output| match self.open_at_position(output) {
-                    Ok(()) => true,
-                    Err(e) => { message = format!("{message}. Прежний выход недоступен: {e}"); false }
-                });
-                if !restored {
+                let restored_old = manual && old.is_some() && old != driver
+                    && self.open_at_position(open_output(old.as_deref())).is_ok();
+                if !restored_old && (self.loaded || !self.paused || old.is_none()) {
                     self.audio = None;
-                    self.paused = true;
+                    match self.open_at_position(open_system_output(if manual { previous_system } else { None })) {
+                        Ok(()) => {
+                            if manual { self.asio_driver = None; }
+                            message.push_str(". Используется системный выход");
+                        }
+                        Err(e) => {
+                            message = format!("{message}. Системный выход недоступен: {e}");
+                            self.audio = None;
+                            self.paused = true;
+                        }
+                    }
                 }
                 self.output_error(message);
             }
@@ -1436,6 +1536,23 @@ mod tests {
 
     #[cfg(all(windows, feature = "asio"))]
     #[test]
+    fn audio_wait_dispatches_windows_messages() {
+        use windows_sys::Win32::{Foundation::HWND, UI::WindowsAndMessaging::{KillTimer, SetTimer}};
+        thread_local! { static DISPATCHED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+        unsafe extern "system" fn on_timer(window: HWND, _: u32, id: usize, _: u32) {
+            unsafe { KillTimer(window, id); }
+            DISPATCHED.set(true);
+        }
+        let (tx, rx) = mpsc::channel();
+        let tx = AudioSender::from(tx);
+        let timer = unsafe { SetTimer(std::ptr::null_mut(), 0, 10, Some(on_timer)) };
+        assert_ne!(timer, 0);
+        assert!(matches!(tx.recv(&rx, Duration::from_millis(200)), Err(RecvTimeoutError::Timeout)));
+        assert!(DISPATCHED.get());
+    }
+
+    #[cfg(all(windows, feature = "asio"))]
+    #[test]
     fn missing_asio_driver_returns_an_error() {
         let name = "yamusic-rs test ASIO driver that cannot be registered under this name";
         let Err(error) = open_output(Some(name)) else {
@@ -1590,6 +1707,14 @@ mod tests {
         eprintln!("ASIO -> WASAPI {:?}, paused {paused} -> {}", start.elapsed(), engine.pos());
         assert!(engine.sh().audio_output_error.is_none());
         assert!(engine.asio_driver.is_none());
+        engine.asio_driver = Some("yamusic unplugged previous driver".into());
+        let (reply, result) = mpsc::channel();
+        engine.cmd(Cmd::Output(Some("yamusic unavailable new driver".into()), Box::new(move |active, error| {
+            reply.send((active, error)).unwrap();
+        })));
+        let (active, error) = result.recv().unwrap();
+        assert!(active.is_none() && error.is_some());
+        assert!(matches!(engine.audio, Some(Output::System { .. })));
         thread::sleep(Duration::from_millis(100));
         assert!((engine.pos() - paused).abs() < 0.05);
         assert!(Arc::ptr_eq(engine.current_bytes.as_ref().unwrap(), &bytes));
