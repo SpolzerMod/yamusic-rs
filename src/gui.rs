@@ -43,9 +43,39 @@ fn repeated_entity_clicks_settle_on_the_last_choice() {
     assert!(pending.desired && pending.confirmed);
 }
 
+fn merge_entity_likes(kind: &'static str, fresh: &mut std::collections::HashSet<String>,
+    saved: &HashMap<(&'static str, String), bool>, pending_likes: &mut HashMap<(&'static str, String), EntityLike>) {
+    for ((k, key), &confirmed) in saved {
+        if *k == kind {
+            if confirmed { fresh.insert(key.clone()); } else { fresh.remove(key); }
+        }
+    }
+    for ((k, id), pending) in pending_likes {
+        if *k == kind {
+            let key = if kind == "playlists" { format!("playlist:{id}") } else { id.clone() };
+            pending.confirmed = fresh.contains(&key);
+            if pending.desired { fresh.insert(key); } else { fresh.remove(&key); }
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn stale_snapshot_cannot_erase_confirmed_like_during_unlike() {
+    let id = ("albums", String::from("1"));
+    let saved = HashMap::from([(id.clone(), true)]);
+    let mut pending = HashMap::from([(id.clone(), EntityLike { confirmed: true, desired: false })]);
+    let mut snapshot = Default::default();
+    merge_entity_likes("albums", &mut snapshot, &saved, &mut pending);
+    assert!(snapshot.is_empty());
+    let like = pending.get_mut(&id).unwrap();
+    assert_eq!(like.complete(false, false), None);
+    assert!(like.desired);
+}
+
 struct State {
     entity_likes: HashMap<(&'static str, String), EntityLike>,
-    saved_entities: std::collections::HashSet<(&'static str, String)>,
+    saved_entities: HashMap<(&'static str, String), bool>,
     cfg: Config,
     dark: bool,
     uid: String,
@@ -2962,23 +2992,8 @@ impl Ctx {
     fn merge_entity_snapshot(&self, kind: &'static str, ids: Vec<String>) {
         let mut st = self.st.borrow_mut();
         let mut fresh: std::collections::HashSet<String> = ids.into_iter().collect();
-        let old = match kind {
-            "albums" => &st.liked_albums,
-            "playlists" => &st.liked_playlists,
-            _ => &st.liked_artists,
-        };
-        for (k, key) in &st.saved_entities {
-            if *k == kind {
-                if old.contains(key) { fresh.insert(key.clone()); } else { fresh.remove(key); }
-            }
-        }
-        for ((k, id), pending) in &mut st.entity_likes {
-            if *k == kind {
-                let key = if kind == "playlists" { format!("playlist:{id}") } else { id.clone() };
-                pending.confirmed = fresh.contains(&key);
-                if pending.desired { fresh.insert(key); } else { fresh.remove(&key); }
-            }
-        }
+        let State { saved_entities, entity_likes, .. } = &mut *st;
+        merge_entity_likes(kind, &mut fresh, saved_entities, entity_likes);
         let selected = match kind {
             "albums" => st.list_key.as_deref().and_then(|k| k.strip_prefix("album:")),
             "playlists" => st.list_key.as_deref().filter(|k| k.starts_with("playlist:")),
@@ -3026,7 +3041,7 @@ impl Ctx {
                 let mut st = c.st.borrow_mut();
                 if !st.net.as_ref().is_some_and(|active| Arc::ptr_eq(&active.toast, &net.toast)) { return; }
                 let request = (kind, id.clone());
-                if result.is_ok() { st.saved_entities.insert((kind, key.clone())); }
+                if result.is_ok() { st.saved_entities.insert((kind, key.clone()), sent); }
                 let Some(pending) = st.entity_likes.get_mut(&request) else { return };
                 let next = pending.complete(sent, result.is_ok());
                 let desired = pending.desired;
