@@ -11,6 +11,69 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::client::{token_allowed, ANDROID_CLIENT, API_BASE as BASE, MP3_SALT, SIGN_KEY};
 
+// Теги ID3 старый загрузчик заменял своими. Для сравнения берём весь звук после тега.
+pub(crate) fn saved_payload(file: &mut std::fs::File) -> std::io::Result<(u64, u64)> {
+    use std::io::{Read, Seek, SeekFrom};
+    file.rewind()?;
+    let mut head = [0; 10];
+    file.read_exact(&mut head)?;
+    let start = crate::tags::existing_id3_len(&head) as u64;
+    let size = file.metadata()?.len().checked_sub(start).filter(|len| *len > 0)
+        .ok_or_else(|| std::io::Error::other("нет аудиоданных"))?;
+    file.seek(SeekFrom::Start(start))?;
+    Ok((start, size))
+}
+
+pub(crate) fn same_saved_files(left: &mut std::fs::File, right: &mut std::fs::File) -> std::io::Result<bool> {
+    use std::io::Seek;
+    right.rewind()?;
+    let len = right.metadata()?.len();
+    same_saved_audio(left, right, Some(len), None)
+}
+
+fn same_saved_audio(local: &mut std::fs::File, remote: impl std::io::Read, length: Option<u64>, checksum: Option<&str>) -> std::io::Result<bool> {
+    use std::io::{Cursor, Read, Seek, SeekFrom};
+    let (start, size) = saved_payload(local)?;
+    let mut remote = remote;
+    let mut head = [0; 10];
+    remote.read_exact(&mut head)?;
+    let tag = crate::tags::existing_id3_len(&head) as u64;
+    if length.is_some_and(|total| total.checked_sub(tag) != Some(size)) { return Ok(false); }
+    let mut remote = Cursor::new(head).chain(remote);
+    let mut md5 = Md5::new();
+    if std::io::copy(&mut remote.by_ref().take(tag), &mut md5)? != tag { return Ok(false); }
+    if let Some(hash) = checksum.filter(|s| s.len() == 32 && s.bytes().all(|c| c.is_ascii_hexdigit())) {
+        // Некоторые CDN используют MD5 всего объекта как сильный ETag.
+        std::io::copy(local, &mut md5)?;
+        if hash.eq_ignore_ascii_case(&format!("{:x}", md5.finalize())) { return Ok(true); }
+        local.seek(SeekFrom::Start(start))?;
+    }
+    let mut a = [0; 16 * 1024];
+    let mut b = [0; 16 * 1024];
+    loop {
+        let n = local.read(&mut a)?;
+        if n == 0 { return Ok(remote.read(&mut b[..1])? == 0); }
+        remote.read_exact(&mut b[..n])?;
+        if a[..n] != b[..n] { return Ok(false); }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn legacy_audio_matches_after_tag_replacement() {
+    use std::io::Write;
+    let audio = vec![42; 100_000];
+    let mut remote = vec![b'I', b'D', b'3', 3, 0, 0, 0, 0, 0, 5, 1, 2, 3, 4, 5];
+    remote.extend(&audio);
+    let mut file = tempfile::tempfile().unwrap();
+    file.write_all(&audio).unwrap();
+    let etag = format!("{:x}", Md5::digest(&remote));
+    assert!(same_saved_audio(&mut file, &remote[..], Some(remote.len() as u64), None).unwrap());
+    assert!(same_saved_audio(&mut file, &remote[..15], Some(remote.len() as u64), Some(&etag)).unwrap());
+    remote[20_000] = 17;
+    assert!(!same_saved_audio(&mut file, &remote[..], None, None).unwrap());
+}
+
 pub const WAVE: &str = "user:onyourwave";
 
 pub type Res<T> = Result<T, String>;
@@ -1535,6 +1598,14 @@ let mp3 = || arr.iter().filter(|x| x.get("codec").and_then(|c| c.as_str()) == So
             .or_else(|| di.get("urls")?.get(0)?.as_str())
             .map(String::from)
             .ok_or_else(|| "нет url в downloadInfo".into())
+    }
+
+    pub(crate) fn matches_saved_audio(&self, url: &str, file: &mut std::fs::File) -> std::io::Result<bool> {
+        let response = self.http.get(url).send().and_then(|r| r.error_for_status()).map_err(std::io::Error::other)?;
+        let length = response.content_length();
+        let etag = response.headers().get(reqwest::header::ETAG).and_then(|h| h.to_str().ok())
+            .and_then(|v| v.strip_prefix('"')?.strip_suffix('"')).map(str::to_owned);
+        same_saved_audio(file, response, length, etag.as_deref())
     }
 
     /// Скачать файл потоком на диск, без чтения целиком в память. Ссылки уже подписаны — без токена.

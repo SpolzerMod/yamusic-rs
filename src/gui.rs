@@ -3045,7 +3045,8 @@ impl Ctx {
                 let dir = music_dir(&self.st.borrow().cfg);
                 self.toast(format!("Скачиваем «{}»", t.title));
                 std::thread::spawn(move || {
-                    let res = save_track(&api, &dir, &t);
+                    let names = legacy_names(std::slice::from_ref(&t));
+                    let res = save_track(&api, &dir, &t, &names);
                     net.say(match res {
                         Ok(p) => format!("Сохранено: {}", p.display()),
                         Err(e) => format!("Не удалось скачать: {e}"),
@@ -3613,12 +3614,9 @@ impl Ctx {
         std::thread::spawn(move || {
             let total = tracks.len();
             let (mut ok, mut failed) = (0, 0);
+            let names = legacy_names(&tracks);
             for (i, t) in tracks.iter().enumerate() {
-                if saved_already(&dir, t) {
-                    ok += 1;
-                    continue;
-                }
-                match save_track(&api, &dir, t) {
+                match save_track(&api, &dir, t, &names) {
                     Ok(_) => ok += 1,
                     Err(e) => {
                         failed += 1;
@@ -3657,6 +3655,37 @@ fn audio_ext(b: &[u8]) -> &'static str {
     }
 }
 
+fn legacy_stem(t: &Track) -> String {
+    file_name_max(&format!("{} — {}", t.artists, t.title), 120)
+}
+
+struct DownloadNames<'a> {
+    legacy: HashMap<String, Option<&'a str>>,
+    numbered: std::cell::OnceCell<std::io::Result<HashMap<String, std::collections::BTreeSet<u64>>>>,
+}
+
+fn numbered_downloads(dir: &std::path::Path) -> std::io::Result<HashMap<String, std::collections::BTreeSet<u64>>> {
+    let mut found = HashMap::new();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+        let Some((id, n)) = stem.strip_prefix("yamusic-").and_then(|s| s.rsplit_once('-')) else { continue };
+        if let Ok(n) = n.parse::<u64>() { found.entry(id.to_owned()).or_insert_with(std::collections::BTreeSet::new).insert(n); }
+    }
+    Ok(found)
+}
+
+fn legacy_names(tracks: &[Track]) -> DownloadNames<'_> {
+    let mut names = HashMap::new();
+    for track in tracks {
+        let id = Some(track.id.as_str());
+        names.entry(legacy_stem(track).to_lowercase()).and_modify(|known| {
+            if *known != id { *known = None; }
+        }).or_insert(id);
+    }
+    DownloadNames { legacy: names, numbered: Default::default() }
+}
+
 fn track_file_stem(t: &Track) -> String {
     use sha2::{Digest, Sha256};
     let id = if !t.id.is_empty() && t.id.len() <= 24 && t.id.bytes().all(|b| b.is_ascii_digit()) {
@@ -3664,7 +3693,7 @@ fn track_file_stem(t: &Track) -> String {
     } else {
         format!("{:x}", Sha256::digest(t.id.as_bytes()))[..24].to_owned()
     };
-    let name = file_name_max(&format!("{} — {}", t.artists, t.title), 120);
+    let name = legacy_stem(t);
     // Оставляем место для ID и расширения в пределах 255 байт файловой системы.
     let mut end = name.len().min(255 - ".tagged.part".len() - " []".len() - id.len());
     while !name.is_char_boundary(end) {
@@ -3674,19 +3703,97 @@ fn track_file_stem(t: &Track) -> String {
 }
 
 /// Трек уже скачан: готовый файл (не `.part`) с ненулевым размером.
-fn saved_already(dir: &std::path::Path, t: &Track) -> bool {
-    let stem = track_file_stem(t);
-    ["mp3", "m4a", "aac", "flac"]
-        .iter()
-        .any(|e| std::fs::metadata(dir.join(format!("{stem}.{e}"))).is_ok_and(|m| m.len() > 0))
+fn download_location(dir: &std::path::Path, t: &Track, names: &DownloadNames<'_>,
+    mut verify: impl FnMut(&mut std::fs::File) -> std::io::Result<bool>) -> std::io::Result<(String, Option<std::path::PathBuf>)> {
+    use std::io::ErrorKind;
+    let formats = ["mp3", "m4a", "aac", "flac"];
+    let legacy = legacy_stem(t);
+    let legacy_key = legacy.to_lowercase();
+    if names.legacy.get(&legacy_key) == Some(&Some(t.id.as_str())) {
+        for ext in formats {
+            let path = dir.join(format!("{legacy}.{ext}"));
+            if let Ok(mut file) = open_download(&path) {
+                if file.metadata()?.len() > 0 && verify(&mut file)? { return Ok((legacy, Some(path))); }
+            }
+        }
+    }
+    let base = track_file_stem(t);
+    let id = base.rsplit_once(" [").expect("имя содержит ID").1.trim_end_matches(']');
+    let mut free = None;
+    let index = names.numbered.get_or_init(|| numbered_downloads(dir)).as_ref()
+        .map_err(|e| std::io::Error::new(e.kind(), e.to_string()))?;
+    let existing = index.get(id);
+    let next = (1u64..).find(|n| existing.is_none_or(|set| !set.contains(n))).unwrap();
+    let candidates = std::iter::once(0).chain(existing.into_iter().flatten().copied());
+    for n in candidates.chain(std::iter::once(next)) {
+        let stem = if n == 0 { base.clone() } else { format!("yamusic-{id}-{n}") };
+        let reserved = names.legacy.contains_key(&stem.to_lowercase());
+        let mut occupied = false;
+        for ext in formats {
+            let path = dir.join(format!("{stem}.{ext}"));
+            match open_download(&path) {
+                Ok(mut file) => {
+                    if file.metadata()?.len() > 0 && verify(&mut file)? { return Ok((stem, Some(path))); }
+                    occupied = true;
+                }
+                Err(e) if e.kind() == ErrorKind::NotFound => {}
+                Err(e) if e.kind() == ErrorKind::InvalidInput => occupied = true,
+                Err(e) => return Err(e),
+            }
+        }
+        if !occupied && !reserved {
+            free.get_or_insert(stem);
+        }
+    }
+    free.map(|stem| (stem, None)).ok_or_else(|| ErrorKind::AlreadyExists.into())
 }
 
-/// Скачать трек: сначала в `.part`, теги — в mp3, и только после этого переименовать в
-/// готовое имя. Обрыв оставит лишь `.part`, который следующая попытка перезапишет.
-fn save_track(api: &Api, dir: &std::path::Path, t: &Track) -> Result<std::path::PathBuf, String> {
+fn confirmed_legacy(file: &mut std::fs::File, id: &str, cache: &std::path::Path, verify: impl FnOnce(&mut std::fs::File) -> std::io::Result<bool>) -> std::io::Result<bool> {
+    use sha2::{Digest, Sha256};
+    if crate::api::saved_payload(file).is_err() { return Ok(false); }
+    let mut hash = Sha256::new();
+    std::io::copy(file, &mut hash)?;
+    let receipt = cache.join(format!("{:x}-{:x}", Sha256::digest(id.as_bytes()), hash.finalize()));
+    if std::fs::symlink_metadata(&receipt).is_ok_and(|m| m.is_file()) { return Ok(true); }
+    if !verify(file)? { return Ok(false); }
+    if std::fs::create_dir_all(cache).is_ok() {
+        let _ = std::fs::File::create_new(receipt);
+    }
+    Ok(true)
+}
+
+fn open_download(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::io::{Error, ErrorKind};
+    let invalid = || Error::new(ErrorKind::InvalidInput, "Ожидался обычный файл");
+    if !std::fs::symlink_metadata(path)?.is_file() { return Err(invalid()); }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(target_os = "linux")] {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32);
+    }
+    #[cfg(windows)] {
+        use std::os::windows::fs::OpenOptionsExt;
+        opts.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = opts.open(path)?;
+    if !file.metadata()?.is_file() { return Err(invalid()); }
+    Ok(file)
+}
+
+/// Каждая загрузка готовит собственный файл и публикует его после записи тегов.
+fn save_track(api: &Api, dir: &std::path::Path, t: &Track, names: &DownloadNames<'_>) -> Result<std::path::PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let stem = track_file_stem(t);
-    let part = dir.join(format!("{stem}.part"));
+    let receipts = crate::config::dir().join("legacy-downloads");
+    let (stem, existing) = download_location(dir, t, names, |file| {
+        confirmed_legacy(file, &t.id, &receipts, |file| {
+            let url = api.stream_url(&t.id).map_err(std::io::Error::other)?;
+            api.matches_saved_audio(&url, file)
+        })
+    }).map_err(|e| e.to_string())?;
+    if let Some(path) = existing { return Ok(path); }
+    let scratch = tempfile::tempdir_in(dir).map_err(|e| e.to_string())?;
+    let part = scratch.path().join("audio.part");
     let mut last = String::new();
     for attempt in 0..3 {
         if attempt > 0 {
@@ -3701,55 +3808,58 @@ fn save_track(api: &Api, dir: &std::path::Path, t: &Track) -> Result<std::path::
             Err(e) => last = e,
         }
     }
-    if !last.is_empty() {
-        let _ = std::fs::remove_file(&part);
-        return Err(last);
+    if !last.is_empty() { return Err(last); }
+    let mut head = [0u8; 16];
+    {
+        use std::io::Read as _;
+        let mut f = std::fs::File::open(&part).map_err(|e| e.to_string())?;
+        let n = f.read(&mut head).map_err(|e| e.to_string())?;
+        if n < head.len() {
+            return Err("файл слишком короткий".into());
+        }
     }
-    let finish = || -> Result<std::path::PathBuf, String> {
-        let mut head = [0u8; 16];
+    let ext = audio_ext(&head);
+    let path = dir.join(format!("{stem}.{ext}"));
+    let completed = if ext == "mp3" {
+        let cover = t.cover_url(400).and_then(|u| api.fetch_bytes(&u).ok());
+        let tag = crate::tags::id3(&crate::tags::Tags {
+            title: &if t.version.is_empty() { t.title.clone() } else { format!("{} ({})", t.title, t.version) },
+            artist: &t.artists,
+            album: &t.album_title,
+            year: t.year,
+            track: t.position,
+            cover: cover.as_deref(),
+        });
+        let tagged = scratch.path().join("tagged.part");
         {
-            use std::io::Read as _;
-            let mut f = std::fs::File::open(&part).map_err(|e| e.to_string())?;
-            let n = f.read(&mut head).map_err(|e| e.to_string())?;
-            if n < head.len() {
-                return Err("файл слишком короткий".into());
-            }
+            use std::io::{Read as _, Seek as _, Write as _};
+            let mut src = std::fs::File::open(&part).map_err(|e| e.to_string())?;
+            let mut probe = vec![0u8; 10];
+            let _ = src.read(&mut probe);
+            let skip = crate::tags::existing_id3_len(&probe) as u64;
+            src.seek(std::io::SeekFrom::Start(skip)).map_err(|e| e.to_string())?;
+            let mut out = std::fs::File::create(&tagged).map_err(|e| e.to_string())?;
+            out.write_all(&tag).map_err(|e| e.to_string())?;
+            std::io::copy(&mut src, &mut out).map_err(|e| e.to_string())?;
+            out.sync_all().map_err(|e| e.to_string())?;
         }
-        let ext = audio_ext(&head);
-        let path = dir.join(format!("{stem}.{ext}"));
-        if ext == "mp3" {
-            let cover = t.cover_url(400).and_then(|u| api.fetch_bytes(&u).ok());
-            let tag = crate::tags::id3(&crate::tags::Tags {
-                title: &if t.version.is_empty() { t.title.clone() } else { format!("{} ({})", t.title, t.version) },
-                artist: &t.artists,
-                album: &t.album_title,
-                year: t.year,
-                track: t.position,
-                cover: cover.as_deref(),
-            });
-            let tagged = dir.join(format!("{stem}.tagged.part"));
-            {
-                use std::io::{Read as _, Seek as _, Write as _};
-                let mut src = std::fs::File::open(&part).map_err(|e| e.to_string())?;
-                let mut probe = vec![0u8; 10];
-                let _ = src.read(&mut probe);
-                let skip = crate::tags::existing_id3_len(&probe) as u64;
-                src.seek(std::io::SeekFrom::Start(skip)).map_err(|e| e.to_string())?;
-                let mut out = std::fs::File::create(&tagged).map_err(|e| e.to_string())?;
-                out.write_all(&tag).map_err(|e| e.to_string())?;
-                std::io::copy(&mut src, &mut out).map_err(|e| e.to_string())?;
-                out.sync_all().map_err(|e| e.to_string())?;
-            }
-            let _ = std::fs::remove_file(&part);
-            std::fs::rename(&tagged, &path).map_err(|e| e.to_string())?;
-        } else {
-            std::fs::rename(&part, &path).map_err(|e| e.to_string())?;
-        }
-        Ok(path)
+        tagged
+    } else {
+        part.clone()
     };
-    finish().inspect_err(|_| {
-        let _ = std::fs::remove_file(&part);
-    })
+    let mut file = open_download(&completed).map_err(|e| e.to_string())?;
+    let temp = tempfile::TempPath::try_from_path(completed).map_err(|e| e.to_string())?;
+    match temp.persist_noclobber(&path) {
+        Ok(()) => {}
+        Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let mut winner = open_download(&path).map_err(|e| e.to_string())?;
+            let same = crate::api::same_saved_files(&mut file, &mut winner).map_err(|e| e.to_string())?;
+            if !same { return Err("Выбранное имя уже занято другим файлом".into()); }
+        }
+        Err(e) => return Err(e.error.to_string()),
+    }
+    let _ = confirmed_legacy(&mut file, &t.id, &receipts, |_| Ok(true));
+    Ok(path)
 }
 
 /// Колбэки новых экранов: поиск, исполнитель, полноэкранный плеер, меню, настройки звука.
@@ -4112,4 +4222,79 @@ fn downloads_with_same_title_keep_both_recordings() {
     assert_ne!(track_file_stem(&first), track_file_stem(&second));
     second.title = "я".repeat(140);
     assert!(format!("{}.tagged.part", track_file_stem(&second)).len() <= 255);
+}
+
+#[cfg(test)]
+#[test]
+fn legacy_download_rejects_names_shared_by_different_ids() {
+    let mut t = crate::api::parse_track(&serde_json::json!({"id":12,"title":"Песня","artists":[{"id":1,"name":"Группа"}]})).unwrap();
+    let mut tracks = vec![t.clone(), t.clone()];
+    assert_eq!(legacy_names(&tracks).legacy["группа — песня"], Some("12"));
+    t.id = "13".into();
+    tracks.push(t);
+    assert_eq!(legacy_names(&tracks).legacy["группа — песня"], None);
+}
+
+#[cfg(test)]
+#[test]
+fn legacy_receipt_is_scoped_to_track_and_complete_payload() {
+    use std::io::{Seek, Write};
+    let cache = tempfile::tempdir().unwrap();
+    let mut file = tempfile::tempfile().unwrap();
+    file.write_all(b"fLaC-long-enough-for-a-header").unwrap();
+    assert!(confirmed_legacy(&mut file, "12", cache.path(), |_| Ok(true)).unwrap());
+    assert!(confirmed_legacy(&mut file, "12", cache.path(), |_| panic!("unnecessary network request")).unwrap());
+    assert!(!confirmed_legacy(&mut file, "13", cache.path(), |_| Ok(false)).unwrap());
+    file.seek(std::io::SeekFrom::End(-1)).unwrap();
+    file.write_all(b"x").unwrap();
+    assert!(!confirmed_legacy(&mut file, "12", cache.path(), |_| Ok(false)).unwrap());
+}
+
+#[cfg(test)]
+#[test]
+fn colliding_legacy_name_does_not_occupy_another_tracks_id() {
+    use std::io::{Read, Seek};
+    let first = crate::api::parse_track(&serde_json::json!({"id":12,"title":"Песня","artists":[{"id":1,"name":"Группа"}]})).unwrap();
+    let mut second = first.clone();
+    second.id = "13".into();
+    second.title += " [12]";
+    let tracks = [first, second];
+    let names = legacy_names(&tracks);
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("Группа — Песня [12].mp3");
+    std::fs::write(&path, b"ID3 second track 13").unwrap();
+    let (stem, existing) = download_location(folder.path(), &tracks[0], &names, |_| Ok(false)).unwrap();
+    assert!(existing.is_none());
+    assert_ne!(stem, track_file_stem(&tracks[0]));
+    let (_, existing) = download_location(folder.path(), &tracks[1], &names, |file| {
+        file.rewind().unwrap();
+        let mut data = Vec::new();
+        file.read_to_end(&mut data).unwrap();
+        Ok(data == b"ID3 second track 13")
+    }).unwrap();
+    assert_eq!(existing, Some(path));
+}
+
+#[cfg(test)]
+#[test]
+fn reuse_numbered_download_after_earlier_collision_disappears() {
+    let t = crate::api::parse_track(&serde_json::json!({"id": 12, "title": "Song"})).unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let names = legacy_names(std::slice::from_ref(&t));
+    let expected = folder.path().join("yamusic-12-2.mp3");
+    std::fs::write(&expected, b"confirmed existing audio").unwrap();
+    let (_, existing) = download_location(folder.path(), &t, &names, |_| Ok(true)).unwrap();
+    assert_eq!(existing, Some(expected));
+}
+
+
+#[cfg(test)]
+#[test]
+fn failed_legacy_verification_aborts_name_selection() {
+    let t = crate::api::parse_track(&serde_json::json!({"id":12, "title":"Song"})).unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let names = legacy_names(std::slice::from_ref(&t));
+    std::fs::write(folder.path().join(format!("{}.mp3", legacy_stem(&t))), b"previous download").unwrap();
+    let error = download_location(folder.path(), &t, &names, |_| Err(std::io::ErrorKind::TimedOut.into())).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
 }
