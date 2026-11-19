@@ -200,10 +200,44 @@ impl Ctx {
         self.st.borrow_mut().toast_timer = Some(t);
     }
 
+    fn sync_like_rows(&self, app: &App<'_>) {
+        let changed = self.player.take_changed_likes();
+        if changed.is_empty() { return; }
+        let update = |t: &mut TrackItem| {
+            if !changed.contains(t.track_id.as_str()) { return false; }
+            let liked = self.player.is_liked(t.track_id.as_str());
+            let different = t.liked != liked;
+            t.liked = liked;
+            different
+        };
+        let rows = |model: ModelRc<TrackItem>| {
+            for (i, mut item) in model.iter().enumerate() {
+                if update(&mut item) { model.set_row_data(i, item); }
+            }
+        };
+        let chart = |model: ModelRc<ChartRow>| {
+            for (i, mut row) in model.iter().enumerate() {
+                if update(&mut row.item) { model.set_row_data(i, row); }
+            }
+        };
+        for model in [app.get_tracks(), app.get_likes_preview(), app.get_queue(), app.get_sr_tracks(), app.get_ar_popular()] {
+            rows(model);
+        }
+        chart(app.get_search_chart());
+        chart(app.get_chart_rows());
+        for block in app.get_landing_blocks().iter() {
+            rows(block.tracks);
+            chart(block.chart);
+        }
+    }
+
     fn sync_player(self: &Rc<Self>) {
         let s = self.player.state();
         let ui = self.ui();
         let app = ui.global::<App>();
+
+        self.sync_like_rows(&app);
+        if let Some(message) = self.player.take_like_error() { self.toast(message); }
 
         if let Status::Failed(e) = &s.status {
             // Токен отозван или истёк — обратно на экран входа.
@@ -760,6 +794,7 @@ impl Ctx {
 
     fn track_item(&self, t: &Track) -> TrackItem {
         TrackItem {
+            track_id: t.id.clone().into(),
             title: t.title.clone().into(),
             version: t.version.clone().into(),
             artists: t.artists.clone().into(),

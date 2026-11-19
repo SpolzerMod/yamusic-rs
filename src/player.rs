@@ -67,6 +67,8 @@ pub enum Repeat {
 
 #[derive(Clone, Default)]
 pub struct Shared {
+    pub(crate) like_error: Option<String>,
+    changed_likes: HashSet<String>,
     pub status: Status,
     pub uid: String,
     pub login: String,
@@ -115,6 +117,7 @@ enum Msg {
     Batch { res: Res<Batch>, replace: bool, gen: u64 },
     Audio { gen: u64, res: Res<Vec<u8>> },
     Prefetch { id: String, res: Res<Vec<u8>> },
+    LikeSaved { id: String, seq: u64, liked: bool, result: Res<()> },
     Error(String),
 }
 
@@ -150,6 +153,14 @@ impl Player {
 
     pub fn state(&self) -> Shared {
         self.shared.lock().unwrap().clone()
+    }
+
+    pub(crate) fn take_like_error(&self) -> Option<String> {
+        self.shared.lock().unwrap().like_error.take()
+    }
+
+    pub(crate) fn take_changed_likes(&self) -> HashSet<String> {
+        std::mem::take(&mut self.shared.lock().unwrap().changed_likes)
     }
 
     pub fn is_liked(&self, id: &str) -> bool {
@@ -217,9 +228,18 @@ struct ListPlay {
     after: After,
 }
 
+struct PendingLike {
+    first: u64,
+    latest: u64,
+    confirmed: bool,
+}
+
 struct Engine {
     tx: Sender<Msg>,
     bg: Sender<Job>,
+    like_seq: u64,
+    local_likes: HashSet<String>,
+    pending_likes: std::collections::HashMap<String, PendingLike>,
     shared: Arc<Mutex<Shared>>,
     likes: Likes,
     notify: Notify,
@@ -277,6 +297,9 @@ impl Engine {
         Engine {
             tx,
             bg,
+            like_seq: 0,
+            local_likes: HashSet::new(),
+            pending_likes: Default::default(),
             shared,
             likes,
             notify,
@@ -439,6 +462,8 @@ impl Engine {
     }
 
     fn reset(&mut self) {
+        self.pending_likes.clear();
+        self.local_likes.clear();
         self.stop_audio();
         self.gen += 1;
         self.clear_queue();
@@ -546,7 +571,7 @@ impl Engine {
                 }
             },
             Msg::Likes(res) => match res {
-                Ok(ids) => self.likes.lock().unwrap().extend(ids),
+                Ok(ids) => self.merge_likes(ids),
                 Err(e) => log(format!("likes: {e}")),
             },
             Msg::Batch { res, replace, gen } => {
@@ -584,6 +609,28 @@ impl Engine {
                             self.start_download();
                         }
                     }
+                }
+            }
+            Msg::LikeSaved { id, seq, liked, result } => {
+                let Some(pending) = self.pending_likes.get_mut(&id) else { return };
+                if seq < pending.first { return; }
+                if result.is_ok() {
+                    pending.confirmed = liked;
+                    self.local_likes.insert(id.clone());
+                }
+                if seq == pending.latest {
+                    let confirmed = pending.confirmed;
+                    self.pending_likes.remove(&id);
+                    {
+                        let mut likes = self.likes.lock().unwrap();
+                        if confirmed { likes.insert(id.clone()); } else { likes.remove(&id); }
+                    }
+                    self.sh().changed_likes.insert(id);
+                }
+                if let Err(e) = result {
+                    let message = format!("Лайк не сохранился: {e}");
+                    log(&message);
+                    self.sh().like_error = Some(message);
                 }
             }
             Msg::Error(e) => self.error(e),
@@ -741,6 +788,18 @@ impl Engine {
         }
     }
 
+    fn merge_likes(&mut self, ids: Vec<String>) {
+        let mut likes = self.likes.lock().unwrap();
+        for id in ids {
+            if self.local_likes.contains(&id) { continue; }
+            if let Some(pending) = self.pending_likes.get_mut(&id) {
+                pending.confirmed = true;
+            } else if likes.insert(id.clone()) {
+                self.shared.lock().unwrap().changed_likes.insert(id);
+            }
+        }
+    }
+
     fn toggle_like(&mut self, t: Track) {
         let Some(api) = self.api.clone() else { return };
         let remove = {
@@ -751,11 +810,16 @@ impl Engine {
             }
             had
         };
-        let (uid, id, tx) = (self.uid.clone(), t.full_id(), self.tx.clone());
+        self.sh().changed_likes.insert(t.id.clone());
+        self.like_seq += 1;
+        let seq = self.like_seq;
+        self.pending_likes.entry(t.id.clone()).or_insert(PendingLike {
+            first: seq, latest: seq, confirmed: remove,
+        }).latest = seq;
+        let (uid, id, full_id, tx) = (self.uid.clone(), t.id.clone(), t.full_id(), self.tx.clone());
         let _ = self.bg.send(Box::new(move || {
-            if let Err(e) = api.like(&uid, &id, remove) {
-                let _ = tx.send(Msg::Error(format!("Лайк не сохранился: {e}")));
-            }
+            let result = api.like(&uid, &full_id, remove);
+            let _ = tx.send(Msg::LikeSaved { id, seq, liked: !remove, result });
         }));
         // Лайк трека из волны оригинал сообщает и самой волне, чтобы она его учла.
         if self.session.is_empty() {
@@ -837,7 +901,7 @@ impl Engine {
                 self.save_wave();
             }
         }
-        self.likes.lock().unwrap().extend(b.liked);
+        self.merge_likes(b.liked);
         if replace {
             self.queue.clear();
             self.prefetch = None;
@@ -1216,4 +1280,20 @@ mod tests {
         let samples = dec.take(44100).count();
         assert!(samples > 1000);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn last_failed_like_restores_previous_confirmation() {
+    let mut engine = Engine::new(mpsc::channel().0, Default::default(), Default::default(), Arc::new(|| {}), Default::default());
+    engine.pending_likes.insert("1".into(), PendingLike { first: 2, latest: 3, confirmed: false });
+    engine.handle(Msg::LikeSaved { id: "1".into(), seq: 1, liked: false, result: Ok(()) });
+    engine.handle(Msg::LikeSaved { id: "1".into(), seq: 2, liked: true, result: Ok(()) });
+    assert!(!engine.likes.lock().unwrap().contains("1"));
+    engine.handle(Msg::LikeSaved { id: "1".into(), seq: 3, liked: false, result: Err("offline".into()) });
+    assert!(engine.likes.lock().unwrap().contains("1"));
+    engine.pending_likes.insert("2".into(), PendingLike { first: 4, latest: 4, confirmed: false });
+    engine.merge_likes(vec!["2".into()]);
+    engine.handle(Msg::LikeSaved { id: "2".into(), seq: 4, liked: true, result: Err("offline".into()) });
+    assert!(engine.likes.lock().unwrap().contains("2"));
 }
