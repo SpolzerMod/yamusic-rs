@@ -3511,10 +3511,12 @@ impl Ctx {
     fn play_trailer(self: &Rc<Self>, path: String) {
         let Some(net) = self.st.borrow().net.clone() else { return };
         let api = net.api.clone();
+        let request = self.player.begin_source_request();
         std::thread::spawn(move || {
             let res = api.trailer(&path);
             let _ = slint::invoke_from_event_loop(move || {
                 with_ctx(|c| match res {
+                    _ if !c.player.is_current_request(request) => {}
                     Ok((title, tracks)) => {
                         c.st.borrow_mut().trailer = Some(Trailer {
                             ids: tracks.iter().map(|t| t.id.clone()).collect(),
@@ -3524,7 +3526,7 @@ impl Ctx {
                             done: None,
                             began: false,
                         });
-                        c.player.send(Cmd::PlayList {
+                        c.player.send_for_request(request, Cmd::PlayList {
                             source: Source::List { kind: ListKind::Tracks, id: format!("trailer:{path}"), title },
                             tracks,
                             start: 0,

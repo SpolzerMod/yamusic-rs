@@ -228,17 +228,19 @@ impl Net {
     /// «Слушать» у исполнителя: все его треки по кругу, начиная с `start`.
     pub fn play_artist(&self, player: &Player, id: &str, name: &str, start: Option<String>) {
         let (api, player, id, name, me) = (self.api.clone(), player.clone(), id.to_string(), name.to_string(), self.clone());
+        let request = player.begin_source_request();
         std::thread::spawn(move || match api.artist_tracks(&id) {
             Ok(tracks) => {
                 let start = start.and_then(|s| tracks.iter().position(|t| t.id == s)).unwrap_or(0);
-                player.send(Cmd::PlayList {
+                player.send_for_request(request, Cmd::PlayList {
                     source: Source::List { kind: ListKind::Artist, id, title: name },
                     tracks,
                     start,
                     after: After::Loop,
                 });
             }
-            Err(e) => me.say(format!("Не удалось загрузить треки исполнителя: {e}")),
+            Err(e) if player.is_current_request(request) => me.say(format!("Не удалось загрузить треки исполнителя: {e}")),
+            Err(_) => {}
         });
     }
 

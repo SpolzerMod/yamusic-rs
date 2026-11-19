@@ -128,6 +128,7 @@ pub struct Player {
     shared: Arc<Mutex<Shared>>,
     likes: Likes,
     pub eq: Arc<EqParams>,
+    source_request: Arc<Mutex<u64>>,
 }
 
 impl Player {
@@ -136,7 +137,7 @@ impl Player {
         let shared = Arc::new(Mutex::new(Shared { volume: 0.6, ..Default::default() }));
         let likes: Likes = Default::default();
         let eq: Arc<EqParams> = Default::default();
-        let p = Player { tx: tx.clone(), shared: shared.clone(), likes: likes.clone(), eq: eq.clone() };
+        let p = Player { tx: tx.clone(), shared: shared.clone(), likes: likes.clone(), eq: eq.clone(), source_request: Default::default() };
         thread::Builder::new()
             .name("audio".into())
             .spawn(move || Engine::new(tx, shared, likes, notify, eq).run(rx))
@@ -145,7 +146,28 @@ impl Player {
     }
 
     pub fn send(&self, c: Cmd) {
-        let _ = self.tx.send(Msg::Cmd(c));
+        if matches!(c, Cmd::Login(_) | Cmd::Logout | Cmd::Jump(_) | Cmd::Next | Cmd::Prev | Cmd::Wave(_) | Cmd::PlayList { .. }) {
+            let mut request = self.source_request.lock().unwrap();
+            *request = request.wrapping_add(1);
+            let _ = self.tx.send(Msg::Cmd(c));
+        } else {
+            let _ = self.tx.send(Msg::Cmd(c));
+        }
+    }
+
+    pub(crate) fn begin_source_request(&self) -> u64 {
+        let mut request = self.source_request.lock().unwrap();
+        *request = request.wrapping_add(1);
+        *request
+    }
+
+    pub(crate) fn is_current_request(&self, request: u64) -> bool {
+        *self.source_request.lock().unwrap() == request
+    }
+
+    pub(crate) fn send_for_request(&self, request: u64, command: Cmd) -> bool {
+        let current = self.source_request.lock().unwrap();
+        *current == request && self.tx.send(Msg::Cmd(command)).is_ok()
     }
 
     pub fn state(&self) -> Shared {
@@ -1216,4 +1238,18 @@ mod tests {
         let samples = dec.take(44100).count();
         assert!(samples > 1000);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn later_source_command_expires_artist_request() {
+    let (tx, rx) = mpsc::channel();
+    let player = Player { tx, shared: Default::default(), likes: Default::default(), eq: Default::default(), source_request: Default::default() };
+    let first = player.begin_source_request();
+    let second = player.begin_source_request();
+    assert!(!player.send_for_request(first, Cmd::Wave(Source::Wave)));
+    player.send(Cmd::Logout);
+    assert!(!player.send_for_request(second, Cmd::Wave(Source::Wave)));
+    assert!(matches!(rx.try_recv(), Ok(Msg::Cmd(Cmd::Logout))));
+    assert!(rx.try_recv().is_err());
 }
