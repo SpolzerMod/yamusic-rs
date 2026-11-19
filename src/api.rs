@@ -246,6 +246,44 @@ fn join_names(a: &[Named]) -> String {
     a.iter().map(|n| n.name.as_str()).collect::<Vec<_>>().join(", ")
 }
 
+fn artist_track_pages(mut fetch: impl FnMut(usize) -> Res<Value>) -> Res<Vec<Track>> {
+    let mut out = Vec::new();
+    let mut pages = std::collections::HashSet::new();
+    let mut seen = 0;
+    for page in 0.. {
+        let response = fetch(page)?;
+        let tracks = response.get("tracks").and_then(Value::as_array).ok_or("нет списка треков исполнителя")?;
+        // Некоторые ответы повторяют несколько страниц по кругу.
+        let ids: Vec<_> = tracks.iter().map(|t| s(t.get("id"))).collect();
+        if tracks.is_empty() || !pages.insert(ids) {
+            break;
+        }
+        seen += tracks.len();
+        out.extend(tracks.iter().filter_map(parse_track));
+        let total = response.pointer("/pager/total").and_then(Value::as_u64);
+        if total.filter(|n| *n > 0).map_or(tracks.len() < 100, |n| seen >= n as usize) {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+#[test]
+fn artist_list_counts_unavailable_entries_and_reads_past_ten_pages() {
+    let tracks = artist_track_pages(|page| {
+        assert!(page <= 10);
+        Ok(json!({"pager":{"total": 11}, "tracks":[{"id":page, "available": page > 0, "title":"A"}]}))
+    }).unwrap();
+    assert_eq!(tracks.len(), 10);
+    assert_eq!(tracks.last().unwrap().id, "10");
+    let cyclic = artist_track_pages(|page| {
+        assert!(page < 3);
+        Ok(json!({"tracks":vec![json!({"id":page % 2,"title":"A"}); 100]}))
+    }).unwrap();
+    assert_eq!(cyclic.len(), 200);
+}
+
 pub(crate) fn parse_track(v: &Value) -> Option<Track> {
     if v.get("available").and_then(|x| x.as_bool()) == Some(false) {
         return None;
@@ -1313,19 +1351,9 @@ impl Api {
     }
 
     pub fn artist_tracks(&self, id: &str) -> Res<Vec<Track>> {
-        let mut out = Vec::new();
-        for page in 0..10 {
-            let p = page.to_string();
-            let v = self.get(&format!("/artists/{id}/tracks"), &[("page", &p), ("page-size", "100")])?;
-            let got: Vec<Track> = v.get("tracks").and_then(|t| t.as_array()).map(|a| a.iter().filter_map(parse_track).collect()).unwrap_or_default();
-            let total = v.pointer("/pager/total").and_then(|t| t.as_u64()).unwrap_or(0) as usize;
-            let empty = got.is_empty();
-            out.extend(got);
-            if empty || out.len() >= total {
-                break;
-            }
-        }
-        Ok(out)
+        artist_track_pages(|page| {
+            self.get(&format!("/artists/{id}/tracks"), &[("page", &page.to_string()), ("page-size", "100")])
+        })
     }
 
     pub fn album(&self, id: &str) -> Res<(Album, Vec<Track>)> {
