@@ -9,23 +9,28 @@ fn main() {
         slint_build::CompilerConfiguration::new().with_style("fluent".into()),
     )
     .unwrap();
-    #[cfg(windows)]
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && (cfg!(windows) || std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc"))
+    {
         resources::embed();
     }
 }
 
 /// Ресурсы exe: описание (его показывают диспетчер задач и свойства файла) и значок из
-/// `icons/app.ico`. Без rc.exe exe собирается без ресурсов.
-#[cfg(windows)]
+/// `icons/app.ico`. Для кросс-сборки MSVC используется llvm-rc.
 mod resources {
     use super::APP_NAME;
     use std::path::{Path, PathBuf};
 
     pub fn embed() {
-        let Some(rc) = find_rc() else {
-            println!("cargo:warning=rc.exe не найден, exe без значка и описания");
-            return;
+        let (compiler, flags): (PathBuf, &[&str]) = if cfg!(windows) {
+            let Some(rc) = find_rc() else {
+                println!("cargo:warning=rc.exe не найден, exe без значка и описания");
+                return;
+            };
+            (rc, &["/nologo"])
+        } else {
+            ("llvm-rc".into(), &["/no-preprocess", "/C", "65001"])
         };
         let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
         let icon = Path::new(env!("CARGO_MANIFEST_DIR")).join("icons").join("app.ico");
@@ -35,9 +40,10 @@ mod resources {
         std::fs::write(out.join("app.rc"), script).unwrap();
 
         let res = out.join("app.res");
-        let ok = std::process::Command::new(rc)
+        let ok = std::process::Command::new(&compiler)
             .current_dir(&out)
-            .args(["/nologo", "/fo"])
+            .args(flags)
+            .arg("/fo")
             .arg(&res)
             .arg("app.rc")
             .status()
@@ -45,7 +51,7 @@ mod resources {
         if ok {
             println!("cargo:rustc-link-arg-bins={}", res.display());
         } else {
-            println!("cargo:warning=rc.exe завершился с ошибкой, exe без значка и описания");
+            println!("cargo:warning={} не смог собрать ресурсы, exe без значка и описания", compiler.display());
         }
     }
 
