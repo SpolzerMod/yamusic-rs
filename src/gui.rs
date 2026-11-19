@@ -98,6 +98,7 @@ struct Ctx {
     /// Лёгкий режим работы: без анимаций, кэши меньше.
     lite: Cell<bool>,
     player: Player,
+    volume_save_at: Cell<Option<Instant>>,
     discord: Arc<crate::discord::Discord>,
     images: Images,
     tracks: Rc<VecModel<TrackItem>>,
@@ -117,6 +118,27 @@ fn with_ctx(f: impl FnOnce(&Rc<Ctx>)) {
 
 fn rgb(c: [u8; 3]) -> Color {
     Color::from_rgb_u8(c[0], c[1], c[2])
+}
+
+fn volume_save_due(deadline: &Cell<Option<Instant>>, now: Instant) -> bool {
+    if deadline.get().is_some_and(|at| now >= at) {
+        deadline.set(None);
+        true
+    } else {
+        false
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn slider_writes_once_after_the_last_change() {
+    let start = Instant::now();
+    let end = start + Duration::from_millis(300);
+    let deadline = Cell::new(Some(end));
+    deadline.set(Some(end + Duration::from_millis(30)));
+    assert!(!volume_save_due(&deadline, end));
+    assert!(volume_save_due(&deadline, end + Duration::from_millis(30)));
+    assert!(!volume_save_due(&deadline, end + Duration::from_secs(1)));
 }
 
 fn mmss(secs: f32) -> String {
@@ -201,6 +223,9 @@ impl Ctx {
     }
 
     fn sync_player(self: &Rc<Self>) {
+        if volume_save_due(&self.volume_save_at, Instant::now()) {
+            self.st.borrow().cfg.save();
+        }
         let s = self.player.state();
         let ui = self.ui();
         let app = ui.global::<App>();
@@ -1483,6 +1508,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         ui: ui.as_weak(),
         lite: Cell::new(lite),
         player: player.clone(),
+        volume_save_at: Cell::new(None),
         discord,
         images: Images::new(lite),
         tracks,
@@ -1589,9 +1615,8 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     app.on_set_volume(move |v| {
         p.send(Cmd::Volume(v));
         with_ctx(|c| {
-            let mut st = c.st.borrow_mut();
-            st.cfg.volume = v;
-            st.cfg.save();
+            c.st.borrow_mut().cfg.volume = v;
+            c.volume_save_at.set(Some(Instant::now() + Duration::from_millis(300)));
         });
     });
     app.on_format_time(|s| mmss(s).into());
@@ -1880,7 +1905,11 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     if !start_hidden {
         reveal(&ui);
     }
-    slint::run_event_loop_until_quit()?;
+    let result = slint::run_event_loop_until_quit();
+    if ctx.volume_save_at.take().is_some() {
+        ctx.st.borrow().cfg.save();
+    }
+    result?;
     sys::cleanup();
     // Фоновые потоки (аудио, сеть, обложки) не ждём: иначе процесс может остаться
     // без окна и держать мьютекс, и следующий запуск молча закроется.
