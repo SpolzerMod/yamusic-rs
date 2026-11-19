@@ -1905,7 +1905,6 @@ fn install_mpris(ui: &AppWindow, player: &Player) {
                 Event::Play | Event::Pause => {}
                 Event::Next => p.send(Cmd::Next),
                 Event::Prev => p.send(Cmd::Prev),
-                Event::Seek(sec) => p.send(Cmd::Seek(sec)),
                 Event::SeekBy(sec) => p.send(Cmd::Seek((s.position + sec).max(0.0))),
                 Event::Volume(v) => app.invoke_set_volume(v),
                 Event::Raise => reveal(&ui),

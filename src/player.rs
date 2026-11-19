@@ -93,6 +93,8 @@ pub enum Cmd {
     Next,
     Prev,
     Seek(f32),
+    #[cfg(target_os = "linux")]
+    SeekTrack(mpris_server::TrackId, i64),
     Volume(f32),
     LikeTrack(Track),
     Dislike,
@@ -639,6 +641,12 @@ impl Engine {
                 }
             }
             Cmd::Prev => self.prev(),
+            #[cfg(target_os = "linux")]
+            Cmd::SeekTrack(id, micros) => {
+                if self.current.as_ref().is_some_and(|t| crate::mpris::can_set_position(t, &id, micros)) {
+                    self.cmd(Cmd::Seek(micros as f32 / 1_000_000.0));
+                }
+            }
             Cmd::Seek(sec) => {
                 if self.loaded {
                     if let Some(s) = self.sink() {
