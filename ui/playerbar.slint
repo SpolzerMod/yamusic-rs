@@ -4,6 +4,7 @@ import { Theme } from "theme.slint";
 import { Icons, Icon, Cover, ArtistLinks, ExplicitMark } from "widgets.slint";
 import { App } from "state.slint";
 import { VolumePopup } from "popups.slint";
+import { SyncLyrics } from "fullscreen.slint";
 
 component BarButton inherits Rectangle {
     in property <image> icon;
@@ -260,14 +261,103 @@ export component PlayerBar inherits Rectangle {
     }
 }
 
-// Мини-плеер: окно ужато до плашки поверх всех окон. Тянется за любое место,
-// двойной клик возвращает обычное окно.
+component MiniTimeline inherits Rectangle {
+    in property <float> scale: 1;
+    property <length> unit: 1px * scale;
+    property <float> progress: App.duration > 0 ? max(0, min(1, App.position / App.duration)) : 0;
+    property <float> pointer-progress: max(0, min(1, seek.mouse-x / seek.width));
+    property <float> shown: seek.pressed ? pointer-progress : progress;
+
+    track := Rectangle {
+        x: 5 * unit;
+        y: 9 * unit;
+        width: parent.width - 10 * unit;
+        height: 4 * unit;
+        border-radius: 2 * unit;
+        background: #ffffff33;
+        Rectangle {
+            x: 0;
+            width: parent.width * root.shown;
+            height: parent.height;
+            border-radius: 2px;
+            background: Theme.controls-color-primary-default-enabled;
+        }
+        Rectangle {
+            x: parent.width * root.shown - 5 * unit;
+            y: -3 * unit;
+            width: 10 * unit;
+            height: self.width;
+            border-radius: self.width / 2;
+            background: Theme.controls-color-primary-default-enabled;
+        }
+    }
+    seek := TouchArea {
+        x: track.x;
+        y: 0;
+        width: track.width;
+        height: 22 * unit;
+        mouse-cursor: MouseCursor.pointer;
+        pointer-event(e) => {
+            if e.button == PointerEventButton.left && e.kind == PointerEventKind.up {
+                App.seek(root.pointer-progress * App.duration);
+            }
+        }
+    }
+    Text {
+        x: 0;
+        y: 22 * unit;
+        text: App.format-time(root.shown * App.duration);
+        font-size: Theme.font-size-label-xs * scale;
+        color: #ffffffb3;
+    }
+    Text {
+        x: parent.width - self.width;
+        y: 22 * unit;
+        text: App.format-time(App.duration);
+        font-size: Theme.font-size-label-xs * scale;
+        color: #ffffffb3;
+    }
+}
+
+// В низком окне элементы стоят в ряд, в высоком — под большой обложкой.
 export component MiniPlayer inherits Rectangle {
     property <bool> on: App.has-track;
+    property <bool> tall: self.height >= 144px;
+    property <bool> inline-timeline: !tall && self.width >= 620px;
+    property <bool> show-timeline: (tall || inline-timeline) && on && App.duration > 0;
+    property <bool> large-art: self.height >= 280px && on;
+    property <bool> lyrics-room: self.height >= 200px;
+    property <bool> lyrics-view: lyrics-room && on && App.mini-lyrics;
+    property <bool> centered-controls: large-art || lyrics-view;
+    property <bool> cover-layout: large-art && !lyrics-view;
+    property <float> scale: centered-controls ? max(1, min(1.8, min(self.width / 520px, self.height / 620px))) : 1;
+    property <length> unit: 1px * scale;
+    property <length> row-top: tall ? 28 * unit : 8px;
+    property <length> content-bottom: self.height - (show-timeline && tall ? 56 * unit : 8px);
+    property <length> row-center: (row-top + content-bottom) / 2;
+    property <length> controls-x: centered-controls ? (self.width - 120 * unit) / 2 : self.width - 136px;
+    property <length> controls-y: cover-layout ? title-y + 50 * unit
+        : lyrics-view ? content-bottom - 44 * unit : row-center - 20px;
+
+    // Обложка, подпись, управление и шкала центрируются одной колонкой.
+    property <length> art-space: (cover-layout ? self.height - (show-timeline ? 170 : 116) * unit : content-bottom) - row-top;
+    property <length> cover-size: cover-layout ? min(680px, min(art-space, min(self.width * 0.8, self.height * 0.62)))
+        : min(art-space, min(88px, self.width / 5));
+    property <length> cover-y: row-top + (art-space - cover-size) / 2;
+    property <length> title-y: cover-layout ? cover-y + cover-size + 14 * unit : row-center - 22px;
+    property <length> volume-x: centered-controls ? controls-x + 130 * unit : self.width - 172px;
+    property <length> volume-y: centered-controls ? controls-y + 8 * unit : 5px;
+    property <length> timeline-width: inline-timeline ? min(260px, self.width * 0.32)
+        : min(self.width - 32 * unit, 560 * unit);
+    property <length> timeline-x: inline-timeline ? controls-x - 16px - timeline-width : (self.width - timeline-width) / 2;
+    property <length> timeline-y: cover-layout ? controls-y + 54 * unit
+        : inline-timeline ? row-center - 18px : self.height - 50 * unit;
     background: on ? App.tint : Theme.background-color-primary-enabled-player;
     animate background { duration: App.motion ? Theme.duration-transition : 0ms; }
 
     ta := TouchArea {
+        changed mouse-x => { if lyrics-view { App.lyrics-mouse(); } }
+        changed mouse-y => { if lyrics-view { App.lyrics-mouse(); } }
         pointer-event(e) => {
             if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
                 App.drag-window();
@@ -280,88 +370,148 @@ export component MiniPlayer inherits Rectangle {
             accept
         }
 
-        if on: Rectangle {
+        if on && !show-timeline: Rectangle {
             x: 0;
             y: parent.height - 2px;
-            width: App.duration > 0 ? parent.width * App.position / App.duration : 0;
+            width: App.duration > 0 ? parent.width * max(0, min(1, App.position / App.duration)) : 0;
             height: 2px;
             background: Theme.controls-color-primary-default-enabled;
         }
-        if on: Cover {
-            x: 12px;
-            y: 12px;
-            width: 64px;
-            height: 64px;
-            radius: Theme.radius-size-s;
-            background: #ffffff14;
-            source: App.cover;
+        if lyrics-view: Image {
+            width: parent.width;
+            height: parent.height;
+            image-fit: cover;
+            source: App.mini-lyrics-cover;
+        }
+        if lyrics-view: Rectangle {
+            background: @linear-gradient(180deg, #101010ba 0%, #10101094 40%, #101010ed 100%);
+        }
+        if lyrics-view: SyncLyrics {
+            x: 0;
+            y: 50 * unit;
+            width: parent.width;
+            height: controls-y - self.y - 6 * unit;
+            window-width: self.width;
+            window-height: self.height;
+            compact: true;
+            compact-scale: scale;
+        }
+        if on && !lyrics-view: Cover {
+            x: large-art ? (parent.width - self.width) / 2 : 12px;
+            y: cover-y;
+            width: cover-size;
+            height: cover-size;
+            radius: large-art ? Theme.radius-size-m : Theme.radius-size-s;
+            source: large-art && App.cover-big.width > 0 ? App.cover-big : App.cover;
         }
         VerticalLayout {
-            x: on ? 88px : 16px;
-            width: parent.width - self.x - 144px;
+            x: large-art || lyrics-view || !on ? 16px : cover-size + 24px;
+            y: lyrics-view ? 6 * unit : title-y;
+            width: lyrics-view ? parent.width - 76 * unit : large-art ? parent.width - 32 * unit
+                : (inline-timeline && show-timeline ? timeline-x : controls-x) - self.x - 8px;
+            height: (lyrics-view ? 36 : 44) * unit;
             alignment: center;
-            spacing: 2px;
+            spacing: 2 * unit;
             Text {
                 text: on ? App.title : App.app-name;
                 overflow: elide;
-                font-size: Theme.font-size-label-m;
+                horizontal-alignment: large-art && !lyrics-view ? center : left;
+                font-size: cover-layout ? 18 * unit : Theme.font-size-label-m * scale;
                 font-weight: 500;
                 color: #ffffff;
             }
             if on: Text {
                 text: App.artists;
                 overflow: elide;
-                font-size: Theme.font-size-label-m;
+                horizontal-alignment: cover-layout ? center : left;
+                font-size: Theme.font-size-label-m * scale;
                 color: #ffffff80;
             }
         }
 
-        BarButton { x: parent.width - 136px; y: 28px; icon: Icons.prev-small; icon-size: 20px; enabled: on && App.can-prev; clicked => { App.prev(); } }
+        if lyrics-room && on: BarButton {
+            x: centered-controls ? controls-x - 42 * unit : 12px;
+            y: centered-controls ? controls-y + 4 * unit : 5px;
+            width: 32 * unit;
+            height: self.width;
+            icon: Icons.lyrics;
+            icon-size: 20 * unit;
+            active: lyrics-view;
+            enabled: App.has-lyrics || lyrics-view;
+            clicked => { App.toggle-mini-lyrics(); }
+        }
+        BarButton {
+            x: controls-x;
+            y: controls-y + 4 * unit;
+            width: 32 * unit;
+            height: self.width;
+            icon: Icons.prev-small;
+            icon-size: 20 * unit;
+            enabled: on && App.can-prev;
+            clicked => { App.prev(); }
+        }
         Rectangle {
-            x: parent.width - 96px;
-            y: 24px;
-            width: 40px;
-            height: 40px;
+            x: controls-x + 40 * unit;
+            y: controls-y;
+            width: 40 * unit;
+            height: self.width;
             Icon {
                 source: App.playing ? Icons.pause-filled : Icons.play-filled;
-                size: 40px;
+                size: 40 * unit;
                 colorize: play-ta.has-hover ? Theme.controls-color-primary-default-hovered : Theme.controls-color-primary-default-enabled;
             }
             play-ta := TouchArea { enabled: on; mouse-cursor: MouseCursor.pointer; clicked => { App.play-pause(); } }
         }
-        BarButton { x: parent.width - 48px; y: 28px; icon: Icons.next-small; icon-size: 20px; enabled: on; clicked => { App.next(); } }
+        BarButton {
+            x: controls-x + 88 * unit;
+            y: controls-y + 4 * unit;
+            width: 32 * unit;
+            height: self.width;
+            icon: Icons.next-small;
+            icon-size: 20 * unit;
+            enabled: on;
+            clicked => { App.next(); }
+        }
 
-        // Громкость при наведении: значок выключает звук, полоску можно тянуть.
-        if ta.has-hover || vol-ta.pressed: BarButton {
-            x: parent.width - 172px;
-            y: 2px;
-            width: 24px;
-            height: 24px;
+        if show-timeline: MiniTimeline {
+            width: timeline-width;
+            x: timeline-x;
+            y: timeline-y;
+            height: 40 * unit;
+            scale: root.scale;
+        }
+
+        // В большом мини-плеере громкость всегда рядом с кнопками воспроизведения.
+        if centered-controls || ta.has-hover || vol-ta.pressed: BarButton {
+            x: volume-x;
+            y: volume-y;
+            width: 24 * unit;
+            height: self.width;
             icon: App.volume <= 0 ? Icons.volume-off : Icons.volume;
-            icon-size: 16px;
+            icon-size: 16 * unit;
             clicked => { App.toggle-mute(); }
         }
         Rectangle {
-            x: parent.width - 144px;
-            y: 2px;
-            width: 80px;
-            height: 24px;
-            visible: ta.has-hover || vol-ta.pressed;
+            x: volume-x + 28 * unit;
+            y: volume-y;
+            width: min(80 * unit, parent.width - self.x - 16 * unit);
+            height: 24 * unit;
+            visible: centered-controls || ta.has-hover || vol-ta.pressed;
             property <float> v: max(0, min(1, App.volume));
-            Rectangle { y: 10px; height: 4px; border-radius: 2px; background: #ffffff33; }
-            Rectangle { x: 0; y: 10px; width: parent.width * v; height: 4px; border-radius: 2px; background: #ffffffcc; }
+            Rectangle { y: 10 * unit; height: 4 * unit; border-radius: 2 * unit; background: #ffffff33; }
+            Rectangle { x: 0; y: 10 * unit; width: parent.width * v; height: 4 * unit; border-radius: 2 * unit; background: #ffffffcc; }
             Rectangle {
-                x: parent.width * v - 5px;
-                y: 7px;
-                width: 10px;
-                height: 10px;
-                border-radius: 5px;
+                x: parent.width * v - 5 * unit;
+                y: 7 * unit;
+                width: 10 * unit;
+                height: self.width;
+                border-radius: self.width / 2;
                 background: vol-ta.has-hover || vol-ta.pressed ? Theme.controls-color-primary-default-enabled : #ffffff;
             }
             vol-ta := TouchArea {
                 mouse-cursor: MouseCursor.pointer;
                 pointer-event(e) => {
-                    if e.kind == PointerEventKind.down {
+                    if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
                         App.set-volume(max(0, min(1, self.mouse-x / self.width)));
                     }
                 }
@@ -372,7 +522,23 @@ export component MiniPlayer inherits Rectangle {
                 }
             }
         }
-        if ta.has-hover: BarButton { x: parent.width - 52px; y: 2px; width: 24px; height: 24px; icon: Icons.fullscreen; icon-size: 16px; clicked => { App.toggle-mini(); } }
-        if ta.has-hover: BarButton { x: parent.width - 28px; y: 2px; width: 24px; height: 24px; icon: Icons.close-xs; icon-size: 16px; clicked => { App.close(); } }
+        if tall || ta.has-hover: BarButton {
+            x: parent.width - 57 * unit;
+            y: 5 * unit;
+            width: 24 * unit;
+            height: self.width;
+            icon: Icons.fullscreen;
+            icon-size: 16 * unit;
+            clicked => { App.toggle-mini(); }
+        }
+        if tall || ta.has-hover: BarButton {
+            x: parent.width - 29 * unit;
+            y: 5 * unit;
+            width: 24 * unit;
+            height: self.width;
+            icon: Icons.close-xs;
+            icon-size: 16 * unit;
+            clicked => { App.close(); }
+        }
     }
 }

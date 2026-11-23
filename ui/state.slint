@@ -536,6 +536,9 @@ export global App {
     callback minimize();
     // Мини-плеер поверх всех окон.
     in-out property <bool> mini;
+    in-out property <bool> mini-lyrics;
+    in property <image> mini-lyrics-cover;
+    callback toggle-mini-lyrics();
     callback toggle-mini();
     callback close();
 

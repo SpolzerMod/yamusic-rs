@@ -83,6 +83,11 @@ export component AppWindow inherits Window {
 
     property <bool> new-vibe: App.page == Page.wave;
     changed width => { App.window-resized(); }
+    changed height => {
+        if App.mini && self.height < 200px {
+            App.mini-lyrics = false;
+        }
+    }
     property <length> pad: 8px;
     property <length> top: 32px;
     // 204 или 72 в свёрнутом виде, переход 150 мс, как у оригинала.
@@ -262,13 +267,13 @@ export component AppWindow inherits Window {
         CaptionButton { kind: 2; clicked => { App.close(); } }
     }
 
-    if !App.maximized: ResizeEdge { dir: 0; x: 8px; y: 0; width: parent.width - 16px - 4 * 46px; height: 4px; }
-    if !App.maximized: ResizeEdge { dir: 4; x: 8px; y: parent.height - 4px; width: parent.width - 16px; height: 4px; }
-    if !App.maximized: ResizeEdge { dir: 6; x: 0; y: 8px; width: 4px; height: parent.height - 16px; }
-    if !App.maximized: ResizeEdge { dir: 2; x: parent.width - 4px; y: 32px; width: 4px; height: parent.height - 40px; }
-    if !App.maximized: ResizeEdge { dir: 7; x: 0; y: 0; width: 8px; height: 8px; }
-    if !App.maximized: ResizeEdge { dir: 5; x: 0; y: parent.height - 8px; width: 8px; height: 8px; }
-    if !App.maximized: ResizeEdge { dir: 3; x: parent.width - 8px; y: parent.height - 8px; width: 8px; height: 8px; }
+    if !App.mini && !App.maximized: ResizeEdge { dir: 0; x: 8px; y: 0; width: parent.width - 16px - 4 * 46px; height: 4px; }
+    if !App.mini && !App.maximized: ResizeEdge { dir: 4; x: 8px; y: parent.height - 4px; width: parent.width - 16px; height: 4px; }
+    if !App.mini && !App.maximized: ResizeEdge { dir: 6; x: 0; y: 8px; width: 4px; height: parent.height - 16px; }
+    if !App.mini && !App.maximized: ResizeEdge { dir: 2; x: parent.width - 4px; y: 32px; width: 4px; height: parent.height - 40px; }
+    if !App.mini && !App.maximized: ResizeEdge { dir: 7; x: 0; y: 0; width: 8px; height: 8px; }
+    if !App.mini && !App.maximized: ResizeEdge { dir: 5; x: 0; y: parent.height - 8px; width: 8px; height: 8px; }
+    if !App.mini && !App.maximized: ResizeEdge { dir: 3; x: parent.width - 8px; y: parent.height - 8px; width: 8px; height: 8px; }
 
     // Уведомление, как BaseNotification: полупрозрачная плашка, обложка 40 и текст.
     if App.toast != "": Rectangle {
@@ -395,6 +400,16 @@ export component AppWindow inherits Window {
         width: parent.width;
         height: parent.height;
     }
+
+    // Зоны мини-плеера идут после плашки, чтобы она не перехватывала нажатия у краёв.
+    if App.mini: ResizeEdge { dir: 0; x: 8px; y: 0; width: parent.width - 16px; height: 5px; }
+    if App.mini: ResizeEdge { dir: 1; x: parent.width - 8px; y: 0; width: 8px; height: 8px; }
+    if App.mini: ResizeEdge { dir: 2; x: parent.width - 5px; y: 8px; width: 5px; height: parent.height - 16px; }
+    if App.mini: ResizeEdge { dir: 3; x: parent.width - 8px; y: parent.height - 8px; width: 8px; height: 8px; }
+    if App.mini: ResizeEdge { dir: 4; x: 8px; y: parent.height - 5px; width: parent.width - 16px; height: 5px; }
+    if App.mini: ResizeEdge { dir: 5; x: 0; y: parent.height - 8px; width: 8px; height: 8px; }
+    if App.mini: ResizeEdge { dir: 6; x: 0; y: 8px; width: 5px; height: parent.height - 16px; }
+    if App.mini: ResizeEdge { dir: 7; x: 0; y: 0; width: 8px; height: 8px; }
 
     // Почти прозрачный фон обязателен: пустой Rectangle Slint не рисует и место не обновит.
     if App.repaint: Rectangle {

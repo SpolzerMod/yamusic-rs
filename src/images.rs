@@ -58,6 +58,16 @@ fn decode(bytes: &[u8], px: u32) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
     Some(SharedPixelBuffer::clone_from_slice(img.as_raw(), img.width(), img.height()))
 }
 
+pub fn lyrics_backdrop(cover: &Image) -> Image {
+    let Some(pixels) = cover.to_rgba8() else { return Image::default() };
+    let Some(cover) = image::RgbaImage::from_raw(pixels.width(), pixels.height(), pixels.as_bytes().to_vec()) else {
+        return Image::default();
+    };
+    let thumbnail = image::DynamicImage::ImageRgba8(cover).thumbnail(56, 56).into_rgba8();
+    let blurred = image::imageops::blur(&thumbnail, 4.0);
+    Image::from_rgba8(SharedPixelBuffer::clone_from_slice(blurred.as_raw(), blurred.width(), blurred.height()))
+}
+
 fn worker(http: Client, queue: Queue) {
     loop {
         let (url, px) = {

@@ -326,10 +326,14 @@ component LyricRow inherits Rectangle {
 
 // Синхронный текст: лента слайдов «отсчёт — строки — авторы», текущая строка встаёт
 // на 40% высоты окна, прокрутка 300 мс. Колесо — свободная прокрутка на 3 с.
-component SyncLyrics inherits Rectangle {
+export component SyncLyrics inherits Rectangle {
     in property <length> window-height;
     in property <length> window-width;
-    property <length> font: max(32px, window-width * 0.025);
+    in property <bool> compact;
+    in property <float> compact-scale: 1;
+    property <length> font: compact ? max(17px, min(28px, window-width * 0.048)) * compact-scale : max(32px, window-width * 0.025);
+    property <length> fade-height: compact ? min(32px * compact-scale, self.height / 5) : 80px;
+    property <color> fade-color: compact ? #10101055 : App.tint;
     property <length> inset: window-height * 0.4;
     property <bool> scrolled: App.lyrics-scrolled;
     property <int> state: App.lyric-state;
@@ -386,7 +390,7 @@ component SyncLyrics inherits Rectangle {
         width: root.width;
         // Высота — по содержимому: без неё лента равна окну и прокрутка вниз упирается в него.
         height: self.preferred-height;
-        spacing: 32px;
+        spacing: root.compact ? 14px * root.compact-scale : 32px;
         // Отсчёт: точки до первой строки, за 3 с до неё — цифры.
         VerticalLayout {
             padding-bottom: root.window-width * 0.0523;
@@ -448,15 +452,15 @@ component SyncLyrics inherits Rectangle {
     // Затухание сверху и снизу цветом плеера, 5rem.
     Rectangle {
         y: 0;
-        height: 80px;
+        height: root.fade-height;
         cache-rendering-hint: App.motion;
-        background: @linear-gradient(180deg, App.tint 0%, App.tint.transparentize(1) 100%);
+        background: @linear-gradient(180deg, root.fade-color 0%, root.fade-color.transparentize(1) 100%);
     }
     Rectangle {
-        y: parent.height - 80px;
-        height: 80px;
+        y: parent.height - root.fade-height;
+        height: root.fade-height;
         cache-rendering-hint: App.motion;
-        background: @linear-gradient(0deg, App.tint 0%, App.tint.transparentize(1) 100%);
+        background: @linear-gradient(0deg, root.fade-color 0%, root.fade-color.transparentize(1) 100%);
     }
 
 }

@@ -59,6 +59,8 @@ pub struct Config {
     pub window_maximized: bool,
     /// Место мини-плеера при выходе.
     pub mini_pos: Option<[i32; 2]>,
+    /// Размер мини-плеера в логических пикселях.
+    pub mini_size: Option<[f32; 2]>,
 }
 
 /// Блок запоминается по id из скелета: он постоянный («recommended_playlists»), а заголовок
@@ -101,6 +103,7 @@ impl Default for Config {
             window_size: None,
             window_maximized: false,
             mini_pos: None,
+            mini_size: None,
         }
     }
 }

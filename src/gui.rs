@@ -110,6 +110,14 @@ thread_local! {
     static CTX: RefCell<Option<Rc<Ctx>>> = const { RefCell::new(None) };
 }
 
+fn lyrics_visible(app: &App<'_>) -> bool {
+    if app.get_mini() {
+        app.get_mini_lyrics()
+    } else {
+        app.get_fullscreen() && app.get_fs_mode() == 2
+    }
+}
+
 fn with_ctx(f: impl FnOnce(&Rc<Ctx>)) {
     let c = CTX.with(|c| c.borrow().clone());
     if let Some(c) = c {
@@ -261,7 +269,7 @@ impl Ctx {
             self.reset_lyrics();
         }
         self.update_lyric_current(s.position);
-        if app.get_fullscreen() && app.get_fs_mode() == 2 {
+        if lyrics_visible(&app) {
             self.sync_lyrics();
         }
         let Some(t) = s.track.filter(|_| started) else {
@@ -286,11 +294,13 @@ impl Ctx {
                 app.set_tint(player_tint(c));
                 app.set_accent(rgb(c));
             }
-            if app.get_fullscreen() {
+            app.set_cover_big(Image::default());
+            if app.get_fullscreen() || app.get_mini() {
                 self.load_cover_big();
             }
             self.update_artist_current();
             app.set_cover(Image::default());
+            app.set_mini_lyrics_cover(Image::default());
             if let Some(url) = t.cover_url(self.size_for(96.0)) {
                 let weak = self.ui.clone();
                 let id = t.id.clone();
@@ -298,7 +308,11 @@ impl Ctx {
                     with_ctx(|c| {
                         if c.st.borrow().track_id.as_deref() == Some(id.as_str()) {
                             if let Some(ui) = weak.upgrade() {
-                                ui.global::<App>().set_cover(img.clone());
+                                let app = ui.global::<App>();
+                                app.set_cover(img.clone());
+                                if app.get_mini_lyrics() {
+                                    app.set_mini_lyrics_cover(crate::images::lyrics_backdrop(img));
+                                }
                             }
                         }
                     })
@@ -1166,11 +1180,12 @@ fn quit() {
     let _ = slint::quit_event_loop();
 }
 
-/// Обычное окно перед мини-плеером, место плашки и последний размер неразвёрнутого окна.
+/// Геометрия обычного окна и мини-плеера.
 #[derive(Default)]
 struct Places {
     normal: Cell<Option<(Option<slint::PhysicalPosition>, slint::PhysicalSize, bool)>>,
     mini: Cell<Option<slint::PhysicalPosition>>,
+    mini_size: Cell<Option<slint::LogicalSize>>,
     restored: Cell<Option<slint::PhysicalSize>>,
 }
 
@@ -1187,6 +1202,7 @@ fn save_places(ui: &AppWindow, places: &Places) {
     let mini = ui.global::<App>().get_mini();
     if mini {
         places.mini.set(window_pos(w).or(places.mini.get()));
+        places.mini_size.set(Some(w.size().to_logical(w.scale_factor())));
     }
     let normal = if mini { places.normal.get() } else { Some((window_pos(w), w.size(), w.is_maximized())) };
     with_ctx(|c| {
@@ -1202,6 +1218,7 @@ fn save_places(ui: &AppWindow, places: &Places) {
             cfg.window_maximized = max;
         }
         cfg.mini_pos = places.mini.get().map(|p| [p.x, p.y]);
+        cfg.mini_size = places.mini_size.get().map(|s| [s.width, s.height]);
         cfg.save();
     });
 }
@@ -1590,6 +1607,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     app.set_hidden_blocks(landing_ui::hidden_titles(&cfg).into());
     let places = Rc::new(Places::default());
     places.mini.set(cfg.mini_pos.map(|[x, y]| slint::PhysicalPosition::new(x, y)));
+    places.mini_size.set(cfg.mini_size.map(|[w, h]| slint::LogicalSize::new(w, h)));
     if let Some([w, h]) = cfg.window_size {
         let size = slint::PhysicalSize::new(w, h);
         places.restored.set(Some(size));
@@ -1858,26 +1876,34 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
                 }
                 ww.set_min_inner_size(Some(LogicalSize::new(320.0, 88.0)));
             });
-            w.set_size(slint::LogicalSize::new(400.0, 88.0));
+            let k = w.scale_factor();
+            let (l, t, r, b) = sys::work_area(w);
+            let saved = pl.mini_size.get().unwrap_or(slint::LogicalSize::new(400.0, 88.0));
+            let size = slint::LogicalSize::new(
+                saved.width.clamp(320.0, ((r - l) as f32 / k).max(320.0)),
+                saved.height.clamp(88.0, ((b - t) as f32 / k).max(88.0)),
+            );
+            w.set_size(size);
             // Композитор на Linux возвращает размер развёрнутого окна уже после нашего запроса.
             #[cfg(target_os = "linux")]
-            {
+            if was_max {
                 let weak = weak.clone();
                 Timer::single_shot(Duration::from_millis(150), move || {
                     let Some(ui) = weak.upgrade() else { return };
                     let w = ui.window();
-                    if ui.global::<App>().get_mini() && w.size().height as f32 > 120.0 * w.scale_factor() {
-                        w.set_size(slint::LogicalSize::new(400.0, 88.0));
+                    if ui.global::<App>().get_mini() && w.size().height as f32 > (size.height + 32.0) * w.scale_factor() {
+                        w.set_size(size);
                     }
                 });
             }
-            let k = w.scale_factor();
-            let (mw, mh, gap) = ((400.0 * k) as i32, (88.0 * k) as i32, (16.0 * k) as i32);
-            let (l, t, r, b) = sys::work_area(w);
+            let (mw, mh, gap) = ((size.width * k) as i32, (size.height * k) as i32, (16.0 * k) as i32);
+            with_ctx(|c| c.load_cover_big());
             let p = pl.mini.get().unwrap_or(slint::PhysicalPosition::new(r - mw - gap, b - mh - gap));
             w.set_position(slint::PhysicalPosition::new(p.x.min(r - mw).max(l), p.y.min(b - mh).max(t)));
         } else {
             pl.mini.set(window_pos(w).or(pl.mini.get()));
+            pl.mini_size.set(Some(w.size().to_logical(w.scale_factor())));
+            app.set_mini_lyrics(false);
             app.set_mini(false);
             w.with_winit_window(|ww| ww.set_min_inner_size(Some(LogicalSize::new(960.0, 640.0))));
             match pl.normal.take() {
@@ -1905,6 +1931,18 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
                 None => w.set_size(slint::LogicalSize::new(1280.0, 800.0)),
             }
         }
+    });
+    app.on_toggle_mini_lyrics(|| {
+        with_ctx(|c| {
+            let ui = c.ui();
+            let app = ui.global::<App>();
+            let show = !app.get_mini_lyrics();
+            app.set_mini_lyrics(show);
+            if show {
+                app.set_mini_lyrics_cover(crate::images::lyrics_backdrop(&app.get_cover()));
+                c.sync_lyrics();
+            }
+        })
     });
     let weak = ui.as_weak();
     app.on_resize_window(move |dir| {
@@ -2007,7 +2045,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         with_ctx(|c| {
             let ui = c.ui();
             let app = ui.global::<App>();
-            if app.get_fullscreen() && app.get_fs_mode() == 2 && app.get_playing() {
+            if lyrics_visible(&app) && app.get_playing() {
                 c.update_lyric_current(c.player.state().position);
             }
         })
@@ -3313,7 +3351,8 @@ impl Ctx {
 
     fn load_cover_big(self: &Rc<Self>) {
         let Some(t) = self.player.state().track else { return };
-        let size = self.size_for(400.0);
+        let mini = self.ui().global::<App>().get_mini();
+        let size = self.size_for(if mini { 680.0 } else { 400.0 });
         let Some(url) = t.cover_url(size) else { return };
         let w = self.ui.clone();
         let id = t.id.clone();
@@ -3321,7 +3360,10 @@ impl Ctx {
             with_ctx(|c| {
                 if c.st.borrow().track_id.as_deref() == Some(id.as_str()) {
                     if let Some(ui) = w.upgrade() {
-                        ui.global::<App>().set_cover_big(img.clone());
+                        let app = ui.global::<App>();
+                        if img.size().width >= app.get_cover_big().size().width {
+                            app.set_cover_big(img.clone());
+                        }
                     }
                 }
             })
@@ -3332,7 +3374,7 @@ impl Ctx {
     fn sync_lyrics(self: &Rc<Self>) {
         let ui = self.ui();
         let app = ui.global::<App>();
-        if !app.get_fullscreen() || app.get_fs_mode() != 2 {
+        if !lyrics_visible(&app) {
             return;
         }
         let Some(t) = self.player.state().track else { return };
