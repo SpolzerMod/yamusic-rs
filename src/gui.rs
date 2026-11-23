@@ -1950,6 +1950,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             quit();
         });
         install_tray(&ui, &player);
+        install_smtc(&ui, &player);
     }
     #[cfg(not(windows))]
     {
@@ -2083,6 +2084,29 @@ fn install_mpris(ui: &AppWindow, player: &Player) {
                 Event::Volume(v) => app.invoke_set_volume(v),
                 Event::Raise => reveal(&ui),
                 Event::Quit => quit(),
+            }
+        });
+    });
+}
+
+/// Медиаклавиши, наушники и карточка трека в системном плеере Windows (SMTC).
+#[cfg(windows)]
+fn install_smtc(ui: &AppWindow, player: &Player) {
+    let weak = ui.as_weak();
+    let p = player.clone();
+    crate::smtc::spawn(player.clone(), move |e| {
+        let p = p.clone();
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            use crate::smtc::Event;
+            let app = ui.global::<App>();
+            let s = p.state();
+            match e {
+                Event::Play if !s.playing => app.invoke_play_pause(),
+                Event::Pause if s.playing => app.invoke_play_pause(),
+                Event::Play | Event::Pause => {}
+                Event::Next => p.send(Cmd::Next),
+                Event::Prev => p.send(Cmd::Prev),
+                Event::Seek(sec) => p.send(Cmd::Seek(sec)),
             }
         });
     });
