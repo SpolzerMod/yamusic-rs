@@ -335,6 +335,7 @@ export global App {
     in property <[ChartRow]> search-chart;
     in property <[CardItem]> search-history;
     in property <bool> searching;
+    in property <bool> search-tracks-only;
     in property <bool> results-loading;
     in property <[TrackItem]> sr-tracks;
     in property <[CardItem]> sr-artists;
@@ -470,6 +471,7 @@ export global App {
     callback seek-lyric(int);
 
     callback search-edited(string);
+    callback open-search-tracks();
     callback open-suggest(int);
     callback open-card(string, int);
     callback play-chart(int);

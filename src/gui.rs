@@ -22,6 +22,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+const SEARCH_TRACK_KIND: &str = "track";
+
 struct State {
     cfg: Config,
     dark: bool,
@@ -450,8 +452,15 @@ impl Ctx {
             }
             Page::Collection => self.refresh_collection(),
             Page::Search => {
+                let text = app.get_search_text();
+                let tracks_only = key.as_deref() == Some(SEARCH_TRACK_KIND) && !text.trim().is_empty();
                 self.refresh_search();
-                self.refresh_results();
+                if app.get_search_tracks_only() != tracks_only {
+                    app.set_search_tracks_only(tracks_only);
+                    self.search_now(text.to_string());
+                } else {
+                    self.refresh_results();
+                }
             }
             Page::Artist => {
                 if let Some(k) = key {
@@ -2546,12 +2555,30 @@ impl Ctx {
         let text = text.trim().to_string();
         app.set_searching(!text.is_empty());
         if text.is_empty() {
-            self.st.borrow_mut().results_key = None;
-            return;
+            app.set_search_tracks_only(false);
         }
-        self.st.borrow_mut().results_key = Some(format!("search:all:{text}"));
-        self.st.borrow_mut().results_shown = None;
-        self.refresh_results();
+        let kind = if app.get_search_tracks_only() { SEARCH_TRACK_KIND } else { "all" };
+        let key = (!text.is_empty()).then(|| format!("search:{kind}:{text}"));
+        {
+            let mut st = self.st.borrow_mut();
+            if st.results_key == key {
+                return;
+            }
+            st.results_key = key;
+            st.results_shown = None;
+            st.results.clear();
+            for block in ["sr-artists", "sr-albums", "sr-playlists"] {
+                st.cards.remove(block);
+            }
+        }
+        app.set_sr_tracks(ModelRc::default());
+        for set_cards in [App::set_sr_artists, App::set_sr_albums, App::set_sr_playlists] {
+            set_cards(&app, ModelRc::default());
+        }
+        app.set_results_loading(false);
+        if !text.is_empty() {
+            self.refresh_results();
+        }
     }
 
     fn refresh_results(self: &Rc<Self>) {
@@ -3563,10 +3590,13 @@ impl Ctx {
     /// Где мы сейчас: страница и её ключ — для истории переходов.
     fn here(&self) -> (Page, Option<String>) {
         let st = self.st.borrow();
-        match self.ui().global::<App>().get_page() {
+        let ui = self.ui();
+        let app = ui.global::<App>();
+        match app.get_page() {
             Page::Artist => (Page::Artist, st.artist_key.clone()),
             Page::List => (Page::List, st.list_key.clone()),
             Page::Grid => (Page::Grid, st.grid_key.clone()),
+            Page::Search if app.get_search_tracks_only() => (Page::Search, Some(SEARCH_TRACK_KIND.into())),
             p => (p, None),
         }
     }
@@ -3968,14 +3998,22 @@ fn register_extra(app: &App) {
         with_ctx(|c| {
             let text = text.to_string();
             if text.trim().is_empty() {
+                c.st.borrow_mut().search_timer = None;
                 c.search_now(String::new());
                 return;
             }
             let t = Timer::default();
-            t.start(TimerMode::SingleShot, Duration::from_millis(350), move || with_ctx(|c| c.search_now(text.clone())));
+            t.start(TimerMode::SingleShot, Duration::from_millis(350), move || {
+                with_ctx(|c| {
+                    if c.ui().global::<App>().get_search_text().as_str() == text {
+                        c.search_now(text.clone());
+                    }
+                });
+            });
             c.st.borrow_mut().search_timer = Some(t);
         })
     });
+    app.on_open_search_tracks(|| with_ctx(|c| c.navigate(Page::Search, Some(SEARCH_TRACK_KIND.into()), true)));
     app.on_open_suggest(|i| {
         with_ctx(|c| {
             let ui = c.ui();
