@@ -1079,6 +1079,12 @@ fn apply_ui_scale(ui: &AppWindow) {
 /// переноса могла остаться недорисованная часть окна (#16).
 fn rescale(ui: &AppWindow, force: bool) {
     let w = ui.window();
+    #[cfg(windows)]
+    let phys = w.with_winit_window(|ww| {
+        let size = ww.inner_size();
+        slint::PhysicalSize::new(size.width, size.height)
+    }).unwrap_or_else(|| w.size());
+    #[cfg(not(windows))]
     let phys = w.size();
     if phys.width == 0 || phys.height == 0 {
         return;
@@ -1117,24 +1123,50 @@ thread_local! {
     static LAST_CURSOR: std::cell::Cell<slint::LogicalPosition> = const { std::cell::Cell::new(slint::LogicalPosition::new(0.0, 0.0)) };
 }
 
-/// На Linux окно двигает и тянет за край сам композитор, и отпускание кнопки до нас не доходит.
+/// Окно двигает и тянет за край сама система, и отпускание кнопки до Slint не доходит.
 /// Slint так и считает левую зажатой и отдаёт все клики полосе заголовка, а та снова начинает
-/// перетаскивание (#17). Отпускаем кнопку за него. Не прямо здесь: мы внутри обработки нажатия.
+/// перетаскивание (#17). То же происходит на Windows после Win32-перетаскивания и Snap.
+/// Отпускаем кнопку за него. Не прямо здесь: мы внутри обработки нажатия.
 fn release_after_system_drag(ui: &AppWindow) {
-    #[cfg(target_os = "linux")]
-    {
+    let weak = ui.as_weak();
+    Timer::single_shot(Duration::ZERO, move || {
+        if let Some(ui) = weak.upgrade() {
+            #[cfg(target_os = "linux")]
+            let position = LAST_CURSOR.get();
+            // За пределами заголовка: сброс захвата не должен считаться кликом по нему.
+            #[cfg(not(target_os = "linux"))]
+            let position = slint::LogicalPosition::new(-1.0, -1.0);
+            ui.window().dispatch_event(slint::platform::WindowEvent::PointerReleased {
+                position,
+                button: slint::platform::PointerEventButton::Left,
+            });
+        }
+    });
+}
+
+/// После переключения режима ограничения Slint и события Windows применяются не сразу.
+/// Повторно согласуем стиль, геометрию и захват мыши после применения этих изменений.
+fn after_window_mode_change(ui: &AppWindow) {
+    #[cfg(windows)]
+    for ms in [0, 150] {
         let weak = ui.as_weak();
-        Timer::single_shot(Duration::ZERO, move || {
-            if let Some(ui) = weak.upgrade() {
-                ui.window().dispatch_event(slint::platform::WindowEvent::PointerReleased {
-                    position: LAST_CURSOR.get(),
-                    button: slint::platform::PointerEventButton::Left,
-                });
-            }
+        Timer::single_shot(Duration::from_millis(ms), move || {
+            let Some(ui) = weak.upgrade() else { return };
+            sys::set_mini_mode(ui.window(), ui.global::<App>().get_mini());
+            rescale(&ui, true);
+            ui.global::<App>().set_maximized(sys::is_maximized(ui.window()));
+            release_after_system_drag(&ui);
         });
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(windows))]
     let _ = ui;
+}
+
+fn window_maximized(w: &slint::Window) -> bool {
+    #[cfg(windows)]
+    { sys::is_maximized(w) }
+    #[cfg(not(windows))]
+    { w.is_maximized() }
 }
 
 thread_local! {
@@ -1188,7 +1220,7 @@ fn save_places(ui: &AppWindow, places: &Places) {
     if mini {
         places.mini.set(window_pos(w).or(places.mini.get()));
     }
-    let normal = if mini { places.normal.get() } else { Some((window_pos(w), w.size(), w.is_maximized())) };
+    let normal = if mini { places.normal.get() } else { Some((window_pos(w), w.size(), window_maximized(w))) };
     with_ctx(|c| {
         let mut st = c.st.borrow_mut();
         let cfg = &mut st.cfg;
@@ -1829,9 +1861,14 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     let weak = ui.as_weak();
     app.on_drag_window(move || {
         if let Some(ui) = weak.upgrade() {
-            ui.window().with_winit_window(|w| {
-                let _ = w.drag_window();
-            });
+            #[cfg(windows)]
+            sys::start_move(ui.window());
+            #[cfg(not(windows))]
+            {
+                ui.window().with_winit_window(|w| {
+                    let _ = w.drag_window();
+                });
+            }
             release_after_system_drag(&ui);
         }
     });
@@ -1843,14 +1880,14 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         let app = ui.global::<App>();
         let w = ui.window();
         if !app.get_mini() {
-            let was_max = w.is_maximized();
+            let was_max = window_maximized(w);
             pl.normal.set(Some((window_pos(w), w.size(), was_max)));
             app.set_mini(true);
             app.set_maximized(false);
             // KWin в ответ на set_maximized(false) присылает текущий размер и перебивает размер плашки.
-            if was_max {
-                w.set_maximized(false);
-            }
+            w.set_maximized(false);
+            #[cfg(windows)]
+            sys::set_mini_mode(w, true);
             // Slint обновит ограничения размера только на следующем кадре, а Windows без этого не даст ужать окно.
             w.with_winit_window(|ww| {
                 if was_max {
@@ -1879,6 +1916,9 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         } else {
             pl.mini.set(window_pos(w).or(pl.mini.get()));
             app.set_mini(false);
+            w.set_maximized(false);
+            #[cfg(windows)]
+            sys::set_mini_mode(w, false);
             w.with_winit_window(|ww| ww.set_min_inner_size(Some(LogicalSize::new(960.0, 640.0))));
             match pl.normal.take() {
                 Some((pos, size, max)) => {
@@ -1905,21 +1945,30 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
                 None => w.set_size(slint::LogicalSize::new(1280.0, 800.0)),
             }
         }
+        after_window_mode_change(&ui);
     });
     let weak = ui.as_weak();
     app.on_resize_window(move |dir| {
-        use winit::window::ResizeDirection as D;
-        let d = [D::North, D::NorthEast, D::East, D::SouthEast, D::South, D::SouthWest, D::West, D::NorthWest][dir.clamp(0, 7) as usize];
         if let Some(ui) = weak.upgrade() {
-            ui.window().with_winit_window(|w| {
-                let _ = w.drag_resize_window(d);
-            });
+            #[cfg(windows)]
+            sys::start_resize(ui.window(), dir);
+            #[cfg(not(windows))]
+            {
+                use winit::window::ResizeDirection as D;
+                let d = [D::North, D::NorthEast, D::East, D::SouthEast, D::South, D::SouthWest, D::West, D::NorthWest][dir.clamp(0, 7) as usize];
+                ui.window().with_winit_window(|w| {
+                    let _ = w.drag_resize_window(d);
+                });
+            }
             release_after_system_drag(&ui);
         }
     });
     let weak = ui.as_weak();
     app.on_toggle_maximize(move || {
         if let Some(ui) = weak.upgrade() {
+            #[cfg(windows)]
+            let m = !sys::is_maximized(ui.window());
+            #[cfg(not(windows))]
             let m = !ui.window().is_maximized();
             ui.window().set_maximized(m);
             ui.global::<App>().set_maximized(m);
@@ -2042,7 +2091,10 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             if let Some(ui) = weak.upgrade() {
                 apply_ui_scale(&ui);
                 let w = ui.window();
-                if !w.is_maximized() && !w.is_minimized() && !ui.global::<App>().get_mini() {
+                // Snap и восстановление через Win32 обходят состояние кнопки в Slint.
+                #[cfg(windows)]
+                ui.global::<App>().set_maximized(sys::is_maximized(w));
+                if !window_maximized(w) && !w.is_minimized() && !ui.global::<App>().get_mini() {
                     pl.restored.set(Some(w.size()));
                 }
             }
