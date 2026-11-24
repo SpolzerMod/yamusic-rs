@@ -1,7 +1,7 @@
 // Меню профиля (в стиле Яндекс ID), страница настроек и экран входа по коду.
 
 import { Theme } from "theme.slint";
-import { Icons, Icon, Cover, NavCircle, PillButton } from "widgets.slint";
+import { Icons, Icon, Cover, NavCircle, PillButton, ScrollBar } from "widgets.slint";
 import { T, App } from "state.slint";
 
 // Меню профиля — окно Яндекс ID оригинала (iframe yandex.ru/user-id): 320 в ширину,
@@ -363,7 +363,7 @@ component DonateCard inherits Rectangle {
 }
 
 export component SettingsPage inherits Rectangle {
-    Flickable {
+    flick := Flickable {
         content-height: list.y + list.preferred-height + 40px;
         if App.can-back: NavCircle {
             x: 24px;
@@ -497,6 +497,10 @@ export component SettingsPage inherits Rectangle {
                 clicked => { App.setting("about"); }
             }
         }
+    }
+    ScrollBar {
+        content-y <=> flick.content-y;
+        content-height: flick.content-height;
     }
 }
 
