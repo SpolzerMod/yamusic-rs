@@ -24,6 +24,11 @@ use std::time::{Duration, Instant};
 
 const SEARCH_TRACK_KIND: &str = "track";
 
+fn playlist_editable(playlist: &Playlist, uid: &str) -> bool {
+    // «Мне нравится» — системный плейлист, даже когда открыт по обычной ссылке.
+    playlist.uid == uid && playlist.kind != "3"
+}
+
 struct State {
     cfg: Config,
     dark: bool,
@@ -897,16 +902,16 @@ impl Ctx {
             _ => {
                 let p = l.playlist.as_ref();
                 let date = p.map(|p| date_ru(&p.modified)).unwrap_or_default();
-                let mine = p.is_some_and(|p| p.uid == self.st.borrow().uid);
+                let editable = p.is_some_and(|p| playlist_editable(p, &self.st.borrow().uid));
                 let raw = p.map(|p| p.description.clone()).unwrap_or_default();
                 app.set_list_desc_raw(raw.clone().into());
                 let desc = match raw {
-                    d if d.is_empty() && mine => format!("{} ...", crate::i18n::tr("Добавить описание")),
+                    d if d.is_empty() && editable => format!("{} ...", crate::i18n::tr("Добавить описание")),
                     d => d,
                 };
                 app.set_list_kind("playlist".into());
                 app.set_list_kind_label(crate::i18n::tr("Плейлист").into());
-                app.set_list_own(mine);
+                app.set_list_own(editable);
                 if let Some(p) = p {
                     let key = format!("playlist:{}:{}", p.uid, p.kind);
                     app.set_list_liked(self.st.borrow().liked_playlists.contains(&key));
@@ -3052,7 +3057,8 @@ impl Ctx {
             if pinned { icons.get_m_unpin() } else { icons.get_m_pin() },
             false,
         )];
-        if !likes && !app.get_list_own() {
+        let owned = l.playlist.as_ref().is_some_and(|p| p.uid == self.st.borrow().uid);
+        if !likes && !owned {
             items.push(self.menu_entry(
                 "list-like",
                 if liked { "Удалить из коллекции" } else { "Нравится" },
@@ -3123,12 +3129,12 @@ impl Ctx {
         });
     }
 
-    /// Свой открытый плейлист: (uid, kind, название).
+    /// Открытый плейлист, который можно редактировать: (uid, kind, название).
     fn own_playlist(&self) -> Option<(String, String, String)> {
         let data = self.list()?;
         let Data::List(l) = &*data else { return None };
         let p = l.playlist.as_ref()?;
-        (p.uid == self.st.borrow().uid).then(|| (p.uid.clone(), p.kind.clone(), p.title.clone()))
+        playlist_editable(p, &self.st.borrow().uid).then(|| (p.uid.clone(), p.kind.clone(), p.title.clone()))
     }
 
     /// После правки на сервере: перечитать плейлист, список плейлистов и коллекцию.
