@@ -535,9 +535,10 @@ impl Ctx {
             let res = match block {
                 "playlists" => net.api.collection_tabs("playlists-liked-and-playlists-created"),
                 "albums" => net.api.collection_tabs("albums-liked-and-albums-presaved"),
-                "ar-studio" => one(net.api.artist_albums(arg, "direct-albums", "year")),
-                "ar-albums" => one(net.api.artist_albums(arg, "direct-albums", "rating")),
-                "ar-compilations" => one(net.api.artist_albums(arg, "also-albums", "rating")),
+                // Как у оригинала: «Студийные альбомы» ведут на discography-albums, а не на все альбомы.
+                "ar-studio" => one(net.api.artist_albums(arg, "discography-albums")),
+                "ar-albums" => one(net.api.artist_albums(arg, "direct-albums")),
+                "ar-compilations" => one(net.api.artist_albums(arg, "also-albums")),
                 "ar-similar" => one(net.api.similar_artists(arg)),
                 _ => Ok(vec![(String::new(), cached)]),
             };

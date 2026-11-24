@@ -1226,9 +1226,10 @@ impl Api {
         })
     }
 
-    /// Все альбомы исполнителя: path — direct-albums или also-albums, sort — year или rating.
-    pub fn artist_albums(&self, id: &str, path: &str, sort: &str) -> Res<Vec<Card>> {
-        let v = self.get_raw(&format!("/artists/{id}/{path}?page=0&page-size=200&sort-by={sort}"))?;
+    /// Все альбомы исполнителя: path — discography-albums (студийные), direct-albums или also-albums (сборники).
+    /// От новых к старым: страницы альбомов оригинала всегда просят `sort-by=year` (#91).
+    pub fn artist_albums(&self, id: &str, path: &str) -> Res<Vec<Card>> {
+        let v = self.get_raw(&format!("/artists/{id}/{path}?page=0&page-size=200&sort-by=year"))?;
         Ok(v.get("albums").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(parse_album).map(|a| album_card(&a)).collect()).unwrap_or_default())
     }
 
