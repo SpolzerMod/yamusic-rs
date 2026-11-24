@@ -7,6 +7,7 @@ use reqwest::blocking::{Client, RequestBuilder};
 use reqwest::Method;
 use serde_json::{json, Value};
 use sha2::Sha256;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -15,6 +16,7 @@ use crate::client::{token_allowed, ANDROID_CLIENT, API_BASE as BASE, MP3_SALT, S
 pub const WAVE: &str = "user:onyourwave";
 
 pub type Res<T> = Result<T, String>;
+pub type PlaylistMembership = HashMap<String, HashSet<String>>;
 
 /// Качество звука из настроек: 0 превосходное, 1 оптимальное, 2 экономичное.
 pub static QUALITY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
@@ -301,6 +303,21 @@ fn playlist_entry_track(item: &Value, mut track: Track, revision: Option<u64>, i
     track
 }
 
+fn playlist_item_id(item: &Value) -> Option<String> {
+    s(item.get("id")).or_else(|| s(item.pointer("/track/id")))
+}
+
+fn playlist_track_ids(playlist: &Value) -> Option<HashSet<String>> {
+    let count = playlist.get("trackCount").and_then(Value::as_u64);
+    if let Some(tracks) = playlist.get("tracks").and_then(Value::as_array) {
+        if count.is_some_and(|count| count > tracks.len() as u64) {
+            return None;
+        }
+        return Some(tracks.iter().filter_map(playlist_item_id).collect());
+    }
+    (count == Some(0)).then(HashSet::new)
+}
+
 fn playlist_remove_index(list: &Value, track: &Track) -> Res<usize> {
     let items = list.get("tracks").and_then(Value::as_array).ok_or("нет списка треков")?;
     let slot = track.playlist_slot.as_ref().ok_or("Нет ревизии показанного плейлиста. Обновите список")?;
@@ -308,7 +325,7 @@ fn playlist_remove_index(list: &Value, track: &Track) -> Res<usize> {
         return Err("Плейлист изменился. Выберите трек ещё раз после обновления".into());
     }
     let item = items.get(slot.index).ok_or("трек уже отсутствует в плейлисте")?;
-    let id = s(item.get("id")).or_else(|| s(item.pointer("/track/id")));
+    let id = playlist_item_id(item);
     if id.as_ref() != Some(&track.id) || s(item.get("albumId")) != slot.album {
         return Err("Запись плейлиста изменилась. Обновите список".into());
     }
@@ -1541,6 +1558,33 @@ impl Api {
         Ok(v.as_array().map(|a| a.iter().filter_map(parse_playlist).collect()).unwrap_or_default())
     }
 
+    pub fn playlist_membership(&self, uid: &str) -> Res<PlaylistMembership> {
+        let kinds: Vec<_> = self.playlists(uid)?.into_iter().filter(|p| p.uid == uid).map(|p| p.kind).collect();
+        let mut result = HashMap::new();
+        for batch in kinds.chunks(40) {
+            let form: Vec<_> = batch.iter().map(|kind| ("kinds", kind.as_str())).collect();
+            let request = self.req(Method::POST, &format!("/users/{uid}/playlists")).form(&form);
+            if let Ok(value) = self.send(request) {
+                for playlist in value.as_array().into_iter().flatten() {
+                    if let (Some(kind), Some(ids)) = (s(playlist.get("kind")), playlist_track_ids(playlist)) {
+                        result.insert(kind, ids);
+                    }
+                }
+            }
+            // В пакетном ответе могут отсутствовать треки отдельных плейлистов.
+            for kind in batch {
+                if result.contains_key(kind) {
+                    continue;
+                }
+                let Ok(playlist) = self.get(&format!("/users/{uid}/playlists/{kind}"), &[]) else { continue };
+                if let Some(ids) = playlist_track_ids(&playlist) {
+                    result.insert(kind.clone(), ids);
+                }
+            }
+        }
+        Ok(result)
+    }
+
     pub fn create_playlist(&self, uid: &str, title: &str) -> Res<Playlist> {
         let v = self.send(
             self.req(Method::POST, &format!("/users/{uid}/playlists/create"))
@@ -1775,6 +1819,20 @@ let mp3 = || arr.iter().filter(|x| x.get("codec").and_then(|c| c.as_str()) == So
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playlist_membership_uses_track_ids_without_track_details() {
+        let playlist = json!({"tracks": [
+            {"id": 42, "albumId": 1},
+            {"track": {"id": "43"}},
+            {"id": "42", "albumId": 2},
+            {"albumId": 42}
+        ]});
+        assert_eq!(playlist_track_ids(&playlist), Some(HashSet::from(["42".into(), "43".into()])));
+        assert_eq!(playlist_track_ids(&json!({"trackCount": 0})), Some(HashSet::new()));
+        assert_eq!(playlist_track_ids(&json!({"trackCount": 2})), None);
+        assert_eq!(playlist_track_ids(&json!({"trackCount": 2, "tracks": [{"id": 42}]})), None);
+    }
 
     #[test]
     fn lrc() {

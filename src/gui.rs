@@ -2549,12 +2549,15 @@ impl Ctx {
             st.pins.clear();
             st.history.clear();
             st.forward.clear();
+            st.menu_track = None;
+            st.menu_playlists.clear();
         }
         let ui = self.ui();
         let app = ui.global::<App>();
         app.set_login(SharedString::new());
         app.set_avatar(Image::default());
         app.set_pins(ModelRc::default());
+        app.set_menu_playlists(ModelRc::default());
         app.set_fullscreen(false);
         self.navigate(Page::Wave, None, false);
         self.login_start();
@@ -3216,7 +3219,10 @@ impl Ctx {
         };
         std::thread::spawn(move || {
             match net.api.remove_from_playlist(&uid, &kind, &t) {
-                Ok(()) => net.say(format!("Трек «{}» удален из плейлиста «{title}»", t.title)),
+                Ok(()) => {
+                    net.refresh("playlist-membership");
+                    net.say(format!("Трек «{}» удален из плейлиста «{title}»", t.title));
+                }
                 Err(e) => net.say(format!("{}: {e}", crate::i18n::tr("Не удалось удалить трек из плейлиста"))),
             }
             Self::refresh_playlist(&net, &uid, &kind);
@@ -3318,13 +3324,45 @@ impl Ctx {
 
     fn load_menu_playlists(self: &Rc<Self>) {
         let Some(net) = self.st.borrow().net.clone() else { return };
-        let uid = self.st.borrow().uid.clone();
-        if let Some(Ok(data)) = net.get("playlists") {
-            if let Data::Playlists(pls) = &*data {
-                let own: Vec<Playlist> = pls.iter().filter(|p| p.uid == uid).cloned().collect();
-                let names: Vec<SharedString> = own.iter().map(|p| SharedString::from(p.title.as_str())).collect();
-                self.ui().global::<App>().set_menu_playlists(ModelRc::from(Rc::new(VecModel::from(names))));
-                self.st.borrow_mut().menu_playlists = own;
+        let Some(Ok(data)) = net.get("playlists") else { return };
+        let Data::Playlists(pls) = &*data else { return };
+        let own = pls.iter().filter(|p| p.uid == net.uid);
+        if !own.clone().map(|p| (&p.uid, &p.kind, &p.title)).eq(self.st.borrow().menu_playlists.iter().map(|p| (&p.uid, &p.kind, &p.title))) {
+            let rows: Vec<MenuPlaylist> = own.clone().map(|p| MenuPlaylist { title: p.title.clone().into(), contains_track: false }).collect();
+            self.st.borrow_mut().menu_playlists = own.cloned().collect();
+            self.ui().global::<App>().set_menu_playlists(ModelRc::from(Rc::new(VecModel::from(rows))));
+        }
+        self.refresh_menu_playlist_membership(false);
+    }
+
+    fn refresh_menu_playlist_membership(&self, retry_missing: bool) {
+        let ui = self.ui();
+        let app = ui.global::<App>();
+        let i = app.get_submenu_open();
+        if !app.get_menu_open() || i < 0 || !app.get_menu_items().row_data(i as usize).is_some_and(|item| item.id == "playlist") {
+            return;
+        }
+        let st = self.st.borrow();
+        let (Some(net), Some(track)) = (&st.net, &st.menu_track) else { return };
+        if st.menu_playlists.is_empty() {
+            return;
+        }
+        let data = net.get("playlist-membership");
+        let membership = data.as_ref().and_then(|data| match data.as_deref() {
+            Ok(Data::PlaylistMembership(playlists)) => Some(playlists),
+            _ => None,
+        });
+        if retry_missing && data.is_some()
+            && st.menu_playlists.iter().any(|playlist| membership.is_none_or(|p| !p.contains_key(&playlist.kind)))
+        {
+            net.refresh("playlist-membership");
+        }
+        let rows = app.get_menu_playlists();
+        for (i, playlist) in st.menu_playlists.iter().enumerate() {
+            let contains = membership.and_then(|p| p.get(&playlist.kind)).is_some_and(|ids| ids.contains(&track.id));
+            if let Some(mut row) = rows.row_data(i).filter(|row| row.contains_track != contains) {
+                row.contains_track = contains;
+                rows.set_row_data(i, row);
             }
         }
     }
@@ -4123,6 +4161,7 @@ fn register_extra(app: &App) {
         })
     });
     app.on_menu_playlist(|i| with_ctx(|c| c.menu_playlist(i.max(0) as usize)));
+    app.on_refresh_menu_playlist_membership(|| with_ctx(|c| c.refresh_menu_playlist_membership(true)));
     app.on_jump_queue(|i| with_ctx(|c| c.player.send(Cmd::Jump(i.max(0) as usize))));
     app.on_open_current_album(|| {
         with_ctx(|c| {

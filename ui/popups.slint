@@ -76,6 +76,7 @@ export component MenuRow inherits Rectangle {
     in property <image> icon;
     in property <bool> has-icon: true;
     in property <bool> submenu;
+    in property <bool> checked;
     in property <bool> active;
     in property <bool> themed;
     callback clicked;
@@ -94,7 +95,7 @@ export component MenuRow inherits Rectangle {
     }
     Text {
         x: has-icon ? 44px : 12px;
-        width: parent.width - self.x - (submenu ? 36px : 12px);
+        width: parent.width - self.x - (submenu || checked ? 36px : 12px);
         text: root.text;
         overflow: elide;
         font-size: Theme.font-size-label-m;
@@ -102,9 +103,9 @@ export component MenuRow inherits Rectangle {
         color: ta.has-hover || active ? ink-on : ink;
         animate color { duration: App.motion ? 150ms : 0ms; }
     }
-    if submenu: Icon {
+    if submenu || checked: Icon {
         x: parent.width - 32px;
-        source: Icons.arrow-right-small;
+        source: submenu ? Icons.arrow-right-small : Icons.check;
         size: 20px;
         colorize: ink;
     }
@@ -169,7 +170,12 @@ export component TrackMenu inherits Rectangle {
             submenu: m.submenu;
             themed: App.menu-themed;
             active: App.submenu-open == i;
-            hovered => { App.submenu-open = m.submenu ? i : -1; }
+            hovered => {
+                App.submenu-open = m.submenu ? i : -1;
+                if m.id == "playlist" {
+                    App.refresh-menu-playlist-membership();
+                }
+            }
             clicked => {
                 if !m.submenu {
                     App.menu-open = false;
@@ -221,8 +227,9 @@ export component TrackMenu inherits Rectangle {
             for p[i] in App.menu-playlists: MenuRow {
                 y: i * 36px;
                 width: parent.width;
-                text: p;
+                text: p.title;
                 has-icon: false;
+                checked: sid == "playlist" && p.contains-track;
                 themed: App.menu-themed;
                 clicked => {
                     App.menu-open = false;

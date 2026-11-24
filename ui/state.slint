@@ -128,6 +128,11 @@ export struct MenuEntry {
     submenu: bool,
 }
 
+export struct MenuPlaylist {
+    title: string,
+    contains-track: bool,
+}
+
 export struct WheelEntry {
     name: string,
     description: string,
@@ -309,7 +314,7 @@ export global App {
     in-out property <length> menu-y;
     in property <[MenuEntry]> menu-items;
     in-out property <int> submenu-open: -1;
-    in property <[string]> menu-playlists;
+    in property <[MenuPlaylist]> menu-playlists;
     // Меню в теме приложения (кроме волны и плеера на весь экран) и под кнопкой, а не над ней.
     in property <bool> menu-themed;
     in property <bool> menu-below;
@@ -462,6 +467,7 @@ export global App {
     callback open-track-menu(length, length);
     callback menu-action(string);
     callback menu-playlist(int);
+    callback refresh-menu-playlist-membership();
     callback jump-queue(int);
     callback open-current-album();
     callback open-current-artist(int);

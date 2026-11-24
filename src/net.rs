@@ -1,6 +1,6 @@
 //! Данные страниц: грузятся в фоне по ключу, пока грузятся свежие — показываются старые.
 
-use crate::api::{Album, Api, Artist, ArtistFull, Collection, Lyrics, Playlist, Res, Search, SearchLanding, Track};
+use crate::api::{Album, Api, Artist, ArtistFull, Collection, Lyrics, Playlist, PlaylistMembership, Res, Search, SearchLanding, Track};
 use crate::config::log;
 use crate::player::{After, Cmd, ListKind, Player, Source};
 use std::collections::HashMap;
@@ -26,6 +26,7 @@ pub enum Data {
     SearchLanding(SearchLanding),
     List(ListData),
     Playlists(Vec<Playlist>),
+    PlaylistMembership(PlaylistMembership),
     Lyrics(Lyrics),
     Collection(Collection),
     Skeleton(crate::landing::Skeleton),
@@ -163,6 +164,7 @@ fn fetch(api: &Api, uid: &str, key: &str) -> Res<Data> {
             }))
         }
         "playlists" => api.playlists(uid).map(Data::Playlists),
+        "playlist-membership" => api.playlist_membership(uid).map(Data::PlaylistMembership),
         "lyrics" => api.lyrics(arg).map(Data::Lyrics),
         "collection" => api.collection(uid).map(Data::Collection),
         "history" => crate::history::load(api).map(Data::History),
@@ -318,6 +320,12 @@ impl Net {
         let (me, pl) = (self.clone(), pl.clone());
         std::thread::spawn(move || match me.api.add_to_playlist(&me.uid, &pl.kind, &tracks) {
             Ok(()) => {
+                let mut store = me.store.lock().unwrap();
+                let membership = store.get_mut("playlist-membership").and_then(Slot::edit);
+                if let Some(Data::PlaylistMembership(playlists)) = membership {
+                    playlists.entry(pl.kind.clone()).or_default().extend(tracks.iter().map(|t| t.id.clone()));
+                }
+                drop(store);
                 me.say(format!("«{what}» добавлен в «{}»", pl.title));
                 me.refresh(&format!("playlist:{}:{}", pl.uid, pl.kind));
                 me.refresh("playlists");
