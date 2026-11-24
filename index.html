@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Яндекс Музыка RS</title>
+<meta name="description" content="Неофициальный клиент Яндекс Музыки на Rust для Windows, Linux и Android. Бесплатно, с открытым кодом.">
+<meta name="theme-color" content="#0b0b0b">
+<link rel="icon" href="img/logo.svg" type="image/svg+xml">
+<link rel="preload" href="fonts/oswald-cyrillic.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/manrope-cyrillic.woff2" as="font" type="font/woff2" crossorigin>
+<style>
+@font-face{font-family:Manrope;font-weight:500 700;font-display:swap;src:url(fonts/manrope-cyrillic.woff2) format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
+@font-face{font-family:Manrope;font-weight:500 700;font-display:swap;src:url(fonts/manrope-latin.woff2) format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
+@font-face{font-family:Oswald;font-weight:600 700;font-display:swap;src:url(fonts/oswald-cyrillic.woff2) format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
+@font-face{font-family:Oswald;font-weight:600 700;font-display:swap;src:url(fonts/oswald-latin.woff2) format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
+
+:root{
+  --ink:#0b0b0b; --fg:#f3f0e6; --paper:#efebdf; --gray:#615d55;
+  --y:#ffdf2b; --or:#ff5b14;
+  --head:Oswald,Impact,sans-serif;
+  --spring:cubic-bezier(.2,1.5,.4,1);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden;overscroll-behavior:none}
+body{background:var(--ink);color:var(--fg);font:500 18px/1.5 Manrope,system-ui,sans-serif;-webkit-font-smoothing:antialiased;touch-action:none}
+a{color:inherit;text-decoration:none}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+img{display:block;width:100%;height:auto}
+svg{display:block;fill:currentColor}
+:focus-visible{outline:2px solid var(--ring);outline-offset:4px}
+
+body{--nav:var(--fg);--don-bg:var(--y);--don-fg:var(--ink);--ring:var(--nav)}
+body[data-scene="1"]{--nav:var(--ink);--don-bg:var(--ink);--don-fg:var(--y)}
+body[data-scene="2"]{--nav:var(--ink);--don-bg:var(--ink);--don-fg:var(--fg)}
+
+nav{position:fixed;inset:16px 24px auto;z-index:20;display:flex;justify-content:space-between;align-items:center;pointer-events:none}
+nav>*{pointer-events:auto}
+.brand,.links{display:flex;align-items:center;height:48px;color:var(--nav);transition:color .4s}
+.brand{gap:12px;border-radius:12px;font:700 20px/1 var(--head);text-transform:uppercase;letter-spacing:.02em}
+.brand img{width:40px;height:40px}
+.links{gap:24px;font-weight:700;font-size:16px}
+.links a{border-radius:12px;opacity:.75;transition:opacity .2s}
+.links a:hover{opacity:1}
+.links .donate{height:48px;padding:0 24px;display:flex;align-items:center;border-radius:99px;background:var(--don-bg);color:var(--don-fg);transition:background .4s,color .4s,transform .35s var(--spring)}
+.links .donate:active{transform:scale(.97)}
+
+.dots{color:var(--nav);position:fixed;right:24px;top:50%;translate:0 -50%;z-index:20;display:flex;flex-direction:column;gap:8px}
+.dots button{width:12px;height:12px;border-radius:99px;background:currentColor;opacity:.3;transition:height .4s var(--spring),opacity .3s}
+.dots button:hover{opacity:.6}
+.dots button.on{height:32px;opacity:1}
+
+.stage{position:fixed;inset:0;perspective:1000px;overflow:hidden}
+.scenes{position:absolute;inset:0;transform-style:preserve-3d}
+.sc{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:96px 24px 48px;will-change:transform,opacity}
+.big{font:700 clamp(48px,min(8.6vw,15vh),140px)/1.04 var(--head);text-transform:uppercase;letter-spacing:.01em}
+.pill{display:inline-flex;align-items:center;gap:.16em;height:.92em;padding:0 .3em;border-radius:99px;vertical-align:.02em;font-size:.86em}
+#osPill{cursor:pointer;transition:transform .4s var(--spring)}
+.lead{max-width:32em;margin:24px auto 0;font-size:clamp(18px,1.4vw,20px);line-height:1.6}
+.btn{display:inline-flex;align-items:center;justify-content:center;height:56px;margin-top:32px;padding:0 32px;border-radius:99px;font-weight:700;font-size:18px;line-height:1;white-space:nowrap;transition:transform .15s ease-out}
+.btn:active{transform:scale(.97)}
+
+.s0 .rs{color:var(--y)}
+.s0 .lead{color:#c9c5ba}
+.s0 .btn{background:var(--y);color:var(--ink)}
+
+.s1{color:var(--ink);justify-content:flex-start;padding-top:clamp(96px,13vh,144px)}
+.s1 .big{font-size:clamp(44px,min(7.4vw,11vh),118px)}
+.s1 .pill{background:var(--ink);color:var(--y);min-width:2.6em;justify-content:center}
+.pill .word{display:inline-block}
+.pill .word.flip{animation:flip .45s var(--spring)}
+@keyframes flip{from{transform:translateY(60%) rotateX(80deg);opacity:0}}
+.devs{position:relative;width:min(1120px,94vw,150vh);aspect-ratio:16/7.2;margin-top:clamp(24px,5vh,56px);perspective:1600px}
+.rig{position:absolute;inset:0;pointer-events:none;transform-style:preserve-3d;transform:rotateX(var(--rx,0deg)) rotateY(var(--ry,0deg))}
+.dev{position:absolute;pointer-events:auto;cursor:pointer;container-type:inline-size;transform-style:preserve-3d;transition:transform .55s var(--spring)}
+.dev:focus-visible{outline:0}
+.dev:focus-visible .frame{outline:2px solid var(--ring);outline-offset:6px}
+.dev .frame{transition:transform .5s var(--spring)}
+.dev:hover .frame{transform:translateY(-16px) scale(1.02)}
+.tag{position:absolute;left:50%;bottom:0;translate:-50% 50%;white-space:nowrap;padding:8px 16px;border-radius:99px;background:var(--ink);color:var(--y);font:700 14px/16px Manrope,sans-serif}
+.tablet{left:0;top:24%;width:32%;transform:rotateY(18deg) translateZ(-40px)}
+.tablet .frame{padding:2.5cqw;border-radius:6.5cqw;background:#151515;box-shadow:0 40px 72px -32px #0008}
+.tablet img{border-radius:4cqw}
+.pc{left:34.5%;top:0;width:47%}
+.pc .frame{border-radius:12px;overflow:hidden;background:#000;box-shadow:0 0 0 1px #0003,0 48px 88px -32px #000a}
+.phone{right:1%;top:6%;width:14.5%;transform:rotateY(-20deg) translateZ(60px)}
+.phone .frame{padding:4cqw;border-radius:13cqw;background:#151515;box-shadow:0 48px 80px -24px #000a}
+.phone img{border-radius:9cqw}
+
+.s2{color:var(--ink)}
+.s2 .pill{background:var(--ink);color:var(--or)}
+.s2 .lead{color:#220c02}
+.s2 .btn{height:64px;font-size:20px;background:var(--ink);color:var(--fg)}
+.s2 footer{position:absolute;left:24px;right:24px;bottom:24px;display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px 24px;font-size:14px;line-height:20px;color:#220c02}
+.s2 footer a{border-bottom:1px solid}
+
+dialog{--ring:var(--ink);margin:auto;width:min(480px,calc(100% - 32px));max-height:calc(100dvh - 32px);overflow:auto;touch-action:pan-y;border:0;border-radius:32px;background:var(--paper);color:var(--ink);padding:32px}
+dialog::backdrop{background:#0009;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+dialog[open]{animation:dlg .45s var(--spring)}
+@keyframes dlg{from{transform:translateY(32px) scale(.94);opacity:0}}
+dialog h3{font:700 32px/40px var(--head);text-transform:uppercase;padding-right:48px}
+dialog .note{color:var(--gray);font-size:16px;line-height:24px;margin-top:4px}
+.opts{display:grid;gap:8px;margin-top:24px}
+.opts a{display:flex;justify-content:space-between;align-items:center;gap:12px;min-height:56px;padding:16px 24px;border-radius:16px;background:#fff;font-size:16px;font-weight:700;line-height:24px;transition:background .15s ease-out}
+.opts a:hover{background:var(--y)}
+.opts small{font-size:14px;font-weight:600;color:var(--gray)}
+.arch{display:inline-flex;margin-top:16px;padding:4px;border-radius:99px;background:#0000000f}
+.arch[hidden]{display:none}
+.arch button{height:32px;padding:0 16px;border-radius:99px;font-weight:700;font-size:14px;color:var(--gray);transition:background .25s,color .25s}
+.arch button.on{background:var(--ink);color:var(--y)}
+.x{position:absolute;top:32px;right:32px;width:40px;height:40px;display:grid;place-items:center;border-radius:99px;background:#0000000f;transition:background .15s}
+.x:hover{background:#0002}
+.x svg{width:16px;height:16px}
+
+@media (max-width:760px){
+  nav{inset-inline:16px}
+  .links a:not(.donate),.brand span,.dots{display:none}
+  .sc{padding-inline:16px}
+  .devs{width:min(100%,480px);aspect-ratio:auto;margin-top:5vh;perspective:none}
+  .rig{position:static;display:grid;grid-template-columns:1fr 32%;gap:48px 32px;align-items:center;transform:none}
+  .dev{position:relative;inset:auto;width:auto;transform:none}
+  .pc{grid-column:1/-1;order:-1}
+  .dev:hover .frame{transform:none}
+  .tag{font-size:12px;padding:4px 12px}
+  .s1 .big{font-size:clamp(40px,12vw,80px)}
+  .s2 .btn{padding:0 24px;font-size:18px}
+  .s2 footer{left:16px;right:16px}
+  dialog{padding:24px}
+  .x{top:24px;right:24px}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none!important}}
+</style>
+</head>
+<body>
+
+<nav>
+  <button class="brand" data-go="0"><img src="img/logo.svg" width="40" height="40" alt=""><span>Музыка RS</span></button>
+  <div class="links">
+    <a href="https://github.com/SpolzerMod/yamusic-rs">GitHub</a>
+    <button class="donate" data-go="2">Поддержать</button>
+  </div>
+</nav>
+
+<div class="dots" id="dots"><button data-go="0" aria-label="Начало"></button><button data-go="1" aria-label="Скачать"></button><button data-go="2" aria-label="Поддержать"></button></div>
+
+<main class="stage">
+  <div class="scenes">
+
+    <section class="sc s0">
+      <h1 class="big">Яндекс Музыка<br>на <span class="rs">Rust</span></h1>
+      <p class="lead">Неофициальный клиент с тем же интерфейсом, только лёгкий и быстрый. Входишь своим аккаунтом и слушаешь.</p>
+      <button class="btn" data-open="all">Скачать</button>
+    </section>
+
+    <section class="sc s1">
+      <h2 class="big">Слушай на <span class="pill" id="osPill"><span class="word" id="osWord">Windows</span></span></h2>
+      <div class="devs" id="devs">
+        <div class="rig" id="rig">
+          <div class="dev tablet" data-open="android" data-word="планшете" role="button" tabindex="0" aria-label="Скачать для планшета на Android">
+            <div class="frame"><img src="img/android-tablet.webp" width="1400" height="587" alt="Яндекс Музыка RS на планшете с Android"></div>
+            <span class="tag">Планшет</span>
+          </div>
+          <div class="dev pc" data-open="pc" data-word="ПК" role="button" tabindex="0" aria-label="Скачать для Windows или Linux">
+            <div class="frame"><img src="img/pc.webp" width="1280" height="800" alt="Яндекс Музыка RS на компьютере"></div>
+            <span class="tag">Windows и Linux</span>
+          </div>
+          <div class="dev phone" data-open="android" data-word="телефоне" role="button" tabindex="0" aria-label="Скачать для Android">
+            <div class="frame"><img src="img/android.webp" width="600" height="1258" alt="Яндекс Музыка RS на Android"></div>
+            <span class="tag">Android</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="sc s2">
+      <h2 class="big">Поддержи<br><span class="pill">проект</span></h2>
+      <p class="lead">Без рекламы, подписок и сбора данных. Если клиент пригодился, закинь сколько не жалко. Деньги пойдут на Музыку RS и мои следующие открытые проекты.</p>
+      <a class="btn" href="https://pay.cloudtips.ru/p/befb620d" target="_blank" rel="noopener">Поддержать через CloudTips</a>
+      <footer>
+        <span>Неофициальный клиент. Не связан с ООО «Яндекс».</span>
+        <span><a href="https://github.com/SpolzerMod/yamusic-rs">Код на GitHub</a> · GPL-3.0</span>
+      </footer>
+    </section>
+
+  </div>
+</main>
+
+<dialog id="dlg">
+  <form method="dialog"><button class="x" aria-label="Закрыть"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.3 2 8 6.7 12.7 2 14 3.3 9.3 8l4.7 4.7-1.3 1.3L8 9.3 3.3 14 2 12.7 6.7 8 2 3.3z"/></svg></button></form>
+  <h3 id="dlgTitle"></h3>
+  <p class="note" id="dlgNote"></p>
+  <div class="arch" id="arch"><button data-arch="x64" class="on">x86-64</button><button data-arch="arm">ARM64</button></div>
+  <div class="opts" id="dlgOpts"></div>
+</dialog>
+
+<script>
+(() => {
+  const $ = s => document.querySelector(s);
+  const $$ = s => [...document.querySelectorAll(s)];
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  const REPO = 'SpolzerMod/yamusic-rs';
+  const PAGE = `https://github.com/${REPO}/releases/latest`;
+  const DL = PAGE + '/download/';
+  const files = {
+    exe: DL + 'yamusic-rs.exe',
+    appimage: DL + 'yamusic-rs-x86_64.AppImage',
+    appimage_arm: DL + 'yamusic-rs-aarch64.AppImage',
+    deb_arm: PAGE, rpm_arm: PAGE,
+    apk: DL + 'yamusic-rs-arm64-v8a.apk',
+    deb: PAGE, rpm: PAGE, page: PAGE,
+  };
+  const relink = () => $$('[data-file]').forEach(a => a.href = files[a.dataset.file]);
+  fetch(`https://api.github.com/repos/${REPO}/releases/latest`).then(r => r.json()).then(rel => {
+    for (const {name, browser_download_url: url} of rel.assets || []) {
+      if (/_amd64\.deb$/.test(name)) files.deb = url;
+      if (/x86_64\.rpm$/.test(name)) files.rpm = url;
+      if (/_arm64\.deb$/.test(name)) files.deb_arm = url;
+      if (/aarch64\.rpm$/.test(name)) files.rpm_arm = url;
+    }
+    relink();
+  }).catch(() => {});
+
+  const dlg = $('#dlg');
+  const variants = {
+    pc: ['Для ПК', 'Выбери систему и формат', {
+      x64: [['Windows', '.exe', 'exe'], ['Linux, любой дистрибутив', 'AppImage', 'appimage'], ['Debian, Ubuntu, Mint', '.deb', 'deb'], ['Fedora, openSUSE', '.rpm', 'rpm']],
+      arm: [['Linux, любой дистрибутив', 'AppImage', 'appimage_arm'], ['Debian, Ubuntu', '.deb', 'deb_arm'], ['Fedora, openSUSE', '.rpm', 'rpm_arm']],
+    }],
+    all: ['Скачать', 'Windows, Linux и Android 8 и новее', {
+      x64: [['Windows', '.exe', 'exe'], ['Linux, любой дистрибутив', 'AppImage', 'appimage'], ['Debian, Ubuntu, Mint', '.deb', 'deb'], ['Fedora, openSUSE', '.rpm', 'rpm'], ['Android, телефон и планшет', 'APK', 'apk']],
+      arm: [['Linux, любой дистрибутив', 'AppImage', 'appimage_arm'], ['Debian, Ubuntu', '.deb', 'deb_arm'], ['Fedora, openSUSE', '.rpm', 'rpm_arm'], ['Android, телефон и планшет', 'APK', 'apk']],
+    }],
+    android: ['Для Android', 'Телефоны и планшеты, Android 8 и новее', {x64: [['Скачать APK', 'arm64', 'apk']]}],
+  };
+  let kind = 'pc', arch = 'x64';
+  const fill = () => {
+    const opts = variants[kind][2][arch];
+    $('#dlgOpts').innerHTML = opts.map(([a, b, f]) => `<a data-file="${f}" href="${files[f]}">${a}<small>${b}</small></a>`).join('');
+    $$('#arch button').forEach(b => b.classList.toggle('on', b.dataset.arch === arch));
+  };
+  const open = k => {
+    kind = k; arch = 'x64';
+    $('#dlgTitle').textContent = variants[k][0];
+    $('#dlgNote').textContent = variants[k][1];
+    $('#arch').hidden = k === 'android';
+    fill();
+    dlg.showModal();
+  };
+  $$('#arch button').forEach(b => b.addEventListener('click', () => { arch = b.dataset.arch; fill(); }));
+  $$('[data-open]').forEach(el => {
+    el.addEventListener('click', () => open(el.dataset.open));
+    el.addEventListener('keydown', e => { if (e.key === 'Enter') open(el.dataset.open); });
+  });
+  dlg.addEventListener('click', e => { if (e.target === dlg) dlg.close(); });
+
+  relink();
+
+  const word = $('#osWord');
+  const cycle = ['Windows', 'Linux', 'Android'];
+  let ci = 0, hovering = false;
+  const say = w => { if (word.textContent === w) return; word.textContent = w; word.classList.remove('flip'); void word.offsetWidth; word.classList.add('flip'); };
+  setInterval(() => { if (!hovering && step === 1) say(cycle[ci = (ci + 1) % cycle.length]); }, 1700);
+  $$('.dev').forEach(d => {
+    d.addEventListener('pointerenter', () => { hovering = true; say(d.dataset.word); });
+    d.addEventListener('pointerleave', () => { hovering = false; });
+  });
+  $('#osPill').addEventListener('click', () => open(word.textContent === 'Android' || word.textContent === 'телефоне' || word.textContent === 'планшете' ? 'android' : 'pc'));
+
+  const scenes = $$('.sc'), dots = $$('#dots button');
+  const STOPS = scenes.length;
+  const bgs = [[11, 11, 11], [255, 223, 43], [255, 91, 20]];
+  let T = 0, step = 0, anim = null, animEnd = 0;
+
+  const render = () => {
+    const i0 = Math.max(0, Math.min(STOPS - 2, Math.floor(T))), f = T - i0;
+    const c = bgs[i0].map((v, k) => Math.round(v + (bgs[i0 + 1][k] - v) * f));
+    document.body.style.background = `rgb(${c})`;
+    scenes.forEach((s, i) => {
+      const d = T - i;
+      const z = d > 0 ? d * 650 : d * 1600;
+      const o = Math.max(0, Math.min(1, d > 0 ? 1 - d * 1.8 : 1 + d * 1.4));
+      s.style.transform = `translate3d(0,0,${z.toFixed(1)}px)`;
+      s.style.opacity = o.toFixed(3);
+      s.style.visibility = o > 0 ? 'visible' : 'hidden';
+      s.style.pointerEvents = Math.abs(d) < .3 ? 'auto' : 'none';
+    });
+  };
+
+  const ease = t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+  const go = n => {
+    n = Math.max(0, Math.min(STOPS - 1, n));
+    if (n === step && !anim) return;
+    step = n;
+    document.body.dataset.scene = n;
+    dots.forEach((d, i) => d.classList.toggle('on', i === n));
+    scenes.forEach((s, i) => s.classList.toggle('on', i === n));
+    anim = {from: T, to: n, t0: performance.now(), dur: reduced ? 1 : 1150};
+    requestAnimationFrame(tick);
+  };
+  const tick = now => {
+    if (!anim) return;
+    const p = Math.max(0, Math.min(1, (now - anim.t0) / anim.dur));
+    T = anim.from + (anim.to - anim.from) * ease(p);
+    render();
+    if (p < 1) requestAnimationFrame(tick); else { anim = null; animEnd = now; }
+  };
+
+  let lastWheel = 0;
+  addEventListener('wheel', e => {
+    if (dlg.open) return;
+    const now = performance.now(), gap = now - lastWheel;
+    lastWheel = now;
+    if (anim || Math.abs(e.deltaY) < 3) return;
+    if (gap < 200 && now - animEnd < 700) return;
+    go(step + Math.sign(e.deltaY));
+  }, {passive: true});
+  let ty = null;
+  addEventListener('touchstart', e => { ty = e.touches[0].clientY; }, {passive: true});
+  addEventListener('touchend', e => {
+    if (ty === null || dlg.open) return;
+    const dy = ty - e.changedTouches[0].clientY;
+    if (Math.abs(dy) > 45) go(step + Math.sign(dy));
+    ty = null;
+  });
+  addEventListener('keydown', e => {
+    if (dlg.open) return;
+    if (['ArrowDown', 'PageDown', ' '].includes(e.key)) { e.preventDefault(); go(step + 1); }
+    if (['ArrowUp', 'PageUp'].includes(e.key)) { e.preventDefault(); go(step - 1); }
+  });
+  $$('[data-go]').forEach(b => b.addEventListener('click', () => go(+b.dataset.go)));
+
+  dots[0].classList.add('on'); scenes[0].classList.add('on');
+  render();
+
+  if (!matchMedia('(pointer: fine)').matches) return;
+  const devs = $('#devs'), rig = $('#rig');
+  let tx = 0, tyy = 0, x = 0, y = 0, raf = 0;
+  const lean = () => {
+    x += (tx - x) * .09; y += (tyy - y) * .09;
+    rig.style.setProperty('--rx', x.toFixed(2) + 'deg');
+    rig.style.setProperty('--ry', y.toFixed(2) + 'deg');
+    raf = Math.abs(tx - x) + Math.abs(tyy - y) > .01 ? requestAnimationFrame(lean) : 0;
+  };
+  devs.addEventListener('pointermove', e => {
+    const r = devs.getBoundingClientRect();
+    tx = ((e.clientY - r.top) / r.height - .5) * -7;
+    tyy = ((e.clientX - r.left) / r.width - .5) * 9;
+    if (!raf) raf = requestAnimationFrame(lean);
+  });
+  devs.addEventListener('pointerleave', () => { tx = tyy = 0; if (!raf) raf = requestAnimationFrame(lean); });
+})();
+</script>
+</body>
+</html>
