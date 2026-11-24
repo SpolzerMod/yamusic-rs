@@ -1887,10 +1887,14 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     app.on_dislike(move || p.send(Cmd::Dislike));
     let p = player.clone();
     app.on_cycle_repeat(move || {
-        let next = match p.state().repeat {
-            Repeat::Off => Repeat::All,
-            Repeat::All => Repeat::One,
-            Repeat::One => Repeat::Off,
+        let s = p.state();
+        // В волне повторять можно только трек, как у оригинала: «нет ↔ трек».
+        let next = match (s.repeat, s.source.station().is_some()) {
+            (Repeat::Off, true) => Repeat::One,
+            (_, true) => Repeat::Off,
+            (Repeat::Off, false) => Repeat::All,
+            (Repeat::All, false) => Repeat::One,
+            (Repeat::One, false) => Repeat::Off,
         };
         p.send(Cmd::Repeat(next));
     });

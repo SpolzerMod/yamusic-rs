@@ -1011,6 +1011,11 @@ impl Engine {
     }
 
     fn set_source(&mut self, src: Source) {
+        // Повтора списка в волне нет: оригинал снимает его, когда включается волна, а повтор
+        // трека оставляет.
+        if src.station().is_some() && self.repeat == Repeat::All {
+            self.repeat = Repeat::Off;
+        }
         self.source = src.clone();
         self.sh().source = src;
     }
@@ -2087,4 +2092,17 @@ fn explicit_filter_survives_repeat_and_previous() {
     assert_eq!(resumed.as_deref(), Some("1"));
     assert_eq!(repeated.as_deref(), Some("2"));
     assert_eq!(previous_track, "2");
+}
+
+#[cfg(test)]
+#[test]
+fn wave_drops_list_repeat_and_keeps_track_repeat() {
+    let mut engine = Engine::new(mpsc::channel().0, Default::default(), Default::default(), Arc::new(|| {}), Default::default());
+    engine.repeat = Repeat::All;
+    engine.cmd(Cmd::Wave(Source::Wave));
+    let after_list = engine.repeat;
+    engine.cmd(Cmd::Repeat(Repeat::One));
+    engine.cmd(Cmd::Wave(Source::Seed { station: "activity:road-trip".into(), header: String::new(), title: String::new() }));
+    assert_eq!(after_list, Repeat::Off);
+    assert_eq!(engine.repeat, Repeat::One);
 }
