@@ -389,6 +389,7 @@ export component SettingsPage inherits Rectangle {
             spacing: 36px;
             alignment: start;
             SettingItem { title: T.t("Очистить память"); clicked => { App.setting("clear"); } }
+            SettingItem { title: T.t("Горячие клавиши"); clicked => { App.shortcuts-open = true; } }
             SettingItem {
                 title: T.t("Эквалайзер");
                 desc: App.eq-on ? T.t("Включен") : T.t("Выключен");

@@ -190,6 +190,17 @@ export global App {
     // Подсказка у значка «!»: текст дисклеймера рядом с курсором.
     in property <string> hint-text: "Возрастное ограничение 18+";
     in-out property <bool> hint-open;
+    // Окно «Горячие клавиши».
+    in-out property <bool> shortcuts-open;
+    // У поля ввода (`Field`) фокус и где это поле: горячие клавиши в это время не работают,
+    // клик мимо поля снимает с него фокус.
+    in-out property <bool> text-focused;
+    in-out property <length> text-x;
+    in-out property <length> text-y;
+    in-out property <length> text-w;
+    in-out property <length> text-h;
+    // Увеличивается, когда поле должно отдать фокус.
+    in-out property <int> blur-tick;
     in-out property <length> hint-x;
     in-out property <length> hint-y;
     // История переходов, как в браузере.

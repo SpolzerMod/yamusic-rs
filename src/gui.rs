@@ -3,6 +3,7 @@
 slint::include_modules!();
 
 mod history_ui;
+mod keys;
 mod landing_ui;
 
 use crate::save::{file_name_max, save_track, saved_already};
@@ -418,6 +419,8 @@ impl Ctx {
         };
         let ui = self.ui();
         let app = ui.global::<App>();
+        // Поле ввода старой страницы исчезает вместе с ней и о потере фокуса не сообщает.
+        app.set_text_focused(false);
         let from = app.get_page();
         if remember {
             let cur = self.here();
@@ -2184,10 +2187,28 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         use slint::winit_030::EventResult;
         use winit::event::{ElementState, MouseButton, WindowEvent};
         match ev {
-            #[cfg(target_os = "linux")]
             WindowEvent::CursorMoved { position, .. } => {
                 let p = position.to_logical::<f32>(_w.scale_factor() as f64);
-                LAST_CURSOR.set(slint::LogicalPosition::new(p.x, p.y));
+                let p = slint::LogicalPosition::new(p.x, p.y);
+                keys::set_cursor(p);
+                #[cfg(target_os = "linux")]
+                LAST_CURSOR.set(p);
+                EventResult::Propagate
+            }
+            WindowEvent::ModifiersChanged(m) => {
+                keys::set_modifiers(m.state());
+                EventResult::Propagate
+            }
+            WindowEvent::KeyboardInput { event, is_synthetic: false, .. } => {
+                if let winit::keyboard::PhysicalKey::Code(code) = event.physical_key {
+                    if keys::on_key(code, event.state == ElementState::Pressed, event.repeat) {
+                        return EventResult::PreventDefault;
+                    }
+                }
+                EventResult::Propagate
+            }
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
+                keys::on_mouse_down();
                 EventResult::Propagate
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Back, .. } => {

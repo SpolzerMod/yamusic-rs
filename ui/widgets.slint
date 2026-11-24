@@ -303,6 +303,28 @@ export component Field inherits TextInput {
     selection-background-color: #5c8ff566;
     selection-foreground-color: self.color;
     callback escape();
+    // Пока поле с фокусом, горячие клавиши окна его не трогают (src/gui/keys.rs).
+    changed has-focus => {
+        App.text-focused = self.has-focus;
+        if self.has-focus {
+            App.text-x = self.absolute-position.x;
+            App.text-y = self.absolute-position.y;
+            App.text-w = self.width;
+            App.text-h = self.height;
+        }
+    }
+    property <int> blur: App.blur-tick;
+    changed blur => {
+        if self.has-focus {
+            self.clear-focus();
+        }
+    }
+    // Выключенное поле (как поля названия и описания плейлиста после правки) отдаёт фокус.
+    changed enabled => {
+        if !self.enabled && self.has-focus {
+            self.clear-focus();
+        }
+    }
     key-pressed(e) => {
         if e.text == Key.Escape {
             self.escape();
