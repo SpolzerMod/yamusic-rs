@@ -7,7 +7,7 @@ use crate::player::{After, Cmd, ListKind, Player, Source};
 use crate::{now, sys, App, Icons, PBlock, PCard, PPage, PRow, Pages, IMAGES};
 use serde_json::Value;
 use slint::{Color, ComponentHandle, Image, Model, ModelRc, SharedString, VecModel};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -174,6 +174,7 @@ struct Entry {
     error: String,
     scroll: f32,
     blocks: Rc<VecModel<PBlock>>,
+    cover_window: Rc<Cell<(usize, usize)>>,
 }
 
 struct St {
@@ -187,11 +188,13 @@ struct St {
     search_timer: slint::Timer,
     /// Номер запроса поиска: устаревшие ответы не показываются.
     search_seq: u64,
+    generation: i32,
     menu_track: Option<Track>,
 }
 
 thread_local! {
     static ST: RefCell<Option<St>> = const { RefCell::new(None) };
+    static COVER_TIMER: slint::Timer = slint::Timer::default();
 }
 
 fn with<R>(f: impl FnOnce(&mut St) -> R) -> Option<R> {
@@ -199,6 +202,7 @@ fn with<R>(f: impl FnOnce(&mut St) -> R) -> Option<R> {
 }
 
 pub fn start(ui: &App, api: Arc<Api>, player: Player) {
+    COVER_TIMER.with(|timer| timer.stop());
     ST.with(|s| {
         *s.borrow_mut() = Some(St {
             ui: ui.as_weak(),
@@ -210,6 +214,7 @@ pub fn start(ui: &App, api: Arc<Api>, player: Player) {
             cache: HashMap::new(),
             search_timer: slint::Timer::default(),
             search_seq: 0,
+            generation: 0,
             menu_track: None,
         })
     });
@@ -219,6 +224,13 @@ pub fn start(ui: &App, api: Arc<Api>, player: Player) {
     p.on_open_search(|| push(Key::Search));
     p.on_card(|b, i| card(b as usize, i as usize));
     p.on_track(|b, i| track(b as usize, i as usize));
+    p.on_visible_track_covers(|generation, block, first, end| {
+        COVER_TIMER.with(|timer| {
+            timer.start(slint::TimerMode::SingleShot, Duration::from_millis(32), move || {
+                with(|s| s.load_visible_track_covers(generation, block as usize, first as usize, end as usize));
+            });
+        });
+    });
     p.on_more(|b| more(b as usize));
     p.on_chip(|b, i| chip(b as usize, i as usize));
     p.on_action(|b, n| action(b as usize, n));
@@ -316,7 +328,15 @@ impl St {
         self.serial += 1;
         let id = self.serial;
         let cached = self.cache.get(&key).cloned();
-        self.stack.push(Entry { id, key: key.clone(), data: cached.clone(), error: String::new(), scroll: 0.0, blocks: Rc::new(VecModel::default()) });
+        self.stack.push(Entry {
+            id,
+            key: key.clone(),
+            data: cached.clone(),
+            error: String::new(),
+            scroll: 0.0,
+            blocks: Rc::new(VecModel::default()),
+            cover_window: Rc::new(Cell::new((0, 0))),
+        });
         self.show();
         if cached.is_some() && !matches!(key, Key::Collection | Key::Likes | Key::LikedArtists | Key::Dislikes | Key::Playlists | Key::Albums | Key::History) {
             return;
@@ -374,11 +394,15 @@ impl St {
         }
         let icons = ui.get_icons();
         let scale = ui.window().scale_factor();
+        let virtual_tracks = e.key == Key::Likes;
+        self.generation = self.generation.wrapping_add(1);
+        e.cover_window.set((0, 0));
+        e.cover_window = Rc::new(Cell::new((0, 0)));
         let blocks: Vec<PBlock> = e.data.as_ref().map(|d| d.visible().into_iter().map(|b| pblock(b, &icons)).collect()).unwrap_or_default();
         e.blocks = Rc::new(VecModel::from(blocks));
         if let Some(d) = &e.data {
             for (i, b) in d.visible().into_iter().enumerate() {
-                load_block_images(&e.blocks, i, b, scale);
+                load_block_images(&e.blocks, i, b, scale, !virtual_tracks);
             }
         }
         let d = e.data.as_ref();
@@ -390,10 +414,43 @@ impl St {
             root: is_root,
             loading: e.data.is_none() && e.error.is_empty(),
             error: e.error.clone().into(),
+            virtual_tracks,
+            generation: self.generation,
             blocks: ModelRc::from(e.blocks.clone()),
         });
         pages.set_scroll(e.scroll);
         pages.set_shown(true);
+    }
+
+    fn load_visible_track_covers(&self, generation: i32, block: usize, first: usize, end: usize) {
+        if generation != self.generation {
+            return;
+        }
+        let Some(entry) = self.top().filter(|entry| entry.key == Key::Likes) else { return };
+        let Some(ui) = self.ui.upgrade() else { return };
+        let Some(data) = &entry.data else { return };
+        let Some(tracks) = data.visible().get(block).map(|b| b.tracks.as_slice()) else { return };
+        let Some(model) = entry.blocks.row_data(block) else { return };
+        let end = end.min(tracks.len());
+        let first = first.min(end);
+        let (old_first, old_end) = entry.cover_window.replace((first, end));
+        for i in (old_first..old_end).filter(|i| !(first..end).contains(i)) {
+            if let Some(mut row) = model.rows.row_data(i) {
+                row.cover = Image::default();
+                model.rows.set_row_data(i, row);
+            }
+        }
+        let size = ((52.0 * ui.window().scale_factor()).round() as u32).clamp(1, 1000);
+        IMAGES.with(|images| {
+            for i in (first..end).filter(|i| !(old_first..old_end).contains(i)) {
+                let Some(uri) = &tracks[i].cover else { continue };
+                let window = entry.cover_window.clone();
+                load_track_cover(images, &model.rows, i, uri, size, move || {
+                    let (first, end) = window.get();
+                    (first..end).contains(&i)
+                });
+            }
+        });
     }
 
     fn top(&self) -> Option<&Entry> {
@@ -431,7 +488,7 @@ impl St {
         let Some(e) = self.stack.last() else { return };
         let Some(block) = e.data.as_ref().and_then(|d| d.visible().get(b).map(|b| (*b).clone())) else { return };
         e.blocks.set_row_data(b, pblock(&block, &icons));
-        load_block_images(&e.blocks, b, &block, scale);
+        load_block_images(&e.blocks, b, &block, scale, e.key != Key::Likes);
     }
 }
 
@@ -859,7 +916,7 @@ fn card_dp(kind: i32) -> f32 {
     }
 }
 
-fn load_block_images(blocks: &Rc<VecModel<PBlock>>, bi: usize, b: &Block, scale: f32) {
+fn load_block_images(blocks: &Rc<VecModel<PBlock>>, bi: usize, b: &Block, scale: f32, eager_track_covers: bool) {
     let Some(pb) = blocks.row_data(bi) else { return };
     let px = |dp: f32| ((dp * scale).round() as u32).clamp(1, 1000);
     IMAGES.with(|images| {
@@ -893,17 +950,24 @@ fn load_block_images(blocks: &Rc<VecModel<PBlock>>, bi: usize, b: &Block, scale:
                 });
             }
         }
-        let rows = pb.rows.clone();
-        let size = px(52.0);
-        for (i, t) in b.tracks.iter().enumerate() {
-            let Some(uri) = &t.cover else { continue };
-            let m = rows.clone();
-            images.get(&api::pic(uri, size), size, move |img| {
-                if let Some(mut row) = m.row_data(i) {
-                    row.cover = img.clone();
-                    m.set_row_data(i, row);
-                }
-            });
+        if eager_track_covers {
+            let size = px(52.0);
+            for (i, t) in b.tracks.iter().enumerate() {
+                let Some(uri) = &t.cover else { continue };
+                load_track_cover(images, &pb.rows, i, uri, size, || true);
+            }
+        }
+    });
+}
+
+fn load_track_cover(images: &crate::images::Images, rows: &ModelRc<PRow>, i: usize, uri: &str, size: u32, visible: impl FnOnce() -> bool + 'static) {
+    let rows = rows.clone();
+    images.get(&api::pic(uri, size), size, move |img| {
+        if visible() {
+            if let Some(mut row) = rows.row_data(i) {
+                row.cover = img.clone();
+                rows.set_row_data(i, row);
+            }
         }
     });
 }

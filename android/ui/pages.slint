@@ -53,6 +53,8 @@ export struct PPage {
     root: bool,
     loading: bool,
     error: string,
+    virtual-tracks: bool,
+    generation: int,
     blocks: [PBlock],
 }
 
@@ -63,6 +65,7 @@ export global Pages {
     in-out property <string> query;
     callback card(int, int);
     callback track(int, int);
+    callback visible-track-covers(int, int, int, int);
     callback more(int);
     callback chip(int, int);
     // Кнопки шапок: блок и номер кнопки.
@@ -711,6 +714,10 @@ component BlockView inherits Rectangle {
     in property <PBlock> block;
     in property <int> index;
     in property <Icons> icons;
+    in property <bool> virtual-tracks;
+    in property <int> generation;
+    in property <length> viewport-top;
+    in property <length> viewport-height;
     property <int> kind: root.block.kind;
     property <bool> has-heading: root.block.title != "" && root.kind != K.artist-head && root.kind != K.album-head && root.kind != K.list-head && root.kind != K.likes-head && root.kind != K.wave && root.kind != K.link && root.kind != K.about && root.kind != K.text && root.kind != K.empty;
     property <length> head-h: root.has-heading ? 56px : 0;
@@ -779,7 +786,7 @@ component BlockView inherits Rectangle {
         center: true;
         clicked(i) => { Pages.card(root.index, i); }
     }
-    if root.kind == K.tracks || root.kind == K.numbered: VerticalLayout {
+    if root.kind == K.numbered || (root.kind == K.tracks && !root.virtual-tracks): VerticalLayout {
         y: root.top;
         height: root.body;
         alignment: start;
@@ -789,6 +796,33 @@ component BlockView inherits Rectangle {
             icons: root.icons;
             clicked => { Pages.track(root.index, i); }
             menu => { Pages.menu(root.index, i); }
+        }
+    }
+    if root.virtual-tracks && root.kind == K.tracks: Rectangle {
+        y: root.top;
+        height: root.body;
+        property <int> page-generation: root.generation;
+        property <length> offset: root.viewport-top - root.y - root.top;
+        property <int> first: clamp(floor(offset / 76px) - 3, 0, root.block.rows.length);
+        property <int> end: clamp(ceil((offset + root.viewport-height) / 76px) + 3, first, root.block.rows.length);
+
+        function load-covers() {
+            Pages.visible-track-covers(page-generation, root.index, first, end);
+        }
+
+        init => { self.load-covers(); }
+        changed first => { self.load-covers(); }
+        changed end => { self.load-covers(); }
+        changed page-generation => { self.load-covers(); }
+
+        for i in end - first: TrackLine {
+            property <int> row-index: first + i;
+            y: row-index * 76px;
+            width: parent.width;
+            item: root.block.rows[row-index];
+            icons: root.icons;
+            clicked => { Pages.track(root.index, row-index); }
+            menu => { Pages.menu(root.index, row-index); }
         }
     }
     if root.kind == K.rows: VerticalLayout {
@@ -1585,6 +1619,10 @@ export component PageView inherits Rectangle {
                 block: b;
                 index: i;
                 icons: root.icons;
+                virtual-tracks: root.page.virtual-tracks;
+                generation: root.page.generation;
+                viewport-top: -flick.content-y;
+                viewport-height: flick.height;
             }
             if root.page.loading: Text {
                 height: 160px;
