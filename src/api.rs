@@ -1448,6 +1448,21 @@ impl Api {
         }
     }
 
+    /// Подпись и название последней волны аккаунта («Моя волна под занятие», «В дороге»), если
+    /// это волна по `station`. Оригинал берёт их отсюда же (`getLastVibe`); станция — первый сид.
+    pub fn wave_title(&self, station: &str) -> Option<(String, String)> {
+        let v = match self.get("/rotor/wave/last", &[]) {
+            Ok(v) => v,
+            Err(e) => {
+                crate::config::log(format!("rotor/wave/last: {e}"));
+                return None;
+            }
+        };
+        let name = str_of(&v, "name");
+        (v.pointer("/seeds/0").and_then(|s| s.as_str()) == Some(station) && !name.is_empty())
+            .then(|| (str_of(&v, "description"), name))
+    }
+
     /// Какие настройки есть у «Моей волны»: названия, картинки и seeds приходят с сервера.
     pub fn wave_setting_groups(&self) -> Res<Vec<WaveSettingGroup>> {
         let v = self.get("/rotor/wave/settings", &[])?;

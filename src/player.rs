@@ -396,7 +396,14 @@ fn fetch_resume(api: &Api) -> Res<Option<Resume>> {
                 "playlist" => ("Моя волна по плейлисту", String::new()),
                 _ => ("Моя волна", String::new()),
             };
-            Source::Seed { station: entity.clone(), header: header.into(), title }
+            // Занятие, настроение, плейлист по треку не узнать, и после перезапуска вместо
+            // «Моя волна под занятие «В дороге»» была просто «Моя волна». Играла последняя волна
+            // аккаунта, её название знает сервер.
+            let (header, title) = match title.is_empty().then(|| api.wave_title(&entity)).flatten() {
+                Some((desc, name)) => (if desc.is_empty() { header.to_string() } else { desc }, name),
+                None => (header.to_string(), title),
+            };
+            Source::Seed { station: entity.clone(), header, title }
         }
         "PLAYLIST" => Source::List { kind: ListKind::Playlist, title: String::new(), id: entity },
         "ALBUM" => Source::List { kind: ListKind::Album, title: album(&entity), id: entity },
