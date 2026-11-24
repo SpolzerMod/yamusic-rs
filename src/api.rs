@@ -1216,6 +1216,11 @@ impl Api {
             .map(|_| ())
     }
 
+    /// Всё содержимое блока лендинга, как на странице `entities` оригинала: первая страница, 100 карточек.
+    pub fn block_entities(&self, id: &str) -> Res<Vec<Card>> {
+        Ok(cards(&self.get_raw(&format!("/landing/block/{id}/entities?page=0&pageSize=100"))?))
+    }
+
     /// Вкладки «Смотреть всё» коллекции: block — playlists-liked-and-playlists-created или albums-liked-and-albums-presaved.
     pub fn collection_tabs(&self, block: &str) -> Res<Vec<(String, Vec<Card>)>> {
         let v = self.get_raw(&format!("/landing-blocks/collection/{block}?count=500"))?;
