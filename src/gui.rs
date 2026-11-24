@@ -2094,10 +2094,24 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         slint::CloseRequestResponse::KeepWindowShown
     });
 
-    ui.window().on_winit_window_event(|_w, ev| {
+    let weak = ui.as_weak();
+    ui.window().on_winit_window_event(move |_w, ev| {
         use slint::winit_030::EventResult;
         use winit::event::{ElementState, MouseButton, WindowEvent};
+        use winit::keyboard::{Key, NamedKey};
         match ev {
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed && !event.repeat && event.logical_key == Key::Named(NamedKey::Escape) =>
+            {
+                if let Some(ui) = weak.upgrade() {
+                    let app = ui.global::<App>();
+                    if app.get_fullscreen() && !app.get_logged_out() && !app.get_menu_open() && !app.get_account_open() && !app.get_eq_open() {
+                        app.set_fullscreen(false);
+                        return EventResult::PreventDefault;
+                    }
+                }
+                EventResult::Propagate
+            }
             #[cfg(target_os = "linux")]
             WindowEvent::CursorMoved { position, .. } => {
                 let p = position.to_logical::<f32>(_w.scale_factor() as f64);
