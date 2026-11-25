@@ -12,6 +12,9 @@ use tungstenite::{Message, WebSocket};
 
 use crate::api::Res;
 
+mod connect;
+pub use connect::{Event, Service};
+
 const REDIRECT: &str = "wss://ynison.music.yandex.ru/redirector.YnisonRedirectService/GetRedirectToYnison";
 
 type Socket = WebSocket<MaybeTlsStream<TcpStream>>;
@@ -57,6 +60,7 @@ pub fn playing(token: &str, device_id: &str) -> Res<Playing> {
 }
 
 /// Трек в очереди, которую видят другие клиенты.
+#[derive(Clone)]
 pub struct Playable {
     pub id: String,
     pub album_id: String,
@@ -64,6 +68,7 @@ pub struct Playable {
 }
 
 /// Что играет здесь.
+#[derive(Clone)]
 pub struct Now {
     /// `RADIO`, `PLAYLIST`, `ALBUM`, `ARTIST` или `VARIOUS`.
     pub entity_type: &'static str,
@@ -76,13 +81,14 @@ pub struct Now {
     pub paused: bool,
     /// Сессия волны; пустая у списков.
     pub session: String,
+    pub repeat: &'static str,
 }
 
 /// Записать, что играет здесь: оригинал и следующий запуск продолжат с этого места.
 pub fn publish(token: &str, device_id: &str, now: &Now) -> Res<()> {
     let (mut ws, _) = connect(token, device_id)?;
     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
-    let version = json!({ "device_id": device_id, "version": ts, "timestamp_ms": ts });
+    let version = json!({ "device_id": device_id, "version": ts.to_string(), "timestamp_ms": ts.to_string() });
     let radio = now.entity_type == "RADIO";
     let list: Vec<Value> = now
         .tracks
@@ -130,16 +136,16 @@ pub fn publish(token: &str, device_id: &str, now: &Now) -> Res<()> {
             "player_state": {
                 "player_queue": queue,
                 "status": {
-                    "duration_ms": now.duration_ms,
+                    "duration_ms": now.duration_ms.to_string(),
                     "paused": now.paused,
                     "playback_speed": 1,
-                    "progress_ms": now.progress_ms,
+                    "progress_ms": now.progress_ms.to_string(),
                     "version": version,
                 },
             },
         },
         "rid": format!("{device_id}-{ts}"),
-        "player_action_timestamp_ms": ts,
+        "player_action_timestamp_ms": ts.to_string(),
         "activity_interception_type": "DO_NOT_INTERCEPT_BY_DEFAULT",
     });
     ws.send(Message::text(update.to_string())).map_err(|e| format!("ynison: {e}"))?;
@@ -157,6 +163,7 @@ fn connect(token: &str, device_id: &str) -> Res<(Socket, Value)> {
     let to = read_json(&mut redirect)?;
     let _ = redirect.close(None);
     let host = to.get("host").and_then(Value::as_str).ok_or("ynison: нет host")?;
+    if !connect::valid_host(host) { return Err("ynison: некорректный host".into()); }
     protocol["Ynison-Redirect-Ticket"] = to.get("redirect_ticket").cloned().unwrap_or_default();
     protocol["Ynison-Session-Id"] = to.get("session_id").cloned().unwrap_or_default();
 
@@ -172,8 +179,10 @@ fn open(url: &str, token: &str, protocol: &Value) -> Res<Socket> {
     let h = req.headers_mut();
     h.insert("Sec-WebSocket-Protocol", header(format!("Bearer, v2, {protocol}"))?);
     h.insert("Origin", HeaderValue::from_static("https://music.yandex.ru"));
-    h.insert("Authorization", header(format!("OAuth {token}"))?);
-    let (ws, _) = tungstenite::connect(req).map_err(|e| format!("ynison: {e}"))?;
+    let mut authorization = header(format!("OAuth {token}"))?;
+    authorization.set_sensitive(true);
+    h.insert("Authorization", authorization);
+    let (ws, _) = tungstenite::connect(req).map_err(|_| "ynison: ошибка подключения".to_string())?;
     Ok(ws)
 }
 
@@ -189,7 +198,7 @@ fn read_json(ws: &mut Socket) -> Res<Value> {
 
 /// Первое сообщение: пустая очередь с нулевой версией, поэтому сервер оставляет свою.
 fn shadow_hello(device_id: &str) -> Value {
-    let version = json!({ "device_id": device_id, "version": 0, "timestamp_ms": 0 });
+    let version = json!({ "device_id": device_id, "version": "0", "timestamp_ms": "0" });
     json!({
         "update_full_state": {
             "player_state": {
@@ -204,10 +213,10 @@ fn shadow_hello(device_id: &str) -> Value {
                     "from_optional": "",
                 },
                 "status": {
-                    "duration_ms": 0,
+                    "duration_ms": "0",
                     "paused": true,
                     "playback_speed": 1,
-                    "progress_ms": 0,
+                    "progress_ms": "0",
                     "version": version,
                 },
             },
@@ -220,24 +229,39 @@ fn shadow_hello(device_id: &str) -> Value {
             "is_currently_active": false,
         },
         "rid": device_id,
-        "player_action_timestamp_ms": 0,
+        "player_action_timestamp_ms": "0",
         "activity_interception_type": "DO_NOT_INTERCEPT_BY_DEFAULT",
     })
 }
 
-fn parse(state: &Value) -> Option<Playing> {
+pub(super) fn parse(state: &Value) -> Option<Playing> {
     let player = state.get("player_state")?;
     let queue = player.get("player_queue")?;
     let status = player.get("status")?;
     let str_at = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
-    let track_ids = queue
+    let items = queue
         .get("playable_list")?
-        .as_array()?
+        .as_array()?;
+    // Never filter before resolving an index: podcasts/local items would shift it.
+    if items.iter().any(|p| p.get("playable_type").and_then(Value::as_str) != Some("TRACK")) {
+        return None;
+    }
+    let mut track_ids: Vec<String> = items
         .iter()
-        .filter(|p| p.get("playable_type").and_then(Value::as_str) == Some("TRACK"))
         .map(|p| str_at(p, "playable_id"))
         .collect();
-    let index = queue.get("current_playable_index").and_then(Value::as_i64).filter(|i| *i >= 0)? as usize;
+    let mut index = queue.get("current_playable_index").and_then(Value::as_i64).filter(|i| *i >= 0)? as usize;
+    if index >= track_ids.len() { return None; }
+    if let Some(order) = queue["shuffle_optional"]["playable_indices"].as_array() {
+        let indices: Option<Vec<usize>> = order.iter().map(|v| v.as_u64().map(|i| i as usize)).collect();
+        let indices = indices?;
+        let unique: std::collections::HashSet<usize> = indices.iter().copied().collect();
+        if indices.len() != items.len() || unique.len() != items.len() || indices.iter().any(|i| *i >= items.len()) {
+            return None;
+        }
+        index = indices.iter().position(|i| *i == index)?;
+        track_ids = indices.iter().map(|i| track_ids[*i].clone()).collect();
+    }
     let num = |v: &Value| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok()));
     Some(Playing {
         entity_type: str_at(queue, "entity_type"),
@@ -250,6 +274,45 @@ fn parse(state: &Value) -> Option<Playing> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn queue() -> Value {
+        json!({"player_state": {
+            "player_queue": {"playable_list": [
+                {"playable_id": "a", "playable_type": "TRACK"},
+                {"playable_id": "b", "playable_type": "TRACK"},
+                {"playable_id": "c", "playable_type": "TRACK"}
+            ], "current_playable_index": 1},
+            "status": {"progress_ms": "12345"}
+        }})
+    }
+
+    #[test]
+    fn parses_int64_and_shuffle_without_moving_current_track() {
+        let mut value = queue();
+        value["player_state"]["player_queue"]["shuffle_optional"] = json!({"playable_indices": [2, 0, 1]});
+        let parsed = parse(&value).unwrap();
+        assert_eq!(parsed.track_ids, ["c", "a", "b"]);
+        assert_eq!(parsed.index, 2);
+        assert_eq!(parsed.track_id(), Some("b"));
+        assert_eq!(parsed.progress_ms, 12345);
+    }
+
+    #[test]
+    fn rejects_invalid_indices_permutations_and_unsupported_content() {
+        for order in [json!([0, 0, 1]), json!([0, 1]), json!([0, 1, 3])] {
+            let mut value = queue();
+            value["player_state"]["player_queue"]["shuffle_optional"] = json!({"playable_indices": order});
+            assert!(parse(&value).is_none());
+        }
+        let mut value = queue();
+        value["player_state"]["player_queue"]["current_playable_index"] = json!(-1);
+        assert!(parse(&value).is_none());
+        value["player_state"]["player_queue"]["current_playable_index"] = json!(1);
+        value["player_state"]["player_queue"]["playable_list"][0]["playable_type"] = json!("PODCAST");
+        assert!(parse(&value).is_none());
+    }
+
     /// Живой запрос с токеном из config.json: `cargo test ynison -- --ignored --nocapture`.
     /// Записывает текущий трек на 30-й секунде и проверяет, что сервер это запомнил.
     #[test]
@@ -270,6 +333,7 @@ mod tests {
             duration_ms: 180_000,
             paused: true,
             session: String::new(),
+            repeat: "NONE",
         };
         super::publish(&token, &device, &now).unwrap();
         let after = super::playing(&token, &device).unwrap();

@@ -28,6 +28,8 @@ pub struct Config {
     pub token_expires: Option<u64>,
     pub volume: f32,
     pub discord_enabled: bool,
+    pub ynison_enabled: bool,
+    pub ynison_name: String,
     pub discord_app_id: String,
     /// system / light / dark
     pub theme: String,
@@ -87,6 +89,8 @@ impl Default for Config {
             token_expires: None,
             volume: 0.6,
             discord_enabled: true,
+            ynison_enabled: false,
+            ynison_name: "Яндекс Музыка RS".into(),
             discord_app_id: String::new(),
             theme: "system".into(),
             quality: 0,
@@ -258,4 +262,3 @@ pub fn now_secs() -> u64 {
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
-

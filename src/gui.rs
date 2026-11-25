@@ -228,6 +228,8 @@ impl Ctx {
         }
         if app.get_page() == Page::Settings {
             app.set_discord_status(self.discord.status().into());
+            app.set_ynison_status(s.ynison_status.clone().into());
+            app.set_ynison_devices(s.ynison_devices.clone().into());
         }
         if s.status == Status::Ready && self.st.borrow().net.is_none() {
             self.on_ready(&s.uid);
@@ -1777,6 +1779,9 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     app.set_log_volume(cfg.log_volume);
     app.set_wave_motion(cfg.wave_motion);
     app.set_crossfade(cfg.crossfade_secs > 0);
+    app.set_ynison_on(cfg.ynison_enabled);
+    app.set_ynison_name(cfg.ynison_name.clone().into());
+    player.send(Cmd::Ynison { enabled: cfg.ynison_enabled, name: cfg.ynison_name.clone() });
     app.set_hidden_blocks(landing_ui::hidden_titles(&cfg).into());
     let places = Rc::new(Places::default());
     places.mini.set(cfg.mini_pos.map(|[x, y]| slint::PhysicalPosition::new(x, y)));
@@ -3056,6 +3061,16 @@ impl Ctx {
         let ui = self.ui();
         let app = ui.global::<App>();
         match id {
+            "ynison" | "ynison-name" => {
+                let mut st = self.st.borrow_mut();
+                if id == "ynison" { st.cfg.ynison_enabled = !st.cfg.ynison_enabled; }
+                let name: String = app.get_ynison_name().trim().chars().take(80).filter(|c| !c.is_control()).collect();
+                st.cfg.ynison_name = if name.is_empty() { "Яндекс Музыка RS".into() } else { name };
+                app.set_ynison_on(st.cfg.ynison_enabled);
+                app.set_ynison_name(st.cfg.ynison_name.clone().into());
+                self.player.send(Cmd::Ynison { enabled: st.cfg.ynison_enabled, name: st.cfg.ynison_name.clone() });
+                st.cfg.save();
+            }
             "clear" => {
                 self.images.clear();
                 sys::release_memory();

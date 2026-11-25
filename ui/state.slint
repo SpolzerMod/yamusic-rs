@@ -461,6 +461,10 @@ export global App {
     in property <bool> log-volume;
     in property <bool> wave-motion;
     in property <bool> crossfade;
+    in property <bool> ynison-on;
+    in-out property <string> ynison-name;
+    in property <string> ynison-status;
+    in property <string> ynison-devices;
     // Режим работы: «Плавный» — анимации и кэш слоёв, «Лёгкий» — без них.
     in property <bool> motion: true;
     // Статус «Слушает» в профиле Discord и что с ним сейчас.

@@ -1,7 +1,7 @@
 // Меню профиля (в стиле Яндекс ID), страница настроек и экран входа по коду.
 
 import { Theme } from "theme.slint";
-import { Icons, Icon, Cover, NavCircle, PillButton, ScrollBar } from "widgets.slint";
+import { Icons, Icon, Cover, NavCircle, PillButton, ScrollBar, Field } from "widgets.slint";
 import { T, App } from "state.slint";
 
 // Меню профиля — окно Яндекс ID оригинала (iframe yandex.ru/user-id): 320 в ширину,
@@ -473,6 +473,40 @@ export component SettingsPage inherits Rectangle {
                 toggle: true;
                 on: App.discord-on;
                 clicked => { App.setting("discord"); }
+            }
+            VerticalLayout {
+                spacing: 16px;
+                SettingItem {
+                    title: "Унисон / Ynison";
+                    desc: App.ynison-status;
+                    toggle: true;
+                    on: App.ynison-on;
+                    clicked => { App.setting("ynison"); }
+                }
+                Text {
+                    text: T.t("Имя устройства");
+                    font-size: 14px;
+                    color: Theme.controls-color-primary-text-enabled;
+                }
+                Rectangle {
+                    height: 40px;
+                    border-radius: 8px;
+                    background: Theme.dark ? #ffffff0f : #00000008;
+                    Field {
+                        x: 12px; y: 8px;
+                        width: parent.width - 24px; height: 24px;
+                        text <=> App.ynison-name;
+                        single-line: true;
+                        font-size: 16px;
+                        color: Theme.controls-color-primary-text-enabled-variant;
+                        accepted => { App.setting("ynison-name"); }
+                    }
+                }
+                SettingItem {
+                    title: T.t("Сохранить имя устройства");
+                    desc: App.ynison-devices;
+                    clicked => { App.setting("ynison-name"); }
+                }
             }
             SettingItem {
                 title: App.linux ? T.t("Запускать вместе с системой") : T.t("Запускать вместе с Windows");

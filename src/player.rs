@@ -57,6 +57,8 @@ impl Source {
 pub enum After {
     Loop,
     Wave(Source),
+    /// Remote queue with repeat disabled: do not wrap or start radio.
+    Stop,
 }
 
 #[derive(Clone, Copy, PartialEq, Default, Debug)]
@@ -91,6 +93,8 @@ pub struct Shared {
     pub resumed: bool,
     /// Формат играющего файла: «MP3 320», «AAC».
     pub format: String,
+    pub ynison_status: String,
+    pub ynison_devices: String,
 }
 
 /// Как положение ползунка громкости переводится в усиление.
@@ -128,6 +132,7 @@ pub enum Cmd {
     AllowExplicit(bool),
     /// Сколько треки перетекают друг в друга; ноль — без кроссфейда.
     Crossfade(Duration),
+    Ynison { enabled: bool, name: String },
     /// Приложение закрывается: записать в Ynison, где остановились, и ответить.
     Leave(Sender<()>),
 }
@@ -143,6 +148,9 @@ enum Msg {
     Prefetch { id: String, res: Res<Audio> },
     Resume(Res<Option<Resume>>),
     Error(String),
+    YnisonWake(u64),
+    Ynison(u64, crate::ynison::Event),
+    YnisonTracks { epoch: u64, revision: u64, state: serde_json::Value, tracks: Res<Vec<Track>> },
 }
 
 type Notify = Arc<dyn Fn() + Send + Sync>;
@@ -497,6 +505,16 @@ struct Engine {
     /// Когда записать состояние в Ynison: правки идут пачкой (перемотка, пауза), пишем одну.
     ynison_due: Option<Instant>,
     ynison_at: Instant,
+    ynison: Option<crate::ynison::Service>,
+    ynison_enabled: bool,
+    ynison_name: String,
+    ynison_epoch: u64,
+    ynison_revision: u64,
+    ynison_active: bool,
+    ynison_remote: bool,
+    ynison_claim: bool,
+    ynison_loading: bool,
+    ynison_pending: Option<serde_json::Value>,
     /// Текущее прослушивание для `/plays`.
     listen: Option<Listen>,
     fetching: bool,
@@ -567,6 +585,16 @@ impl Engine {
             resume_at: None,
             ynison_due: None,
             ynison_at: Instant::now(),
+            ynison: None,
+            ynison_enabled: false,
+            ynison_name: String::new(),
+            ynison_epoch: 0,
+            ynison_revision: 0,
+            ynison_active: false,
+            ynison_remote: false,
+            ynison_claim: false,
+            ynison_loading: false,
+            ynison_pending: None,
             restore_last: None,
             listen: None,
             fetching: false,
@@ -1083,6 +1111,7 @@ impl Engine {
                 }
             }
             self.advance(End::Finished);
+            if self.ynison_enabled { self.publish_soon(); }
             self.sync();
             (self.notify)();
             return;
@@ -1111,9 +1140,96 @@ impl Engine {
 
     fn handle(&mut self, msg: Msg) {
         match msg {
-            Msg::Cmd(c) => self.cmd(c),
+            Msg::Cmd(c) => {
+                if matches!(&c, Cmd::PlayPause | Cmd::Resume | Cmd::Next | Cmd::Prev | Cmd::Wave(_) | Cmd::TuneWave(_) | Cmd::PlayList { .. } | Cmd::Jump(_)) {
+                    self.ynison_claim = true;
+                    self.ynison_revision = self.ynison_revision.wrapping_add(1);
+                    self.ynison_pending = None;
+                }
+                self.cmd(c);
+            }
+            Msg::YnisonWake(epoch) => {
+                if epoch == self.ynison_epoch {
+                    let events = self.ynison.as_ref().map(|s| s.take_events()).unwrap_or_default();
+                    for event in events { self.handle(Msg::Ynison(epoch, event)); }
+                }
+            }
+            Msg::Ynison(epoch, event) if epoch == self.ynison_epoch => {
+                use crate::ynison::Event;
+                match event {
+                    Event::Status(status) => self.sh().ynison_status = status,
+                    Event::Devices(devices) => self.sh().ynison_devices = devices,
+                    Event::State { state, active, changed } => {
+                        let was_active = self.ynison_active;
+                        self.ynison_active = active;
+                        self.ynison_remote = true;
+                        if !active {
+                            self.ynison_revision = self.ynison_revision.wrapping_add(1);
+                            self.ynison_pending = None;
+                        }
+                        if was_active && !active && !self.paused { self.cmd(Cmd::PlayPause); }
+                        if let Some(v) = state["remote_volume"].as_f64() {
+                            self.cmd(Cmd::Volume(v as f32));
+                        }
+                        if active && changed {
+                            self.ynison_revision = self.ynison_revision.wrapping_add(1);
+                            self.ynison_pending = None;
+                            if let Some(p) = crate::ynison::parse(&state) {
+                                let local_ids: Vec<String> = self.ynison_now().map(|n| n.tracks.into_iter().map(|t| t.id).collect()).unwrap_or_default();
+                                if local_ids == p.track_ids && self.current.as_ref().map(|t| t.id.as_str()) == p.track_id() {
+                                    self.apply_ynison_status(&state);
+                                } else {
+                                    self.fetch_ynison_tracks(state);
+                                }
+                            }
+                        }
+                        self.ynison_remote = false;
+                    }
+                }
+            }
+            Msg::Ynison(_, _) => {}
+            Msg::YnisonTracks { epoch, revision, state, tracks } => {
+                if epoch != self.ynison_epoch { return; }
+                self.ynison_loading = false;
+                if let Some(pending) = self.ynison_pending.take() {
+                    self.fetch_ynison_tracks(pending);
+                    return;
+                }
+                if revision != self.ynison_revision || !self.ynison_active { return; }
+                match tracks {
+                    Ok(tracks) => {
+                        let Some(p) = crate::ynison::parse(&state) else { return };
+                        // API can omit unavailable tracks or return a different order.
+                        let by_id: HashMap<String, Track> = tracks.into_iter().map(|t| (t.id.clone(), t)).collect();
+                        let ordered: Option<Vec<Track>> = p.track_ids.iter().map(|id| by_id.get(id).cloned()).collect();
+                        let Some(tracks) = ordered else { self.error("В очереди Ynison есть недоступные треки"); return };
+                        if !crate::api::allow_explicit() && tracks.iter().any(|t| t.explicit) {
+                            self.error("Очередь Ynison содержит треки 18+; разрешите их в настройках");
+                            return;
+                        }
+                        self.ynison_remote = true;
+                        self.resume_at = p.track_id().map(|id| (id.to_string(), p.progress_ms as f32 / 1000.0));
+                        self.paused = state["player_state"]["status"]["paused"].as_bool().unwrap_or(true);
+                        // A received shuffle permutation has already been linearized by parse().
+                        self.shuffle = false;
+                        self.cmd(Cmd::PlayList {
+                            source: Source::List { kind: ListKind::Tracks, id: p.entity_id, title: "Ynison".into() },
+                            tracks: tracks.clone(), start: p.index, after: After::Stop,
+                        });
+                        self.history = tracks[..p.index].to_vec();
+                        self.trim_history();
+                        self.queue = tracks[p.index + 1..].iter().cloned().collect();
+                        self.apply_ynison_status(&state);
+                        self.ynison_remote = false;
+                    }
+                    Err(_) => self.error("Не удалось загрузить очередь Ynison"),
+                }
+            }
             Msg::Seek { seconds, track_generation, request } => {
                 if self.gen == track_generation && self.sh().seek_request == request {
+                    self.ynison_claim = true;
+                    self.ynison_revision = self.ynison_revision.wrapping_add(1);
+                    self.ynison_pending = None;
                     self.cmd(Cmd::Seek(seconds));
                 }
                 self.handled_seek = request;
@@ -1146,6 +1262,8 @@ impl Engine {
                 }
                 Err(e) => {
                     log(format!("account: {e}"));
+                    self.ynison = None;
+                    self.ynison_epoch = self.ynison_epoch.wrapping_add(1);
                     self.api = None;
                     self.sh().status = Status::Failed(e);
                 }
@@ -1221,12 +1339,14 @@ impl Engine {
     fn cmd(&mut self, c: Cmd) {
         match c {
             Cmd::Login(token) => {
+                self.ynison = None;
                 self.reset();
                 self.like_writes.clear();
                 self.likes.lock().unwrap().clear();
                 self.likes_changed();
                 let api = Api::new(&token);
                 self.api = Some(api.clone());
+                self.start_ynison();
                 {
                     let mut s = self.sh();
                     s.status = Status::Connecting;
@@ -1238,6 +1358,10 @@ impl Engine {
                 });
             }
             Cmd::Logout => {
+                self.ynison = None;
+                self.ynison_epoch = self.ynison_epoch.wrapping_add(1);
+                self.sh().ynison_status = "Нет входа".into();
+                self.sh().ynison_devices.clear();
                 self.reset();
                 self.api = None;
                 self.uid.clear();
@@ -1251,7 +1375,9 @@ impl Engine {
             }
             Cmd::Resume => self.resume(),
             Cmd::Leave(done) => {
-                if let (Some(api), Some(now)) = (self.api.clone(), self.ynison_now()) {
+                if self.ynison_enabled {
+                    self.ynison = None;
+                } else if let (Some(api), Some(now)) = (self.api.clone(), self.ynison_now()) {
                     if let Err(e) = crate::ynison::publish(api.token(), &crate::ynison::device_id(), &now) {
                         log(format!("ynison: {e}"));
                     }
@@ -1295,6 +1421,12 @@ impl Engine {
             Cmd::Volume(v) => {
                 self.volume = v.clamp(0.0, 1.0);
                 self.apply_volume();
+                self.publish_soon();
+            }
+            Cmd::Ynison { enabled, name } => {
+                self.ynison_enabled = enabled;
+                self.ynison_name = name;
+                self.start_ynison();
             }
             Cmd::Loudness(l) => {
                 self.loudness = l;
@@ -1365,7 +1497,10 @@ impl Engine {
                 self.refresh_wave();
                 self.flush_feedback();
             }
-            Cmd::Repeat(r) => self.repeat = r,
+            Cmd::Repeat(r) => {
+                self.repeat = r;
+                self.publish_soon();
+            }
             Cmd::Enqueue { track, next } => {
                 if next {
                     self.queue.push_front(track);
@@ -1376,6 +1511,7 @@ impl Engine {
                 } else {
                     self.queue.push_back(track);
                 }
+                self.publish_soon();
             }
             Cmd::AllowExplicit(allow) => self.set_allow_explicit(allow),
             Cmd::Crossfade(over) => self.crossfade = over,
@@ -1395,6 +1531,7 @@ impl Engine {
                         self.prefetch_next();
                     }
                 }
+                self.publish_soon();
             }
         }
     }
@@ -1596,6 +1733,10 @@ impl Engine {
                 self.set_source(src);
                 self.session.clear();
                 self.feedback("radioStarted", None, None);
+            }
+            After::Stop => {
+                self.paused = true;
+                self.list = Some(l);
             }
         }
     }
@@ -1852,6 +1993,7 @@ impl Engine {
     }
 
     fn publish_soon(&mut self) {
+        if self.ynison_remote { return; }
         self.ynison_due = Some(Instant::now() + Duration::from_secs(1));
     }
 
@@ -1859,12 +2001,85 @@ impl Engine {
     fn publish(&mut self) {
         self.ynison_due = None;
         self.ynison_at = Instant::now();
+        if let Some(service) = &self.ynison {
+            service.publish(self.ynison_now(), self.volume, self.ynison_claim);
+            self.ynison_claim = false;
+            return;
+        }
         let (Some(api), Some(now)) = (self.api.clone(), self.ynison_now()) else { return };
         let _ = self.bg.send(Box::new(move || {
             if let Err(e) = crate::ynison::publish(api.token(), &crate::ynison::device_id(), &now) {
                 log(format!("ynison: {e}"));
             }
         }));
+    }
+
+    fn start_ynison(&mut self) {
+        self.ynison = None;
+        self.ynison_epoch = self.ynison_epoch.wrapping_add(1);
+        self.ynison_active = false;
+        self.ynison_claim = false;
+        self.ynison_loading = false;
+        self.ynison_pending = None;
+        self.sh().ynison_devices.clear();
+        if !self.ynison_enabled {
+            self.sh().ynison_status = "Выключено".into();
+            return;
+        }
+        let Some(api) = self.api.as_ref() else {
+            self.sh().ynison_status = "Нет входа".into();
+            return;
+        };
+        let epoch = self.ynison_epoch;
+        let tx = self.tx.clone();
+        self.ynison = Some(crate::ynison::Service::start(api.token().into(), self.ynison_name.clone(), self.volume, move || {
+            let _ = tx.send(Msg::YnisonWake(epoch));
+        }));
+    }
+
+    fn fetch_ynison_tracks(&mut self, state: serde_json::Value) {
+        if self.ynison_loading {
+            self.ynison_pending = Some(state);
+            return;
+        }
+        let Some(p) = crate::ynison::parse(&state) else { return };
+        let Some(api) = self.api.clone() else { return };
+        self.ynison_loading = true;
+        let tx = self.tx.clone();
+        let epoch = self.ynison_epoch;
+        let revision = self.ynison_revision;
+        thread::spawn(move || {
+            let tracks = api.tracks(&p.track_ids);
+            let _ = tx.send(Msg::YnisonTracks { epoch, revision, state, tracks });
+        });
+    }
+
+    fn apply_ynison_status(&mut self, state: &serde_json::Value) {
+        self.repeat = match state["player_state"]["player_queue"]["options"]["repeat_mode"].as_str() {
+            Some("ONE") => Repeat::One,
+            Some("ALL") => Repeat::All,
+            _ => Repeat::Off,
+        };
+        let status = &state["player_state"]["status"];
+        let paused = status["paused"].as_bool().unwrap_or(true);
+        if paused != self.paused {
+            if paused { self.cmd(Cmd::PlayPause); } else { self.resume(); }
+        }
+        let value = &status["progress_ms"];
+        let mut position = value.as_u64().or_else(|| value.as_str().and_then(|s| s.parse().ok())).unwrap_or(0) as f32 / 1000.0;
+        if !paused {
+            let ts = &status["version"]["timestamp_ms"];
+            let timestamp = ts.as_u64().or_else(|| ts.as_str().and_then(|s| s.parse().ok())).unwrap_or(0);
+            if timestamp != 0 {
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+                position += now.saturating_sub(timestamp).min(24 * 60 * 60 * 1000) as f32 / 1000.0;
+            }
+        }
+        if self.loaded && (self.pos() - position).abs() > 1.5 {
+            self.cmd(Cmd::Seek(position.min(self.current.as_ref().map(|t| t.duration_ms as f32 / 1000.0).unwrap_or(position))));
+        } else if !self.loaded {
+            self.resume_at = self.current.as_ref().map(|t| (t.id.clone(), position));
+        }
     }
 
     fn ynison_now(&self) -> Option<crate::ynison::Now> {
@@ -1879,13 +2094,17 @@ impl Engine {
             Source::List { kind: ListKind::Tracks, .. } => ("VARIOUS", String::new()),
         };
         // У списка — весь список, у волны — текущий трек и то, что уже подобрано дальше.
-        let (tracks, index): (Vec<&Track>, usize) = match &self.list {
+        let (tracks, index): (Vec<&Track>, usize) = if self.ynison_enabled {
+            let history: Vec<&Track> = self.history.iter().rev().take(100).collect::<Vec<_>>().into_iter().rev().collect();
+            let index = history.len();
+            (history.into_iter().chain(std::iter::once(current)).chain(self.queue.iter()).collect(), index)
+        } else { match &self.list {
             Some(l) => match l.all.iter().position(|t| t.id == current.id) {
                 Some(i) => (l.all.iter().collect(), i),
                 None => (vec![current], 0),
             },
             None => (std::iter::once(current).chain(self.queue.iter().take(20)).collect(), 0),
-        };
+        } };
         let playable = |t: &&Track| crate::ynison::Playable {
             id: t.id.clone(),
             album_id: t.album_id.clone().unwrap_or_default(),
@@ -1901,6 +2120,7 @@ impl Engine {
             duration_ms: current.duration_ms,
             paused: self.paused,
             session: if self.list.is_none() { self.session.clone() } else { String::new() },
+            repeat: match self.repeat { Repeat::Off => "NONE", Repeat::All => "ALL", Repeat::One => "ONE" },
         })
     }
 
@@ -1987,6 +2207,49 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ynison_ignores_stale_session_and_metadata() {
+        use super::*;
+        let (tx, _) = mpsc::channel();
+        let mut e = Engine::new(tx, Default::default(), Default::default(), Arc::new(|| {}), Default::default());
+        e.ynison_epoch = 2;
+        e.handle(Msg::Ynison(1, crate::ynison::Event::Status("stale".into())));
+        assert_ne!(e.sh().ynison_status, "stale");
+        e.ynison_active = true;
+        e.ynison_revision = 3;
+        e.handle(Msg::YnisonTracks { epoch: 2, revision: 2, state: serde_json::json!({}), tracks: Err("stale".into()) });
+        assert!(e.sh().error.is_none());
+    }
+
+    #[test]
+    fn ynison_remote_volume_does_not_claim_or_echo() {
+        use super::*;
+        let (tx, _) = mpsc::channel();
+        let mut e = Engine::new(tx, Default::default(), Default::default(), Arc::new(|| {}), Default::default());
+        e.ynison_enabled = true;
+        e.handle(Msg::Ynison(0, crate::ynison::Event::State {
+            state: serde_json::json!({"remote_volume": 0.25}), active: false, changed: false,
+        }));
+        assert_eq!(e.volume, 0.25);
+        assert!(!e.ynison_claim);
+        assert!(e.ynison_due.is_none());
+    }
+
+    #[test]
+    fn ynison_losing_ownership_pauses_without_echo() {
+        use super::*;
+        let (tx, _) = mpsc::channel();
+        let mut e = Engine::new(tx, Default::default(), Default::default(), Arc::new(|| {}), Default::default());
+        e.ynison_active = true;
+        e.paused = false;
+        e.handle(Msg::Ynison(0, crate::ynison::Event::State {
+            state: serde_json::json!({}), active: false, changed: true,
+        }));
+        assert!(e.paused);
+        assert!(!e.ynison_active);
+        assert!(e.ynison_due.is_none());
+    }
+
     use super::*;
     use std::io::Cursor;
 
