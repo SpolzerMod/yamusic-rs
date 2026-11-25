@@ -659,7 +659,9 @@ impl Engine {
     /// Источник для звука: эквалайзер, декодирование наперёд и затухание для кроссфейда.
     fn source(&mut self, src: Decoder<Reader>, fade_in: Duration) -> impl rodio::Source<Item = f32> + Send + 'static {
         self.fade_out = Arc::default();
-        Fade::new(Ahead::new(Eq::new(src.convert_samples::<f32>(), self.eq.clone())), fade_in, self.fade_out.clone())
+        let rate = self.audio.as_ref().map_or_else(|| src.sample_rate(), |(out, _)| out.sample_rate());
+        let eq = Eq::new(src.convert_samples::<f32>(), self.eq.clone());
+        Fade::new(Ahead::new(eq, rate), fade_in, self.fade_out.clone())
     }
 
     /// Пора ли начать кроссфейд: до конца трека осталось его время и следующий трек уже скачан.
