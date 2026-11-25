@@ -329,19 +329,11 @@ component QualityItem inherits Rectangle {
     }
 }
 
-// «Настройки звука»: качество и эквалайзер, окно оригинала 430×612.
-export component SoundSettings inherits Rectangle {
+// «Настройки звука»: выбор качества и эквалайзер.
+component SoundSettingsContent inherits Rectangle {
     width: 430px;
     height: 353px + eq-block.height;
-    border-radius: 16px;
-    background: Theme.background-color-primary-enabled-popover;
-    border-width: 1px;
-    border-color: Theme.outline-color-primary-disabled;
-    drop-shadow-blur: 20px;
-    drop-shadow-offset-y: 1px;
-    drop-shadow-color: Theme.dark ? #0000007a : #0000003d;
     property <bool> presets-open;
-    TouchArea { }
 
     Text {
         x: 21px;
@@ -534,5 +526,27 @@ export component SoundSettings inherits Rectangle {
                 }
             }
         }
+    }
+}
+
+export component SoundSettings inherits Rectangle {
+    in property <length> available-height;
+    width: settings.width;
+    height: min(available-height, settings.height);
+    border-radius: 16px;
+    background: Theme.background-color-primary-enabled-popover;
+    border-width: 1px;
+    border-color: Theme.outline-color-primary-disabled;
+    drop-shadow-blur: 20px;
+    drop-shadow-offset-y: 1px;
+    drop-shadow-color: Theme.dark ? #0000007a : #0000003d;
+    TouchArea { }
+
+    Flickable {
+        content-width: self.width;
+        content-height: settings.height;
+        interactive: self.content-height > self.height;
+        mouse-drag-pan-enabled: false;
+        settings := SoundSettingsContent { x: 0; y: 0; }
     }
 }

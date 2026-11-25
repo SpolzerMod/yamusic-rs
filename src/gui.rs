@@ -3677,6 +3677,7 @@ impl Ctx {
         app.set_fs_mode(mode);
         app.set_fullscreen(true);
         app.set_menu_open(false);
+        app.set_eq_open(false);
         self.load_cover_big();
         self.sync_lyrics();
     }

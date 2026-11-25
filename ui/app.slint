@@ -92,6 +92,8 @@ export component AppWindow inherits Window {
     property <length> gap: Theme.spacer-size-m;
     property <length> pad-r: 12px;
     property <length> bar-h: new-vibe ? 0px : 80px;
+    property <length> bar-y: root.height - pad-r - bar-h;
+    property <length> sound-bottom: bar-h > 0 ? bar-y - gap - 16px : root.height - 16px;
 
     // Фон «Моей волны»: 16 ступеней палитры трека справа налево, как у оригинала.
     // На паузе все ступени чёрные: сплошная заливка вместо градиента на всё окно.
@@ -186,11 +188,16 @@ export component AppWindow inherits Window {
         }
     }
 
+    // Клик по странице закрывает панель. Плеер остаётся поверх этой области.
+    if App.eq-open: TouchArea {
+        clicked => { App.eq-open = false; }
+    }
+
     if bar-h > 0: PlayerBar {
         x: content.x;
-        y: parent.height - pad-r - 80px;
+        y: bar-y;
         width: content.width;
-        height: 80px;
+        height: bar-h;
     }
 
     if App.fullscreen: Fade {
@@ -202,17 +209,14 @@ export component AppWindow inherits Window {
         FullscreenPlayer { }
     }
 
-    if App.eq-open: TouchArea {
-        clicked => { App.eq-open = false; }
-    }
-    // Настройки звука, как QualitySettingsModal: в правом нижнем углу с отступом 16.
+    // Панель открывается над плеером и растёт вверх при включении эквалайзера.
     if App.eq-open: Fade {
         x: parent.width - sound.width - 16px;
-        y: parent.height - sound.height - 16px;
+        y: sound-bottom - sound.height;
         width: sound.width;
         height: sound.height;
         rise: 8px;
-        sound := SoundSettings { }
+        sound := SoundSettings { available-height: max(0px, sound-bottom - top); }
     }
 
     // «Горячие клавиши»: по центру на затемнённой подложке, клик мимо закрывает.
