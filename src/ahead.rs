@@ -241,7 +241,8 @@ mod tests {
             let expected = ((4096 * rate as usize).div_ceil(44_100) - 1) * 2;
             assert_eq!(played.len(), expected, "длительность при {rate} Гц");
             let max_step = 44_100.0 / rate as f32 / 4096.0 + 1e-6;
-            for (previous, next) in played.chunks_exact(2).zip(played[2..].chunks_exact(2)) {
+            let (frames, _) = played.as_chunks::<2>();
+            for (previous, next) in frames.iter().zip(&frames[1..]) {
                 assert!((next[0] - previous[0]).abs() < max_step, "разрыв при {rate} Гц");
                 assert_eq!(next[0], -next[1]);
             }
