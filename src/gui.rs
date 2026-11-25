@@ -3922,7 +3922,17 @@ impl Ctx {
         app.set_eq_on(c.eq_on);
         app.set_eq_preamp(c.eq_preamp);
         app.set_eq_preset(c.eq_preset.min(crate::eq::PRESETS.len() - 1) as i32);
-        app.set_eq_gains(ModelRc::from(Rc::new(VecModel::from(c.eq_gains.to_vec()))));
+        let gains = app.get_eq_gains();
+        if gains.row_count() == c.eq_gains.len() {
+            // Замена модели пересоздаёт ползунки и прерывает захват указателя.
+            for (i, &gain) in c.eq_gains.iter().enumerate() {
+                if gains.row_data(i) != Some(gain) {
+                    gains.set_row_data(i, gain);
+                }
+            }
+        } else {
+            app.set_eq_gains(ModelRc::from(Rc::new(VecModel::from(c.eq_gains.to_vec()))));
+        }
         app.set_quality(c.quality as i32);
         crate::api::QUALITY.store(c.quality, std::sync::atomic::Ordering::Relaxed);
         c.save();
@@ -4496,11 +4506,14 @@ fn register_extra(app: &App) {
     });
     app.on_eq_set_band(|i, v| {
         with_ctx(|c| {
+            let gain = (v * 2.0).round() / 2.0;
             {
                 let mut st = c.st.borrow_mut();
-                if let Some(g) = st.cfg.eq_gains.get_mut(i.max(0) as usize) {
-                    *g = (v * 2.0).round() / 2.0;
+                let Some(g) = st.cfg.eq_gains.get_mut(i.max(0) as usize) else { return };
+                if *g == gain {
+                    return;
                 }
+                *g = gain;
                 st.cfg.eq_preset = 0;
             }
             c.apply_eq();
@@ -4508,7 +4521,11 @@ fn register_extra(app: &App) {
     });
     app.on_eq_set_preamp(|v| {
         with_ctx(|c| {
-            c.st.borrow_mut().cfg.eq_preamp = (v * 20.0).round() / 20.0;
+            let gain = (v * 20.0).round() / 20.0;
+            if c.st.borrow().cfg.eq_preamp == gain {
+                return;
+            }
+            c.st.borrow_mut().cfg.eq_preamp = gain;
             c.apply_eq();
         })
     });
