@@ -1,6 +1,6 @@
 //! Где хранить токен. Windows: шифрование DPAPI, расшифровать может только та же учётная
-//! запись на том же компьютере, в config.json лежит base64 шифротекста. Linux: связка ключей
-//! пользователя через Secret Service, в config.json только имя записи.
+//! запись на том же компьютере, в config.json лежит base64 шифротекста. Linux и macOS: связка
+//! ключей пользователя (Secret Service / Keychain), в config.json только имя записи.
 
 #[cfg(windows)]
 use base64::Engine as _;
@@ -142,11 +142,241 @@ mod keyring {
     }
 }
 
+/// Связка ключей macOS (Keychain, Security.framework). Токен входа и токен обновления лежат
+/// в одной записи (JSON) и читаются не больше одного раза за запуск: при ad-hoc подписи после
+/// обновления macOS спросит подтверждение максимум один раз, а не на каждое обращение.
+#[cfg(target_os = "macos")]
+mod keychain {
+    use crate::config::log;
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{NSData, NSMutableDictionary, NSString};
+    use std::collections::HashMap;
+    use std::ffi::c_void;
+    use std::sync::Mutex;
+
+    const SERVICE: &str = "io.github.spolzermod.yamusic-rs";
+    const ACCOUNT: &str = "tokens";
+    const ERR_SEC_SUCCESS: i32 = 0;
+    const ERR_SEC_DUPLICATE_ITEM: i32 = -25299;
+    const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+
+    #[link(name = "Security", kind = "framework")]
+    extern "C" {
+        static kSecClass: *const AnyObject;
+        static kSecClassGenericPassword: *const AnyObject;
+        static kSecAttrService: *const AnyObject;
+        static kSecAttrAccount: *const AnyObject;
+        static kSecAttrLabel: *const AnyObject;
+        static kSecValueData: *const AnyObject;
+        static kSecReturnData: *const AnyObject;
+        static kSecMatchLimit: *const AnyObject;
+        static kSecMatchLimitOne: *const AnyObject;
+
+        fn SecItemAdd(attributes: *const c_void, result: *mut *const c_void) -> i32;
+        fn SecItemCopyMatching(query: *const c_void, result: *mut *const c_void) -> i32;
+        fn SecItemUpdate(query: *const c_void, attributes_to_update: *const c_void) -> i32;
+        fn SecItemDelete(query: *const c_void) -> i32;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        static kCFBooleanTrue: *const AnyObject;
+        fn CFDataGetLength(the_data: *const c_void) -> isize;
+        fn CFDataGetBytePtr(the_data: *const c_void) -> *const u8;
+        fn CFRelease(cf: *const c_void);
+    }
+
+    #[derive(Default)]
+    struct Cache {
+        loaded: bool,
+        unavailable: bool,
+        map: HashMap<String, String>,
+    }
+
+    static CACHE: Mutex<Option<Cache>> = Mutex::new(None);
+
+    fn with_cache<R>(f: impl FnOnce(&mut Cache) -> R) -> R {
+        let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        f(guard.get_or_insert_with(Cache::default))
+    }
+
+    fn dict_set(d: &NSMutableDictionary<AnyObject, AnyObject>, key: *const AnyObject, val: *const AnyObject) {
+        unsafe {
+            let _: () = msg_send![d, setObject: val, forKey: key];
+        }
+    }
+
+    fn base_query() -> objc2::rc::Retained<NSMutableDictionary<AnyObject, AnyObject>> {
+        let d = NSMutableDictionary::<AnyObject, AnyObject>::new();
+        let service = NSString::from_str(SERVICE);
+        let account = NSString::from_str(ACCOUNT);
+        unsafe {
+            dict_set(&d, kSecClass, kSecClassGenericPassword);
+            dict_set(&d, kSecAttrService, (&*service as *const NSString).cast());
+            dict_set(&d, kSecAttrAccount, (&*account as *const NSString).cast());
+        }
+        d
+    }
+
+    fn read_raw() -> Result<Option<Vec<u8>>, i32> {
+        let q = base_query();
+        unsafe {
+            dict_set(&q, kSecReturnData, kCFBooleanTrue);
+            dict_set(&q, kSecMatchLimit, kSecMatchLimitOne);
+            let mut result: *const c_void = std::ptr::null();
+            let status = SecItemCopyMatching((&*q as *const NSMutableDictionary<AnyObject, AnyObject>).cast(), &mut result);
+            if status == ERR_SEC_ITEM_NOT_FOUND {
+                return Ok(None);
+            }
+            if status != ERR_SEC_SUCCESS || result.is_null() {
+                return Err(status);
+            }
+            let len = CFDataGetLength(result).max(0) as usize;
+            let ptr = CFDataGetBytePtr(result);
+            let bytes = if len > 0 && !ptr.is_null() {
+                std::slice::from_raw_parts(ptr, len).to_vec()
+            } else {
+                Vec::new()
+            };
+            CFRelease(result);
+            Ok(Some(bytes))
+        }
+    }
+
+    fn write_raw(bytes: &[u8]) -> Result<(), i32> {
+        let data = NSData::with_bytes(bytes);
+        let q = base_query();
+        let update = NSMutableDictionary::<AnyObject, AnyObject>::new();
+        unsafe {
+            dict_set(&update, kSecValueData, (&*data as *const NSData).cast());
+            let status = SecItemUpdate(
+                (&*q as *const NSMutableDictionary<AnyObject, AnyObject>).cast(),
+                (&*update as *const NSMutableDictionary<AnyObject, AnyObject>).cast(),
+            );
+            if status == ERR_SEC_SUCCESS {
+                return Ok(());
+            }
+            if status != ERR_SEC_ITEM_NOT_FOUND {
+                return Err(status);
+            }
+            let label = NSString::from_str(env!("APP_NAME"));
+            dict_set(&q, kSecAttrLabel, (&*label as *const NSString).cast());
+            dict_set(&q, kSecValueData, (&*data as *const NSData).cast());
+            let add_status = SecItemAdd((&*q as *const NSMutableDictionary<AnyObject, AnyObject>).cast(), std::ptr::null_mut());
+            if add_status == ERR_SEC_SUCCESS {
+                Ok(())
+            } else if add_status == ERR_SEC_DUPLICATE_ITEM {
+                let q2 = base_query();
+                let retry = SecItemUpdate(
+                    (&*q2 as *const NSMutableDictionary<AnyObject, AnyObject>).cast(),
+                    (&*update as *const NSMutableDictionary<AnyObject, AnyObject>).cast(),
+                );
+                if retry == ERR_SEC_SUCCESS { Ok(()) } else { Err(retry) }
+            } else {
+                Err(add_status)
+            }
+        }
+    }
+
+    fn delete_raw() -> Result<(), i32> {
+        let q = base_query();
+        let status = unsafe { SecItemDelete((&*q as *const NSMutableDictionary<AnyObject, AnyObject>).cast()) };
+        if status == ERR_SEC_SUCCESS || status == ERR_SEC_ITEM_NOT_FOUND {
+            Ok(())
+        } else {
+            Err(status)
+        }
+    }
+
+    pub(super) fn decode_bundle(bytes: &[u8]) -> HashMap<String, String> {
+        serde_json::from_slice(bytes).unwrap_or_default()
+    }
+
+    pub(super) fn encode_bundle(map: &HashMap<String, String>) -> Option<Vec<u8>> {
+        serde_json::to_vec(map).ok()
+    }
+
+    fn ensure_loaded(cache: &mut Cache) {
+        if cache.loaded || cache.unavailable {
+            return;
+        }
+        match read_raw() {
+            Ok(Some(bytes)) => {
+                cache.map = decode_bundle(&bytes);
+                cache.loaded = true;
+            }
+            Ok(None) => {
+                cache.loaded = true;
+            }
+            Err(code) => {
+                cache.unavailable = true;
+                log(format!("связка ключей macOS недоступна (OSStatus {code}), токен останется в config.json"));
+            }
+        }
+    }
+
+    pub fn store(name: &str, secret: &str) -> bool {
+        with_cache(|cache| {
+            ensure_loaded(cache);
+            if cache.unavailable {
+                return false;
+            }
+            if cache.map.get(name).is_some_and(|v| v == secret) {
+                return true;
+            }
+            let mut next = cache.map.clone();
+            next.insert(name.to_string(), secret.to_string());
+            let Some(bytes) = encode_bundle(&next) else { return false };
+            match write_raw(&bytes) {
+                Ok(()) => {
+                    cache.map = next;
+                    cache.loaded = true;
+                    true
+                }
+                Err(code) => {
+                    cache.unavailable = true;
+                    log(format!("связка ключей macOS: не удалось сохранить (OSStatus {code})"));
+                    false
+                }
+            }
+        })
+    }
+
+    pub fn load(name: &str) -> Option<String> {
+        with_cache(|cache| {
+            ensure_loaded(cache);
+            cache.map.get(name).cloned()
+        })
+    }
+
+    pub fn remove(name: &str) {
+        with_cache(|cache| {
+            ensure_loaded(cache);
+            if cache.unavailable || cache.map.remove(name).is_none() {
+                return;
+            }
+            let res = if cache.map.is_empty() {
+                delete_raw()
+            } else if let Some(bytes) = encode_bundle(&cache.map) {
+                write_raw(&bytes)
+            } else {
+                Ok(())
+            };
+            if let Err(code) = res {
+                log(format!("связка ключей macOS: не удалось очистить запись (OSStatus {code})"));
+            }
+        });
+    }
+}
+
 /// Префикс в config.json: секрет лежит в связке ключей, а не рядом.
 #[cfg(target_os = "linux")]
 const IN_KEYRING: &str = "keyring:";
+#[cfg(target_os = "macos")]
+const IN_KEYCHAIN: &str = "keychain:";
 
-/// Спрятать секрет для хранения в конфиге. `name` различает секреты в связке ключей Linux,
+/// Спрятать секрет для хранения в конфиге. `name` различает секреты в связке ключей,
 /// DPAPI на Windows он не нужен. None — спрятать негде.
 pub fn seal(name: &str, plain: &str) -> Option<String> {
     #[cfg(windows)]
@@ -158,8 +388,12 @@ pub fn seal(name: &str, plain: &str) -> Option<String> {
     {
         keyring::store(name, plain).then(|| format!("{IN_KEYRING}{name}"))
     }
+    #[cfg(target_os = "macos")]
+    {
+        keychain::store(name, plain).then(|| format!("{IN_KEYCHAIN}{name}"))
+    }
     // Android: config.json и так лежит в личной папке приложения, другим приложениям её не прочесть.
-    #[cfg(not(any(windows, target_os = "linux")))]
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         let _ = (name, plain);
         None
@@ -177,7 +411,11 @@ pub fn open(sealed: &str) -> Option<String> {
     {
         keyring::load(sealed.trim().strip_prefix(IN_KEYRING)?)
     }
-    #[cfg(not(any(windows, target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        keychain::load(sealed.trim().strip_prefix(IN_KEYCHAIN)?)
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         let _ = sealed;
         None
@@ -188,8 +426,26 @@ pub fn open(sealed: &str) -> Option<String> {
 pub fn forget(name: &str) {
     #[cfg(target_os = "linux")]
     keyring::remove(name);
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    keychain::remove(name);
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let _ = name;
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use super::keychain::{decode_bundle, encode_bundle};
+    use std::collections::HashMap;
+
+    #[test]
+    fn bundle_roundtrip() {
+        let mut map = HashMap::new();
+        map.insert("token".into(), "y0_access".into());
+        map.insert("refresh".into(), "y0_refresh".into());
+        let raw = encode_bundle(&map).unwrap();
+        assert_eq!(decode_bundle(&raw), map);
+        assert!(decode_bundle(b"not json").is_empty());
+    }
 }
 
 #[cfg(all(test, windows))]

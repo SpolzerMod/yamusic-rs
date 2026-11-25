@@ -330,26 +330,26 @@ export component Field inherits TextInput {
             self.escape();
             return reject;
         }
-        if !e.modifiers.control || e.modifiers.alt {
+        if (App.macos ? !e.modifiers.meta || e.modifiers.control : !e.modifiers.control || e.modifiers.meta) || e.modifiers.alt {
             return reject;
         }
         if e.text == "ф" || e.text == "Ф" || e.text == "a" || e.text == "A" {
             self.select-all();
             return accept;
         }
-        if e.text == "с" || e.text == "С" {
+        if e.text == "с" || e.text == "С" || (App.macos && (e.text == "c" || e.text == "C")) {
             self.copy();
             return accept;
         }
-        if e.text == "м" || e.text == "М" {
+        if e.text == "м" || e.text == "М" || (App.macos && (e.text == "v" || e.text == "V")) {
             self.paste();
             return accept;
         }
-        if e.text == "ч" || e.text == "Ч" {
+        if e.text == "ч" || e.text == "Ч" || (App.macos && (e.text == "x" || e.text == "X")) {
             self.cut();
             return accept;
         }
-        if e.text == "я" || e.text == "Я" {
+        if e.text == "я" || e.text == "Я" || (App.macos && (e.text == "z" || e.text == "Z")) {
             self.undo();
             return accept;
         }

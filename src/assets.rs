@@ -14,13 +14,33 @@ pub struct Asar {
     index: serde_json::Value,
 }
 
-/// Официального клиента под Linux нет, там ассеты только с сайта.
+/// Путь к `app.asar` официального клиента. Под Linux официального приложения нет — там ассеты с сайта.
 fn asar_path() -> Option<PathBuf> {
-    if cfg!(not(windows)) {
-        return None;
+    #[cfg(windows)]
+    {
+        let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        Some(PathBuf::from(local).join("Programs").join("YandexMusic").join("resources").join("app.asar"))
     }
-    let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
-    Some(PathBuf::from(local).join("Programs").join("YandexMusic").join("resources").join("app.asar"))
+    #[cfg(target_os = "macos")]
+    {
+        let mut bases = vec![PathBuf::from("/Applications")];
+        if let Ok(home) = std::env::var("HOME") {
+            bases.push(PathBuf::from(home).join("Applications"));
+        }
+        for base in bases {
+            for app in ["Яндекс Музыка.app", "Yandex Music.app"] {
+                let p = base.join(app).join("Contents").join("Resources").join("app.asar");
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
+        }
+        None
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        None
+    }
 }
 
 impl Asar {

@@ -1232,12 +1232,12 @@ fn apply_ui_scale(ui: &AppWindow) {
 /// переноса могла остаться недорисованная часть окна (#16).
 fn rescale(ui: &AppWindow, force: bool) {
     let w = ui.window();
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     let phys = w.with_winit_window(|ww| {
         let size = ww.inner_size();
         slint::PhysicalSize::new(size.width, size.height)
     }).unwrap_or_else(|| w.size());
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     let phys = w.size();
     if phys.width == 0 || phys.height == 0 {
         return;
@@ -1297,10 +1297,10 @@ fn release_after_system_drag(ui: &AppWindow) {
     });
 }
 
-/// После переключения режима ограничения Slint и события Windows применяются не сразу.
+/// После переключения режима ограничения Slint и события системы применяются не сразу.
 /// Повторно согласуем стиль, геометрию и захват мыши после применения этих изменений.
 fn after_window_mode_change(ui: &AppWindow) {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     for ms in [0, 150] {
         let weak = ui.as_weak();
         Timer::single_shot(Duration::from_millis(ms), move || {
@@ -1311,14 +1311,14 @@ fn after_window_mode_change(ui: &AppWindow) {
             release_after_system_drag(&ui);
         });
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     let _ = ui;
 }
 
 fn window_maximized(w: &slint::Window) -> bool {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     { sys::is_maximized(w) }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     { w.is_maximized() }
 }
 
@@ -1350,6 +1350,8 @@ const SUPPORT_CHAT: &str =
 fn quit() {
     #[cfg(windows)]
     crate::tray::remove();
+    #[cfg(target_os = "macos")]
+    crate::nowplaying::clear();
     let _ = slint::quit_event_loop();
 }
 
@@ -1448,6 +1450,8 @@ fn finish_reveal(weak: slint::Weak<AppWindow>, first: bool, tries: u32) {
     if first {
         apply_ui_scale(&ui);
         sys::prepare(ui.window());
+        #[cfg(target_os = "macos")]
+        sys::set_window_appearance(ui.window(), ui.global::<App>().get_theme_mode().as_str());
         keep_on_screen(ui.window());
     }
     sys::raise(ui.window());
@@ -1729,6 +1733,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     }
 
     let ui = AppWindow::new()?;
+    ui.global::<App>().set_macos(cfg!(target_os = "macos"));
     ui.global::<Theme>().set_dark(true);
     let lite = cfg.mode == "lite";
     apply_mode(&ui, lite);
@@ -2050,13 +2055,18 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         let app = ui.global::<App>();
         let w = ui.window();
         if !app.get_mini() {
+            #[cfg(target_os = "macos")]
+            if sys::is_fullscreen(w) {
+                sys::exit_fullscreen(w);
+                return;
+            }
             let was_max = window_maximized(w);
             pl.normal.set(Some((window_pos(w), w.size(), was_max)));
             app.set_mini(true);
             app.set_maximized(false);
             // KWin в ответ на set_maximized(false) присылает текущий размер и перебивает размер плашки.
             w.set_maximized(false);
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "macos"))]
             sys::set_mini_mode(w, true);
             // Slint обновит ограничения размера только на следующем кадре, а Windows без этого не даст ужать окно.
             w.with_winit_window(|ww| {
@@ -2087,7 +2097,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             pl.mini.set(window_pos(w).or(pl.mini.get()));
             app.set_mini(false);
             w.set_maximized(false);
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "macos"))]
             sys::set_mini_mode(w, false);
             w.with_winit_window(|ww| ww.set_min_inner_size(Some(LogicalSize::new(960.0, 640.0))));
             match pl.normal.take() {
@@ -2136,9 +2146,9 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     let weak = ui.as_weak();
     app.on_toggle_maximize(move || {
         if let Some(ui) = weak.upgrade() {
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "macos"))]
             let m = !sys::is_maximized(ui.window());
-            #[cfg(not(windows))]
+            #[cfg(not(any(windows, target_os = "macos")))]
             let m = !ui.window().is_maximized();
             ui.window().set_maximized(m);
             ui.global::<App>().set_maximized(m);
@@ -2150,7 +2160,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             sys::minimize(ui.window());
         }
     });
-    // Как у оригинала на Windows: пока играет трек, окно прячется в трей, иначе приложение закрывается.
+    // Как у оригинала на Windows и macOS: пока играет трек, окно прячется, иначе приложение закрывается.
     // На Linux трея пока нет, там закрытие всегда выход.
     #[cfg(windows)]
     {
@@ -2171,7 +2181,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         install_tray(&ui, &player);
         install_smtc(&ui, &player);
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     {
         app.on_close(quit);
         let weak = ui.as_weak();
@@ -2179,6 +2189,29 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             let _ = weak.upgrade_in_event_loop(|ui| reveal(&ui));
         });
         install_mpris(&ui, &player);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let weak = ui.as_weak();
+        let p = player.clone();
+        app.on_close(move || {
+            if p.state().playing {
+                if let Some(ui) = weak.upgrade() {
+                    if sys::created(ui.window()) {
+                        sys::hide(ui.window());
+                        sys::trim_memory();
+                        return;
+                    }
+                }
+            }
+            quit();
+        });
+        let weak = ui.as_weak();
+        sys::on_wake(move || {
+            let _ = weak.upgrade_in_event_loop(|ui| reveal(&ui));
+        });
+        install_mac_app(&ui, &player);
+        install_nowplaying(&ui, &player);
     }
     // Alt+F4 и закрытие из панели задач: Slint сам только прячет окно, а процесс остаётся жить.
     let weak = ui.as_weak();
@@ -2231,6 +2264,19 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             }
             WindowEvent::Moved(_) => {
                 after_move();
+                EventResult::Propagate
+            }
+            #[cfg(target_os = "macos")]
+            WindowEvent::ThemeChanged(theme) => {
+                let dark = *theme == winit::window::Theme::Dark;
+                with_ctx(|c| {
+                    if c.st.borrow().cfg.theme != "system" || c.st.borrow().dark == dark {
+                        return;
+                    }
+                    c.st.borrow_mut().dark = dark;
+                    let ui = c.ui();
+                    ui.global::<Theme>().set_dark(ui.global::<App>().get_page() == Page::Wave || dark);
+                });
                 EventResult::Propagate
             }
             _ => EventResult::Propagate,
@@ -2300,6 +2346,68 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     // Фоновые потоки (аудио, сеть, обложки) не ждём: иначе процесс может остаться
     // без окна и держать мьютекс, и следующий запуск молча закроется.
     std::process::exit(0)
+}
+
+/// Медиаклавиши, AirPods и «Исполняется» в Пункте управления macOS.
+#[cfg(target_os = "macos")]
+fn install_nowplaying(ui: &AppWindow, player: &Player) {
+    let weak = ui.as_weak();
+    let p = player.clone();
+    crate::nowplaying::install(player.clone(), move |e| {
+        let p = p.clone();
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            use crate::nowplaying::Event;
+            let app = ui.global::<App>();
+            let s = p.state();
+            match e {
+                Event::PlayPause => app.invoke_play_pause(),
+                Event::Play if !s.playing => app.invoke_play_pause(),
+                Event::Pause if s.playing => app.invoke_play_pause(),
+                Event::Play | Event::Pause => {}
+                Event::Next => p.send(Cmd::Next),
+                Event::Prev => p.send(Cmd::Prev),
+                Event::Seek(sec) => p.send(Cmd::Seek(sec)),
+            }
+        });
+    });
+}
+
+/// Обработка строки меню macOS и значка в Dock.
+#[cfg(target_os = "macos")]
+fn install_mac_app(ui: &AppWindow, player: &Player) {
+    let weak = ui.as_weak();
+    let p = player.clone();
+    sys::set_app_handler(move |e| {
+        let p = p.clone();
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            use sys::AppEvent;
+            match e {
+                AppEvent::Reopen => reveal(&ui),
+                AppEvent::Settings => {
+                    reveal(&ui);
+                    with_ctx(|c| {
+                        let ui = c.ui();
+                        let app = ui.global::<App>();
+                        if !app.get_logged_out() {
+                            if app.get_mini() {
+                                app.invoke_toggle_mini();
+                            }
+                            app.set_fullscreen(false);
+                            c.navigate(Page::Settings, None, true);
+                        }
+                    });
+                }
+                AppEvent::ToggleMini => {
+                    reveal(&ui);
+                    ui.global::<App>().invoke_toggle_mini();
+                }
+                AppEvent::PlayPause => ui.global::<App>().invoke_play_pause(),
+                AppEvent::Next => p.send(Cmd::Next),
+                AppEvent::Prev => p.send(Cmd::Prev),
+                AppEvent::Quit => quit(),
+            }
+        });
+    });
 }
 
 /// Медиаклавиши и плеер в панели Linux. Команды выполняются так же, как кнопки в окне.
@@ -3032,6 +3140,8 @@ impl Ctx {
                 st.cfg.save();
             }
             ui.global::<Theme>().set_dark(app.get_page() == Page::Wave || dark);
+            #[cfg(target_os = "macos")]
+            sys::set_window_appearance(ui.window(), mode);
             return;
         }
         if id == "explicit" {

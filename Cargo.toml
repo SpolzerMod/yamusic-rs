@@ -70,6 +70,47 @@ futures-lite = "2"
 # Токен в связке ключей (GNOME Keyring, KWallet) через тот же zbus.
 secret-service = { version = "5.2", default-features = false, features = ["rt-async-io-crypto-rust"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Те же версии objc2/block2, что уже тянет winit: новых крейтов в сборке нет.
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = [
+  "std",
+  "NSArray",
+  "NSData",
+  "NSDictionary",
+  "NSGeometry",
+  "NSObject",
+  "NSString",
+  "NSURL",
+  "NSUserDefaults",
+  "NSValue",
+  "block2",
+] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+  "std",
+  "NSAppearance",
+  "NSApplication",
+  "NSButton",
+  "NSColor",
+  "NSControl",
+  "NSEvent",
+  "NSImage",
+  "NSMenu",
+  "NSMenuItem",
+  "NSOpenPanel",
+  "NSPanel",
+  "NSPasteboard",
+  "NSResponder",
+  "NSRunningApplication",
+  "NSSavePanel",
+  "NSScreen",
+  "NSView",
+  "NSWindow",
+  "NSWorkspace",
+  "block2",
+] }
+
 [build-dependencies]
 slint-build = "1.18"
 

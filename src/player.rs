@@ -302,9 +302,9 @@ fn round3(x: f64) -> f64 {
 /// Скачиваемый трек, его декодер и формат («MP3 320»).
 type Audio = (Arc<Buf>, Decoder<Reader>, String);
 
-/// Имя выхода Windows по умолчанию. На Linux звук идёт в «default», и за сменой устройства
-/// там следит PipeWire или PulseAudio.
-#[cfg(windows)]
+/// Имя выхода по умолчанию (Windows и macOS). На Linux звук идёт в «default», и за сменой
+/// устройства там следит PipeWire или PulseAudio.
+#[cfg(any(windows, target_os = "macos"))]
 fn default_output_name() -> Option<String> {
     use rodio::cpal::traits::HostTrait;
     use rodio::DeviceTrait;
@@ -345,9 +345,9 @@ fn open_output() -> Result<(OutputStream, rodio::OutputStreamHandle), rodio::Str
     OutputStream::try_from_device(&dev)
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 const NO_OUTPUT: &str = "Не найдено аудиоустройство";
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 const NO_OUTPUT: &str = "Не открылся звуковой выход по умолчанию. Для PipeWire нужен pipewire-alsa";
 
 /// Как часто записывать позицию играющего трека в Ynison.
@@ -459,10 +459,10 @@ struct Engine {
     crossfade: Duration,
     /// С каким нарастанием начать следующий загруженный трек.
     fade_in: Duration,
-    /// Выход Windows по умолчанию, на котором открыт звук, и когда его последний раз сверяли.
-    #[cfg(windows)]
+    /// Выход по умолчанию (Windows / macOS), на котором открыт звук, и когда его последний раз сверяли.
+    #[cfg(any(windows, target_os = "macos"))]
     out_name: Option<String>,
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     out_checked: Instant,
     /// Выход пропал посреди трека: с этого места трек продолжится по Play.
     held_pos: Option<f32>,
@@ -542,9 +542,9 @@ impl Engine {
             notify,
             eq,
             audio: None,
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "macos"))]
             out_name: None,
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "macos"))]
             out_checked: Instant::now(),
             held_pos: None,
             stall: (0.0, Instant::now()),
@@ -622,7 +622,7 @@ impl Engine {
                 Ok((stream, handle)) => match Sink::try_new(&handle) {
                     Ok(sink) => {
                         self.audio = Some((stream, handle, sink));
-                        #[cfg(windows)]
+                        #[cfg(any(windows, target_os = "macos"))]
                         {
                             self.out_name = default_output_name();
                         }
@@ -693,9 +693,9 @@ impl Engine {
         }
     }
 
-    /// Звук открыт на одном устройстве и сам за выходом Windows не переходит. Раз в секунду
-    /// сверяем выход по умолчанию: сменился или пропал — переоткрываем.
-    #[cfg(windows)]
+    /// Звук открыт на одном устройстве и сам за сменой выхода (Windows / CoreAudio) не переходит.
+    /// Раз в секунду сверяем выход по умолчанию: сменился или пропал — переоткрываем.
+    #[cfg(any(windows, target_os = "macos"))]
     fn check_output(&mut self) {
         if self.audio.is_none() || self.out_checked.elapsed() < Duration::from_secs(1) {
             return;
@@ -734,7 +734,7 @@ impl Engine {
     fn reopen_output(&mut self, pos: f32, available: bool) {
         self.audio = None;
         self.fading = None;
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         {
             self.out_name = None;
         }
@@ -1046,7 +1046,7 @@ impl Engine {
     // ---------- главный цикл ----------
 
     fn tick(&mut self) {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         self.check_output();
         self.check_stall();
         // Пока играет, позиция уходит в Ynison раз в минуту: закроют приложение — потеряется не больше.
