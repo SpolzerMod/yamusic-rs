@@ -3420,7 +3420,11 @@ impl Ctx {
         }
         let title = l.title.clone();
         std::thread::spawn(move || {
-            net.say(match net.api.like_entity(&uid, kind, &id, !liked) {
+            let saved = net.api.like_entity(&uid, kind, &id, !liked);
+            if saved.is_ok() && kind == "albums" {
+                net.refresh("collection");
+            }
+            net.say(match saved {
                 Ok(()) if liked => format!("«{title}» в коллекции"),
                 Ok(()) => format!("«{title}» удалён из коллекции"),
                 Err(e) => format!("Не удалось сохранить: {e}"),
