@@ -163,6 +163,15 @@ export struct TopArtistItem {
     time: string,
 }
 
+// Строка окна «О треке»: роль и имя или описание; `link` — ведёт на альбом, `shimmer` —
+// заглушка на месте того, что грузится.
+export struct InfoLine {
+    title: string,
+    value: string,
+    link: bool,
+    shimmer: bool,
+}
+
 // Перевод: русская строка → строка выбранного языка (словари оригинала, см. src/i18n.rs).
 // Чтение `lang` внутри t() привязывает текст к языку: при смене он пересчитывается.
 export global T {
@@ -458,6 +467,14 @@ export global App {
     in-out property <bool> cover-open;
     in property <image> cover-view;
     callback open-cover(string);
+
+    // Окно «О треке».
+    in-out property <bool> track-about-open;
+    in property <string> track-about-title;
+    in property <string> track-about-version;
+    in property <bool> track-about-explicit;
+    in property <[InfoLine]> track-about-lines;
+    callback track-about-link(int);
 
     in property <bool> nav-collapsed;
     callback toggle-navbar();

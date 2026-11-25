@@ -77,6 +77,8 @@ pub struct Track {
     /// Оттенок и энергия трека: по ним «Моя волна» на телефоне красит фон.
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub mood: Option<Mood>,
+    /// `type` трека: music, podcast-episode, audiobook, fairy-tale… Пусто — music.
+    pub kind: String,
 }
 
 /// `trackParameters` из ответа API.
@@ -92,6 +94,16 @@ impl Track {
     pub fn detached(mut self) -> Self {
         self.playlist_slot = None;
         self
+    }
+
+    /// Выпуск подкаста (`isTrackPodcast` оригинала).
+    pub fn is_episode(&self) -> bool {
+        self.kind == "podcast-episode"
+    }
+
+    /// Глава аудиокниги. Сказку (`fairy-tale`) оригинал считает обычным треком: «О треке».
+    pub fn is_chapter(&self) -> bool {
+        self.kind == "audiobook"
     }
 
     /// "trackId:albumId" — такой формат ждут лайки и фидбек волны.
@@ -233,6 +245,63 @@ pub struct Lyrics {
     pub source: String,
     pub text: Vec<String>,
     pub writers: String,
+}
+
+/// Что окно «О треке» берёт из `full-info`: описание и альбом (подкаст, книга).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TrackInfo {
+    pub short_description: String,
+    pub album_id: Option<String>,
+    pub album_title: String,
+}
+
+/// Участники записи (`tracks/{id}/credits`): пары «роль — имя» в порядке ответа. Подписи
+/// ролей приходят с сервера.
+pub fn parse_credits(v: &Value) -> Vec<(String, String)> {
+    v.get("credits")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|c| {
+            let title = c.get("title")?.as_str()?.trim();
+            let value = c.get("value")?.as_str()?.trim();
+            (!title.is_empty() && !value.is_empty()).then(|| (title.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
+/// Текст из HTML описания выпуска: теги убираются, `<br>` и абзацы — переводы строк,
+/// сущности раскрываются. Оригинал вставляет HTML как есть, Slint его не рисует.
+pub fn plain_text(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(i) = rest.find('<') {
+        out.push_str(&rest[..i]);
+        let Some(j) = rest[i..].find('>') else {
+            out.push_str(&rest[i..]);
+            rest = "";
+            break;
+        };
+        let tag = rest[i + 1..i + j].trim_start_matches('/').to_ascii_lowercase();
+        let name = tag.split(|c: char| c.is_whitespace() || c == '/').next().unwrap_or("");
+        if matches!(name, "br" | "p" | "div" | "li") && !out.ends_with('\n') && !out.is_empty() {
+            out.push('\n');
+        }
+        rest = &rest[i + j + 1..];
+    }
+    out.push_str(rest);
+    let out = out
+        .replace("&nbsp;", "\u{a0}")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&laquo;", "«")
+        .replace("&raquo;", "»")
+        .replace("&mdash;", "—")
+        .replace("&ndash;", "–")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&");
+    out.lines().map(str::trim_end).collect::<Vec<_>>().join("\n").trim().to_string()
 }
 
 /// Откуда брать следующий пакет волны.
@@ -392,6 +461,7 @@ pub(crate) fn parse_track(v: &Value) -> Option<Track> {
         position: album.and_then(|a| a.pointer("/trackPosition/index")).and_then(|y| y.as_u64()).map(|y| y as u32),
         batch_id: String::new(),
         mood: mood_of(v),
+        kind: str_of(v, "type"),
     })
 }
 
@@ -1759,6 +1829,34 @@ impl Api {
         Ok(out)
     }
 
+    /// Участники записи для окна «О треке».
+    pub fn track_credits(&self, id: &str) -> Res<Vec<(String, String)>> {
+        Ok(parse_credits(&self.get(&format!("/tracks/{id}/credits"), &[])?))
+    }
+
+    /// `tracks/{id}:{albumId}/full-info` (без альбома — `tracks/{id}/full-info`): описание
+    /// и альбом выпуска или главы.
+    pub fn track_full_info(&self, id: &str, album: Option<&str>) -> Res<TrackInfo> {
+        let path = match album {
+            Some(a) => format!("/tracks/{id}:{a}/full-info"),
+            None => format!("/tracks/{id}/full-info"),
+        };
+        let v = self.get(&path, &[])?;
+        let t = v.get("track").unwrap_or(&v);
+        let album = t.pointer("/albums/0");
+        Ok(TrackInfo {
+            short_description: str_of(t, "shortDescription"),
+            album_id: album.and_then(|a| s(a.get("id"))),
+            album_title: album.map(|a| str_of(a, "title")).unwrap_or_default(),
+        })
+    }
+
+    /// Описание выпуска (`tracks/{id}/supplement`), текстом.
+    pub fn track_supplement(&self, id: &str) -> Res<String> {
+        let v = self.get(&format!("/tracks/{id}/supplement"), &[])?;
+        Ok(plain_text(&str_of(&v, "description")))
+    }
+
     // ---------- аудио ----------
 
     /// Прямая ссылка на аудио и его формат («MP3 320»): сначала download-info (mp3 до 320),
@@ -1922,5 +2020,32 @@ mod tests {
     #[test]
     fn pic_size() {
         assert_eq!(pic("avatars.yandex.net/a/%%", 200), "https://avatars.yandex.net/a/200x200");
+    }
+
+    #[test]
+    fn credits_and_html() {
+        let v = json!({"credits": [
+            {"title": "Исполнитель", "value": "почтисчастье"},
+            {"title": "Автор музыки", "value": ""},
+            {"title": "Лейбл", "value": "Свет и Тени"}]});
+        assert_eq!(
+            parse_credits(&v),
+            vec![("Исполнитель".to_string(), "почтисчастье".to_string()), ("Лейбл".to_string(), "Свет и Тени".to_string())]
+        );
+        assert!(parse_credits(&json!({})).is_empty());
+        assert_eq!(plain_text("<p>Гость &laquo;А&raquo;</p><p>Ведущие: <b>Б</b> &amp; В<br/>Слушайте</p>"), "Гость «А»\nВедущие: Б & В\nСлушайте");
+        assert_eq!(plain_text("просто текст"), "просто текст");
+    }
+
+    #[test]
+    fn track_kind() {
+        let t = |kind: &str| parse_track(&json!({"id": 1, "title": "A", "type": kind})).unwrap();
+        assert!(t("podcast-episode").is_episode());
+        assert!(t("audiobook").is_chapter() && !t("audiobook").is_episode());
+        // Сказка у оригинала — «О треке», не «О главе».
+        assert!(!t("fairy-tale").is_chapter() && !t("fairy-tale").is_episode());
+        assert!(!t("music").is_episode() && !t("music").is_chapter());
+        let plain = parse_track(&json!({"id": 1, "title": "A"})).unwrap();
+        assert!(!plain.is_episode() && !plain.is_chapter());
     }
 }

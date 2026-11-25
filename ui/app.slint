@@ -15,11 +15,12 @@ import { AccountMenu, SettingsPage, LoginScreen } from "account.slint";
 import { FullscreenPlayer } from "fullscreen.slint";
 import { TrackMenu, SoundSettings } from "popups.slint";
 import { ShortcutsModal } from "modals.slint";
-import { T, App, Page, TrackItem, PinItem, CardItem, TopArtistItem, WheelEntry, ChartRow, LyricLine, MenuEntry } from "state.slint";
+import { TrackAboutModal } from "track_about.slint";
+import { T, App, Page, TrackItem, PinItem, CardItem, TopArtistItem, WheelEntry, ChartRow, LyricLine, MenuEntry, InfoLine } from "state.slint";
 import { LandingPage, ChartPage } from "landing.slint";
 import { HistoryPage } from "history.slint";
 
-export { Theme, Icons, App, T, Page, TrackItem, PinItem, CardItem, TopArtistItem, WheelEntry, ChartRow, LyricLine, MenuEntry }
+export { Theme, Icons, App, T, Page, TrackItem, PinItem, CardItem, TopArtistItem, WheelEntry, ChartRow, LyricLine, MenuEntry, InfoLine }
 
 component CaptionButton inherits Rectangle {
     in property <int> kind; // 0 свернуть, 1 развернуть, 2 закрыть, 3 мини-плеер
@@ -213,6 +214,30 @@ export component AppWindow inherits Window {
         height: sound.height;
         rise: 8px;
         sound := SoundSettings { }
+    }
+
+    // «О треке» (TrackAboutModalDesktop): панель справа на прозрачной подложке, клик мимо
+    // закрывает. Отступы — как у оригинала в приложении для Windows (`root_withCustomControls`):
+    // 40 от верха и 12 от правого края контента, высота — окно без 156; низ, как у оригинала,
+    // срезает край контента. Поверх полноэкранного плеера — от краёв окна, высота — окно без 64.
+    if App.track-about-open: TouchArea {
+        clicked => { App.track-about-open = false; }
+    }
+    if App.track-about-open: Rectangle {
+        x: App.fullscreen ? 0 : content.x + content.border-width;
+        y: App.fullscreen ? 0 : content.y + content.border-width;
+        width: App.fullscreen ? parent.width : content.width - 2 * content.border-width;
+        height: App.fullscreen ? parent.height : content.height - 2 * content.border-width;
+        border-radius: App.fullscreen ? 0 : max(0px, content.border-radius - content.border-width);
+        clip: true;
+        Fade {
+            x: parent.width - self.width - Theme.spacer-size-m;
+            y: Theme.spacer-size-xxxxl;
+            width: 430px;
+            height: root.height - (App.fullscreen ? 2 * Theme.spacer-size-xxl + Theme.spacer-size-l : 156px);
+            rise: 8px;
+            TrackAboutModal { height: parent.height; }
+        }
     }
 
     // «Горячие клавиши»: по центру на затемнённой подложке, клик мимо закрывает.

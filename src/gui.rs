@@ -5,6 +5,7 @@ slint::include_modules!();
 mod history_ui;
 mod keys;
 mod landing_ui;
+mod track_about;
 
 use crate::save::{file_name_max, save_track, saved_already};
 use crate::api::{album_kind_word, Album, Api, Card, Collection, Pin, Playlist, Track};
@@ -2030,6 +2031,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     register_extra(&app);
     landing_ui::register(&app);
     history_ui::register(&app);
+    track_about::register(&app);
     landing_ui::load_concert_assets(&app);
 
     let weak = ui.as_weak();
@@ -3015,7 +3017,9 @@ impl Ctx {
         if !t.artist_list.is_empty() {
             items.push(self.menu_entry("artist", "Перейти к исполнителю", icons.get_m_artist(), false));
         }
-        items.push(self.menu_entry("info", "О треке", icons.get_m_info(), false));
+        // Заголовок по типу (`track-modal.*-title`): глава, выпуск или трек.
+        let about = if t.is_chapter() { "О главе" } else if t.is_episode() { "О выпуске" } else { "О треке" };
+        items.push(self.menu_entry("info", about, icons.get_m_info(), false));
         items.push(self.menu_entry("complain", "Сообщить о проблеме", icons.get_m_complain(), false));
         self.st.borrow_mut().menu_track = Some(t);
         self.show_menu(items, x, y, below);
@@ -3628,7 +3632,7 @@ impl Ctx {
                     self.navigate(Page::Artist, Some(format!("artist:{}", a.id)), true);
                 }
             }
-            "info" => self.toast(format!("{} — {} · {}", t.artists, t.title, mmss(t.duration_ms as f32 / 1000.0))),
+            "info" => self.open_track_about(t),
             "complain" => sys::open_url("https://yandex.ru/support/music/"),
             _ => {}
         }
