@@ -25,6 +25,23 @@ use std::time::{Duration, Instant};
 
 const SEARCH_TRACK_KIND: &str = "track";
 
+struct ListDownload {
+    uid: String,
+    list_key: String,
+    stop: Arc<AtomicBool>,
+}
+
+impl ListDownload {
+    fn stop_for(&self, uid: &str, list_key: Option<&str>) -> Option<&AtomicBool> {
+        let key = list_key?;
+        (self.uid == uid && self.list_key == Self::key(uid, key)).then_some(&self.stop)
+    }
+
+    fn key(uid: &str, key: &str) -> String {
+        if key == "likes" { format!("playlist:{uid}:3") } else { key.to_string() }
+    }
+}
+
 struct State {
     cfg: Config,
     dark: bool,
@@ -84,8 +101,8 @@ struct State {
     trailer: Option<Trailer>,
     /// Настройки «Моей волны» с сервера, выбранный вариант в каждой группе и картинки вариантов.
     wave_tune: Vec<(crate::api::WaveSettingGroup, usize, Vec<Image>)>,
-    /// Идущее скачивание списка: папка (она же название списка) и флаг отмены.
-    download: Option<(String, Arc<AtomicBool>)>,
+    /// Аккаунт и ключ списка, для которого можно отменить загрузку.
+    download: Option<ListDownload>,
 }
 
 /// Трейлер: треки звучат по 12,5 с с середины, потом следующий.
@@ -100,6 +117,13 @@ struct Trailer {
 }
 
 const TRAILER_PART: f32 = 12.5;
+
+impl State {
+    fn download_stop(&self) -> Option<&AtomicBool> {
+        self.list_shown.as_ref()?;
+        self.download.as_ref()?.stop_for(&self.uid, self.list_key.as_deref())
+    }
+}
 
 struct Ctx {
     ui: slint::Weak<AppWindow>,
@@ -438,6 +462,7 @@ impl Ctx {
         if page != Page::List {
             self.images.cancel_pending();
         }
+        app.set_menu_open(false);
         app.set_page(page);
         app.set_hint_open(false);
         app.set_cover_open(false);
@@ -3215,13 +3240,12 @@ impl Ctx {
         }
         if !l.tracks.is_empty() {
             items.push(self.menu_entry("list-playlist", "Добавить в плейлист", icons.get_m_add_playlist(), true));
-            let downloading = self.st.borrow().download.as_ref().is_some_and(|(folder, _)| *folder == l.title);
-            if downloading {
-                items.push(self.menu_entry("list-download-stop", "Отменить скачивание", icons.get_m_download(), false));
-            } else if !likes {
-                // У «Мне нравится» скачивание вынесено кнопкой в шапку.
-                items.push(self.menu_entry("list-download", "Скачать", icons.get_m_download(), false));
-            }
+        }
+        if self.st.borrow().download_stop().is_some() {
+            items.push(self.menu_entry("list-download-stop", "Отменить скачивание", icons.get_m_download(), false));
+        } else if !l.tracks.is_empty() && !likes {
+            // У «Мне нравится» скачивание вынесено кнопкой в шапку.
+            items.push(self.menu_entry("list-download", "Скачать", icons.get_m_download(), false));
         }
         items.push(self.menu_entry("list-share", "Поделиться", icons.get_m_share(), true));
         if app.get_list_own() {
@@ -3538,7 +3562,7 @@ impl Ctx {
                 "trailer" => self.ui().global::<App>().invoke_list_trailer(),
                 "download" => self.ui().global::<App>().invoke_list_download(),
                 "download-stop" => {
-                    if let Some((_, stop)) = &self.st.borrow().download {
+                    if let Some(stop) = self.st.borrow().download_stop() {
                         stop.store(true, Ordering::Relaxed);
                     }
                 }
@@ -4190,7 +4214,8 @@ impl Ctx {
         }
         let Some(net) = self.st.borrow().net.clone() else { return };
         let stop = Arc::new(AtomicBool::new(false));
-        self.st.borrow_mut().download = Some((folder.clone(), stop.clone()));
+        let Some(list_key) = self.st.borrow().list_key.clone() else { return };
+        self.st.borrow_mut().download = Some(ListDownload { list_key: ListDownload::key(&net.uid, &list_key), uid: net.uid.clone(), stop: stop.clone() });
         self.toast(format!("Скачиваем {}", tracks_word(tracks.len() as u64)));
         let api = net.api.clone();
         let dir = music_dir(&self.st.borrow().cfg).join(file_name(&folder));
@@ -4599,4 +4624,22 @@ fn register_extra(app: &App) {
         crate::eq::PRESETS.iter().map(|p| SharedString::from(p.0)).collect::<Vec<_>>(),
     ))));
     with_ctx(|c| c.apply_eq());
+}
+
+#[cfg(test)]
+#[test]
+fn download_cancellation_belongs_to_the_selected_list() {
+    let job = ListDownload { uid: "10".into(), list_key: "playlist:10:7".into(), stop: Arc::default() };
+    // У плейлистов разных владельцев могут совпадать и название, и номер.
+    assert!(job.stop_for("10", Some("playlist:20:7")).is_none());
+    assert!(job.stop_for("10", Some("album:7")).is_none());
+    assert!(job.stop_for("10", None).is_none());
+    job.stop_for("10", Some("playlist:10:7")).unwrap().store(true, Ordering::Relaxed);
+    assert!(job.stop.load(Ordering::Relaxed));
+
+    // У «Мне нравится» ключ страницы одинаков для всех аккаунтов.
+    let likes = ListDownload { list_key: ListDownload::key("10", "likes"), ..job };
+    assert!(likes.stop_for("10", Some("playlist:10:3")).is_some());
+    assert!(likes.stop_for("20", Some("likes")).is_none());
+    assert!(likes.stop_for("10", Some("likes")).is_some());
 }
