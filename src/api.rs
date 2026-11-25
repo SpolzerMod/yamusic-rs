@@ -7,6 +7,7 @@ use reqwest::blocking::{Client, RequestBuilder};
 use reqwest::Method;
 use serde_json::{json, Value};
 use sha2::Sha256;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -125,6 +126,7 @@ pub struct Album {
     pub cover: Option<String>,
     pub likes: u64,
     pub label: String,
+    pub label_id: Option<NonZeroU64>,
     pub artist_cover: Option<String>,
     pub artist_list: Vec<Named>,
 }
@@ -433,6 +435,13 @@ pub(crate) fn parse_album(v: &Value) -> Option<Album> {
             .map(String::from),
         likes: v.get("likesCount").and_then(|c| c.as_u64()).unwrap_or(0),
         label: v.pointer("/labels/0/name").and_then(|l| l.as_str()).unwrap_or("").to_string(),
+        label_id: v.pointer("/labels/0/id").and_then(|id| {
+            if let Some(id) = id.as_str() {
+                id.parse().ok()
+            } else {
+                id.as_u64().and_then(NonZeroU64::new)
+            }
+        }),
         artist_cover: v.pointer("/artists/0/cover/uri").and_then(|u| u.as_str()).map(String::from),
     })
 }
@@ -1240,6 +1249,19 @@ impl Api {
         Ok(v.get("albums").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(parse_album).map(|a| album_card(&a)).collect()).unwrap_or_default())
     }
 
+    pub fn label_albums(&self, id: &str, limit: usize, by_popularity: bool) -> Res<Vec<Card>> {
+        let page_size = limit.to_string();
+        let sort = if by_popularity { "rating" } else { "year" };
+        let v = self.get(&format!("/labels/{id}/albums"), &[("page", "0"), ("pageSize", &page_size), ("sortBy", sort), ("sortOrder", "desc")])?;
+        Ok(v.get("albums").and_then(Value::as_array).into_iter().flatten().filter_map(parse_album).map(|a| album_card(&a)).collect())
+    }
+
+    pub fn label_artists(&self, id: &str, limit: usize) -> Res<Vec<Card>> {
+        let page_size = limit.to_string();
+        let v = self.get(&format!("/labels/{id}/artists"), &[("page", "0"), ("pageSize", &page_size)])?;
+        Ok(v.get("artists").and_then(Value::as_array).into_iter().flatten().filter_map(parse_artist).map(|a| artist_card(&a)).collect())
+    }
+
     pub fn similar_artists(&self, id: &str) -> Res<Vec<Card>> {
         let v = self.get_raw(&format!("/artists/{id}/similar"))?;
         Ok(v.get("similarArtists")
@@ -1908,6 +1930,25 @@ impl Api {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn album_label_link_requires_a_numeric_id() {
+        let mut data = serde_json::json!({
+            "id": 1, "title": "Album", "labels": [{"id": 12, "name": "Label"}]
+        });
+        for (id, expected) in [
+            (serde_json::json!(12), Some(12)),
+            (serde_json::json!("12"), Some(12)),
+            (Value::Null, None),
+            (serde_json::json!(0), None),
+            (serde_json::json!("12/other"), None),
+        ] {
+            data["labels"][0]["id"] = id;
+            let album = parse_album(&data).unwrap();
+            assert_eq!(album.label, "Label");
+            assert_eq!(album.label_id.map(NonZeroU64::get), expected);
+        }
+    }
 
     #[test]
     fn lrc() {

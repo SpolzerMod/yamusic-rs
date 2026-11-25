@@ -466,6 +466,8 @@ impl Ctx {
                         app.set_list_desc(SharedString::new());
                         app.set_list_meta(SharedString::new());
                         app.set_list_cover(Image::default());
+                        app.set_list_label(SharedString::new());
+                        app.set_list_label_id(SharedString::new());
                     }
                 }
                 self.refresh_list();
@@ -509,7 +511,10 @@ impl Ctx {
             Page::History => self.enter_history(),
             Page::Grid => {
                 if let Some(k) = key {
-                    self.st.borrow_mut().grid_key = Some(k);
+                    let previous = self.st.borrow_mut().grid_key.replace(k.clone());
+                    if previous.as_ref() != Some(&k) {
+                        app.set_grid_label_popular(false);
+                    }
                 }
                 self.refresh_grid();
             }
@@ -523,10 +528,17 @@ impl Ctx {
         let app = ui.global::<App>();
         let Some(key) = self.st.borrow().grid_key.clone() else { return };
         let title = self.st.borrow().grid_titles.get(&key).cloned().unwrap_or_default();
+        let label_overview = key.starts_with("label:");
+        let label_releases = key.starts_with("label-releases:");
+        let by_popularity = app.get_grid_label_popular();
         app.set_grid_title(title.into());
         app.set_grid_tabs(ModelRc::default());
         app.set_grid_cards(ModelRc::default());
         app.set_grid_create(false);
+        app.set_grid_label(label_overview);
+        app.set_grid_label_sortable(label_releases);
+        app.set_grid_label_releases(ModelRc::default());
+        app.set_grid_label_artists(ModelRc::default());
         {
             let mut st = self.st.borrow_mut();
             st.grid.clear();
@@ -540,6 +552,14 @@ impl Ctx {
             let res = match block {
                 "playlists" => net.api.collection_tabs("playlists-liked-and-playlists-created"),
                 "albums" => net.api.collection_tabs("albums-liked-and-albums-presaved"),
+                "label" => (|| {
+                    Ok(vec![
+                        (String::new(), net.api.label_albums(arg, 12, false)?),
+                        (String::new(), net.api.label_artists(arg, 12)?),
+                    ])
+                })(),
+                "label-releases" => one(net.api.label_albums(arg, 100, by_popularity)),
+                "label-artists" => one(net.api.label_artists(arg, 100)),
                 // Как у оригинала: «Студийные альбомы» ведут на discography-albums, а не на все альбомы.
                 "ar-studio" => one(net.api.artist_albums(arg, "discography-albums")),
                 "ar-albums" => one(net.api.artist_albums(arg, "direct-albums")),
@@ -550,10 +570,18 @@ impl Ctx {
             };
             let _ = slint::invoke_from_event_loop(move || {
                 with_ctx(|c| {
-                    if c.ui().global::<App>().get_page() != Page::Grid || c.st.borrow().grid_key.as_deref() != Some(key.as_str()) {
+                    let ui = c.ui();
+                    let app = ui.global::<App>();
+                    if app.get_page() != Page::Grid || c.st.borrow().grid_key.as_deref() != Some(key.as_str())
+                        || (label_releases && app.get_grid_label_popular() != by_popularity) {
                         return;
                     }
                     match res {
+                        Ok(tabs) if label_overview => {
+                            let mut cards = tabs.into_iter().map(|(_, cards)| cards);
+                            app.set_grid_label_releases(c.card_model("label-releases", &cards.next().unwrap_or_default(), 191.0));
+                            app.set_grid_label_artists(c.card_model("label-artists", &cards.next().unwrap_or_default(), 191.0));
+                        }
                         Ok(tabs) => {
                             c.st.borrow_mut().grid = tabs;
                             c.show_grid_tab();
@@ -865,6 +893,7 @@ impl Ctx {
         app.set_list_year(SharedString::new());
         app.set_list_likes(SharedString::new());
         app.set_list_label(SharedString::new());
+        app.set_list_label_id(SharedString::new());
         app.set_list_own(false);
         app.set_list_artist_cover(Image::default());
         app.set_list_tint(Color::from_argb_u8(0, 0, 0, 0));
@@ -893,6 +922,7 @@ impl Ctx {
                 app.set_list_year(a.and_then(|a| a.year).map(|y| y.to_string()).unwrap_or_default().into());
                 app.set_list_likes(a.map(|a| group_digits(a.likes)).unwrap_or_default().into());
                 app.set_list_label(a.map(|a| a.label.clone()).unwrap_or_default().into());
+                app.set_list_label_id(a.and_then(|a| a.label_id).map(|id| id.to_string()).unwrap_or_default().into());
                 app.set_list_liked(a.is_some_and(|a| self.st.borrow().liked_albums.contains(&a.id)));
                 if let Some(c) = l.tracks.first().and_then(|t| t.color) {
                     app.set_list_tint(soft(c));
@@ -2687,7 +2717,7 @@ impl Ctx {
     }
 
     fn menu_entry(&self, id: &str, text: &str, icon: Image, submenu: bool) -> MenuEntry {
-        MenuEntry { id: id.into(), text: crate::i18n::tr(text).into(), icon, submenu }
+        MenuEntry { id: id.into(), text: crate::i18n::tr(text).into(), icon, submenu, checked: false }
     }
 
     // ---------- карточки ----------
@@ -3508,6 +3538,17 @@ impl Ctx {
     }
 
     fn menu_action(self: &Rc<Self>, id: &str) {
+        if matches!(id, "label-sort-popular" | "label-sort-date") {
+            let ui = self.ui();
+            let app = ui.global::<App>();
+            let by_popularity = id == "label-sort-popular";
+            if app.get_page() == Page::Grid && app.get_grid_label_sortable()
+                && app.get_grid_label_popular() != by_popularity {
+                app.set_grid_label_popular(by_popularity);
+                self.refresh_grid();
+            }
+            return;
+        }
         if let Some(target) = id.strip_prefix("unpin:") {
             if self.is_pinned(target) { self.toggle_pin(target.to_owned()); }
             return;
@@ -4018,6 +4059,13 @@ impl Ctx {
                 app.set_top_artists(ModelRc::default());
                 app.set_my_artists(ModelRc::default());
             }
+            Page::Grid => {
+                st.cards.remove("label-releases");
+                st.cards.remove("label-artists");
+                drop(st);
+                app.set_grid_label_releases(ModelRc::default());
+                app.set_grid_label_artists(ModelRc::default());
+            }
             _ => {}
         }
         self.images.trim();
@@ -4265,6 +4313,17 @@ fn register_extra(app: &App) {
     app.on_setting(|id| with_ctx(|c| c.setting(&id)));
     app.on_open_grid(|block, title| {
         with_ctx(|c| {
+            if matches!(block.as_str(), "label-releases" | "label-artists") {
+                let key = {
+                    let st = c.st.borrow();
+                    let Some(id) = st.grid_key.as_deref().and_then(|key| key.strip_prefix("label:")) else { return };
+                    format!("{block}:{id}")
+                };
+                let label = c.ui().global::<App>().get_grid_title();
+                c.st.borrow_mut().grid_titles.insert(key.clone(), format!("{title} {label}"));
+                c.navigate(Page::Grid, Some(key), true);
+                return;
+            }
             // Полки исполнителя запоминают его id: страница должна открываться и из истории.
             let key = match c.current_artist() {
                 Some((id, _)) if block.starts_with("ar-") => format!("{block}:{id}"),
@@ -4273,6 +4332,29 @@ fn register_extra(app: &App) {
             c.st.borrow_mut().grid_titles.insert(key.clone(), title.to_string());
             c.navigate(Page::Grid, Some(key), true);
         })
+    });
+    app.on_share_label(|| {
+        with_ctx(|c| {
+            let url = {
+                let st = c.st.borrow();
+                let Some(id) = st.grid_key.as_deref().and_then(|key| key.strip_prefix("label:")) else { return };
+                format!("https://music.yandex.ru/label/{id}")
+            };
+            sys::copy_text(&url);
+            c.toast("Ссылка скопирована");
+        });
+    });
+    app.on_open_label_sort(|x, y| {
+        with_ctx(|c| {
+            let ui = c.ui();
+            let app = ui.global::<App>();
+            let by_popularity = app.get_grid_label_popular();
+            let mut popular = c.menu_entry("label-sort-popular", "По популярности", Image::default(), false);
+            popular.checked = by_popularity;
+            let mut date = c.menu_entry("label-sort-date", "По дате выхода", Image::default(), false);
+            date.checked = !by_popularity;
+            c.show_menu(vec![popular, date], x, y, true);
+        });
     });
     app.on_select_grid_tab(|i| {
         with_ctx(|c| {

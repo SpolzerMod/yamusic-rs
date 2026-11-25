@@ -132,6 +132,7 @@ export struct MenuEntry {
     text: string,
     icon: image,
     submenu: bool,
+    checked: bool,
 }
 
 export struct WaveOption {
@@ -272,6 +273,7 @@ export global App {
     in property <string> list-year;
     in property <string> list-likes;
     in property <string> list-label;
+    in property <string> list-label-id;
     in property <bool> list-own;
     // Правка своего плейлиста: 0 — нет, 1 — название, 2 — описание (поле названия тоже открыто).
     in-out property <int> list-edit;
@@ -451,7 +453,14 @@ export global App {
     in property <int> grid-tab;
     in property <[CardItem]> grid-cards;
     in property <bool> grid-create;
+    in property <bool> grid-label;
+    in property <bool> grid-label-sortable;
+    in property <bool> grid-label-popular;
+    in property <[CardItem]> grid-label-releases;
+    in property <[CardItem]> grid-label-artists;
     callback open-grid(string, string);
+    callback share-label();
+    callback open-label-sort(length, length);
     callback select-grid-tab(int);
 
     // Обложка на всё окно (ImageSliderModal оригинала).
