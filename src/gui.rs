@@ -1503,6 +1503,46 @@ thread_local! {
     static UPDATE: RefCell<Option<crate::update::Release>> = const { RefCell::new(None) };
 }
 
+/// Спросить GitHub (долго, звать из фонового потока) и показать итог: новый релиз — тост
+/// «Доступна версия …», в настройках под «Проверить обновления» — что вышло и когда (#128).
+fn check_updates(weak: &slint::Weak<AppWindow>) {
+    let res = crate::update::check();
+    if let Err(e) = &res {
+        log(format!("обновления: {e}"));
+    }
+    let _ = weak.upgrade_in_event_loop(move |ui| {
+        let app = ui.global::<App>();
+        let time = chrono::Local::now().format("%H:%M");
+        app.set_update_failed(res.is_err());
+        let status = match res {
+            Ok(Some(r)) => {
+                app.set_update_version(r.version.clone().into());
+                let status = format!("Проверено в {time}: доступна версия {}", r.version);
+                UPDATE.with(|u| *u.borrow_mut() = Some(r));
+                status
+            }
+            Ok(None) => format!("Проверено в {time}: новых версий нет"),
+            Err(e) => format!("Ошибка в {time}: {e}"),
+        };
+        app.set_update_status(status.into());
+    });
+}
+
+/// «Проверить обновления» в настройках и в трее: спросить сейчас, даже если фоновая проверка
+/// выключена. У оригинала пункт трея (`desktop.check-for-updates`) так же зовёт `updater.check()`.
+fn check_updates_now(ui: &AppWindow) {
+    static BUSY: AtomicBool = AtomicBool::new(false);
+    if BUSY.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    ui.global::<App>().set_update_status("Проверяем…".into());
+    let weak = ui.as_weak();
+    std::thread::spawn(move || {
+        check_updates(&weak);
+        BUSY.store(false, Ordering::Relaxed);
+    });
+}
+
 /// Проверка обновлений в фоне (первая — через 10 с после запуска) и кнопка «Обновить» в тосте.
 fn start_updates(ui: &AppWindow) {
     let weak = ui.as_weak();
@@ -1513,20 +1553,9 @@ fn start_updates(ui: &AppWindow) {
                 std::thread::sleep(Duration::from_secs(60));
                 continue;
             }
-            match crate::update::check() {
-                Ok(Some(r)) => {
-                    let weak = weak.clone();
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak.upgrade() {
-                            ui.global::<App>().set_update_version(r.version.clone().into());
-                            UPDATE.with(|u| *u.borrow_mut() = Some(r));
-                        }
-                    });
-                }
-                Ok(None) => {}
-                Err(e) => log(format!("обновления: {e}")),
-            }
-            std::thread::sleep(crate::update::POLL);
+            check_updates(&weak);
+            // После отказа по лимиту запросов — когда разрешит GitHub, а не через полчаса.
+            std::thread::sleep(crate::update::next_check());
         }
     });
     ui.global::<App>().on_update_changes(|| {
@@ -2387,7 +2416,7 @@ fn install_tray(ui: &AppWindow, player: &Player) {
                 Event::PlayPause => ui.global::<App>().invoke_play_pause(),
                 Event::Prev => p.send(Cmd::Prev),
                 Event::Next => p.send(Cmd::Next),
-                Event::Updates => sys::open_url(concat!(env!("CARGO_PKG_REPOSITORY"), "/releases")),
+                Event::Updates => check_updates_now(&ui),
                 Event::Terms => sys::open_url("https://yandex.ru/legal/music_mobile_agreement/"),
                 Event::Recommendations => sys::open_url("https://music.yandex.ru/legal/recommendations/ru/#music"),
                 Event::Support => sys::open_url(SUPPORT_CHAT),
@@ -3150,6 +3179,8 @@ impl Ctx {
                 self.toast("Скрытые блоки снова на главной");
             }
             "about" => sys::open_url(env!("CARGO_PKG_REPOSITORY")),
+            "update-check" => check_updates_now(&ui),
+            "releases" => sys::open_url(concat!(env!("CARGO_PKG_REPOSITORY"), "/releases")),
             "donate" => sys::open_url(DONATE_URL),
             "discord" => {
                 let on = !app.get_discord_on();

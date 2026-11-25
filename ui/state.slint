@@ -191,6 +191,10 @@ export global App {
     callback update-changes();
     // «Проверять обновления» в настройках.
     in property <bool> check-updates: true;
+    // Итог последней проверки обновлений для настроек: пусто — ещё не проверяли.
+    in property <string> update-status;
+    // Проверка не удалась: в настройках ссылка на страницу релизов.
+    in property <bool> update-failed;
     // «Треки 18+» в меню профиля.
     in property <bool> allow-explicit: true;
     // Подсказка у значка «!»: текст дисклеймера рядом с курсором.
