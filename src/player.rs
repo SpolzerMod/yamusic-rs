@@ -1891,13 +1891,19 @@ impl Engine {
             album_id: t.album_id.clone().unwrap_or_default(),
             title: t.title.clone(),
         };
+        // Пока трек загружается, декодер ещё не получил сохранённую позицию.
+        let position = if self.loaded {
+            self.pos()
+        } else {
+            self.resume_at.as_ref().filter(|(id, _)| id == &current.id).map_or(0.0, |(_, seconds)| *seconds)
+        };
         Some(crate::ynison::Now {
             entity_type,
             entity_id,
             from: self.play_context().from,
             tracks: tracks.iter().map(playable).collect(),
             index,
-            progress_ms: if self.loaded { (self.pos() * 1000.0) as u64 } else { 0 },
+            progress_ms: (position * 1000.0) as u64,
             duration_ms: current.duration_ms,
             paused: self.paused,
             session: if self.list.is_none() { self.session.clone() } else { String::new() },
@@ -1989,6 +1995,17 @@ impl Engine {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn closing_while_restored_track_loads_keeps_ynison_position() {
+        let mut engine = Engine::new(mpsc::channel().0, Default::default(), Default::default(), Arc::new(|| {}), Default::default());
+        let track = crate::api::parse_track(&serde_json::json!({"id": 7, "title": "Track", "durationMs": 120000})).unwrap();
+        engine.apply_resume(Resume { source: Source::Wave, tracks: vec![track], index: 0, position: 37.5 });
+        assert!(!engine.loaded);
+        let now = engine.ynison_now().unwrap();
+        assert!(now.paused);
+        assert_eq!(now.progress_ms, 37_500);
+    }
 
     #[test]
     fn seek_keeps_latest_position_until_audio_acknowledges_it() {
