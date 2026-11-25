@@ -444,6 +444,8 @@ impl Ctx {
             app.set_account_open(false);
         } else if app.get_shortcuts_open() {
             app.set_shortcuts_open(false);
+        } else if app.get_overview_open() {
+            app.set_overview_open(false);
         } else if app.get_eq_open() {
             app.set_eq_open(false);
         } else if app.get_fullscreen() {

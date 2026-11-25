@@ -39,6 +39,8 @@ struct State {
     grid_titles: HashMap<String, String>,
     grid: Vec<(String, Vec<Card>)>,
     grid_tab: usize,
+    /// Лендинг по скелету («Жанры», «Эпохи»): id скелета.
+    landing_key: Option<String>,
     net: Option<Net>,
     pins: Vec<Pin>,
     playlists: Vec<Playlist>,
@@ -441,6 +443,7 @@ impl Ctx {
         app.set_page(page);
         app.set_hint_open(false);
         app.set_cover_open(false);
+        app.set_overview_open(false);
         if from != page {
             self.release_page(from);
         }
@@ -505,6 +508,18 @@ impl Ctx {
             }
             Page::Artists => self.refresh_my_artists(),
             Page::Trends | Page::Concerts | Page::Nonmusic => self.refresh_landing(),
+            Page::Landing => {
+                // Другой лендинг: прежние блоки и заголовок не висят, пока грузится новый скелет.
+                let other = key.filter(|k| self.st.borrow().landing_key.as_ref() != Some(k));
+                if let Some(k) = &other {
+                    self.release_landing();
+                    self.st.borrow_mut().landing_key = Some(k.clone());
+                }
+                if other.is_some() || from != page {
+                    app.set_landing_title(SharedString::new());
+                }
+                self.refresh_landing();
+            }
             Page::Chart => self.refresh_chart(),
             Page::History => self.enter_history(),
             Page::Grid => {
@@ -537,7 +552,13 @@ impl Ctx {
         std::thread::spawn(move || {
             let (block, arg) = key.split_once(':').unwrap_or((key.as_str(), ""));
             let one = |r: Result<Vec<Card>, String>| r.map(|c| vec![(String::new(), c)]);
+            // Заголовок подборки — название тега из ответа, как у TagPage оригинала.
+            let mut title = None;
             let res = match block {
+                "tag" => one(net.api.tag_playlists(arg).map(|(t, c)| {
+                    title = Some(t).filter(|t| !t.is_empty());
+                    c
+                })),
                 "playlists" => net.api.collection_tabs("playlists-liked-and-playlists-created"),
                 "albums" => net.api.collection_tabs("albums-liked-and-albums-presaved"),
                 // Как у оригинала: «Студийные альбомы» ведут на discography-albums, а не на все альбомы.
@@ -555,6 +576,10 @@ impl Ctx {
                     }
                     match res {
                         Ok(tabs) => {
+                            if let Some(t) = title {
+                                c.ui().global::<App>().set_grid_title(t.as_str().into());
+                                c.st.borrow_mut().grid_titles.insert(key.clone(), t);
+                            }
                             c.st.borrow_mut().grid = tabs;
                             c.show_grid_tab();
                         }
@@ -643,7 +668,7 @@ impl Ctx {
             }
             Page::Artist => self.refresh_artist(),
             Page::Artists => self.show_my_top(),
-            Page::Trends | Page::Concerts | Page::Nonmusic => self.refresh_landing(),
+            Page::Trends | Page::Concerts | Page::Nonmusic | Page::Landing => self.refresh_landing(),
             Page::Chart => self.refresh_chart(),
             Page::History => self.refresh_history(),
             _ => {}
@@ -1813,6 +1838,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             liked_albums: Default::default(),
             liked_playlists: Default::default(),
             grid_key: None,
+            landing_key: None,
             grid_titles: HashMap::new(),
             grid: Vec::new(),
             grid_tab: 0,
@@ -2724,17 +2750,16 @@ impl Ctx {
     }
 
     fn open_target(self: &Rc<Self>, target: &str, title: &str) {
-        let (kind, _) = target.split_once(':').unwrap_or(("", ""));
+        let (kind, arg) = target.split_once(':').unwrap_or(("", ""));
         match kind {
             "album" | "playlist" => self.navigate(Page::List, Some(target.to_string()), true),
             "artist" => self.navigate(Page::Artist, Some(target.to_string()), true),
+            // Подборка — сетка её плейлистов; заголовок, пока грузится, — с карточки.
             "tag" => {
-                let ui = self.ui();
-                let app = ui.global::<App>();
-                app.set_search_text(title.into());
-                self.navigate(Page::Search, None, true);
-                self.search_now(title.to_string());
+                self.st.borrow_mut().grid_titles.insert(target.to_string(), title.to_string());
+                self.navigate(Page::Grid, Some(target.to_string()), true);
             }
+            "landing" => self.navigate(Page::Landing, Some(arg.to_string()), true),
             _ => {}
         }
     }
@@ -3939,6 +3964,7 @@ impl Ctx {
             Page::Artist => (Page::Artist, st.artist_key.clone()),
             Page::List => (Page::List, st.list_key.clone()),
             Page::Grid => (Page::Grid, st.grid_key.clone()),
+            Page::Landing => (Page::Landing, st.landing_key.clone()),
             Page::Search if app.get_search_tracks_only() => (Page::Search, Some(SEARCH_TRACK_KIND.into())),
             p => (p, None),
         }
@@ -4001,7 +4027,7 @@ impl Ctx {
                 app.set_playlists(ModelRc::default());
                 app.set_albums(ModelRc::default());
             }
-            Page::Trends | Page::Concerts | Page::Nonmusic => {
+            Page::Trends | Page::Concerts | Page::Nonmusic | Page::Landing => {
                 drop(st);
                 self.release_landing();
             }

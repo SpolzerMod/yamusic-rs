@@ -1,7 +1,7 @@
 // Общее состояние интерфейса (глобал App), структуры строк и карточек, переводы (T).
 // Rust пишет сюда данные и подписывается на колбэки.
 
-export enum Page { wave, search, trends, concerts, nonmusic, collection, list, artist, artists, settings, grid, chart, history }
+export enum Page { wave, search, trends, concerts, nonmusic, collection, list, artist, artists, settings, grid, chart, history, landing }
 
 // Строка окна «Горячие клавиши»: подпись и клавиши по ячейкам («—» — пусто).
 export struct ShortcutItem {
@@ -120,6 +120,8 @@ export struct LBlock {
     button-fg: color,
     ink: color,
     ad: bool,
+    // OVERVIEW: сколько строк описания видно до «Далее».
+    lines: int,
 }
 
 export struct LyricLine {
@@ -411,6 +413,12 @@ export global App {
     in property <int> landing-tab;
     in property <bool> landing-loading;
     in property <bool> landing-location;
+    // Лендинг, открытый по ссылке («Жанры», «Эпохи»): кнопка «назад» у заголовка.
+    in property <bool> landing-back;
+    // Окно «Далее» у описания жанра (OverviewBlock оригинала): заголовок и весь текст.
+    in-out property <bool> overview-open;
+    in-out property <string> overview-title;
+    in-out property <string> overview-text;
     in property <string> concert-mask;
     in property <string> concert-mask-top;
     in property <image> concert-date-bg;

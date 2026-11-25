@@ -814,7 +814,7 @@ pub fn parse_card(it: &Value) -> Option<Card> {
                 .unwrap_or_default(),
             round: false,
             explicit: false,
-            target: format!("tag:{}", d.pointer("/action/weblink").and_then(|w| w.as_str()).unwrap_or("").trim_start_matches("/tag/")),
+            target: d.pointer("/action/weblink").and_then(|w| w.as_str()).map(crate::landing::web_target).unwrap_or_default(),
         },
         _ => return None,
     })
@@ -1221,6 +1221,32 @@ impl Api {
     /// Всё содержимое блока лендинга, как на странице `entities` оригинала: первая страница, 100 карточек.
     pub fn block_entities(&self, id: &str) -> Res<Vec<Card>> {
         Ok(cards(&self.get_raw(&format!("/landing/block/{id}/entities?page=0&pageSize=100"))?))
+    }
+
+    /// Подборка (`/tag/autumn`): название тега и его плейлисты, как TagPage оригинала —
+    /// `tags/{id}/playlist-ids`, затем сами плейлисты `playlists?playlistIds=uid:kind,…`.
+    pub fn tag_playlists(&self, id: &str) -> Res<(String, Vec<Card>)> {
+        let v = self.get_raw(&format!("/tags/{id}/playlist-ids"))?;
+        let title = v.pointer("/tag/name").and_then(|t| t.as_str()).unwrap_or("").to_string();
+        let ids: Vec<String> = v
+            .get("ids")
+            .and_then(|i| i.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|x| Some(format!("{}:{}", s(x.get("uid"))?, s(x.get("kind"))?)))
+            .collect();
+        if ids.is_empty() {
+            return Ok((title, Vec::new()));
+        }
+        let v = self.get_raw(&format!("/playlists?resumeStream=false&playlistIds={}", ids.join(",")))?;
+        let cards = v
+            .get("playlists")
+            .and_then(|p| p.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|x| Some(Card { likes: x.get("likesCount").and_then(|l| l.as_u64()), ..playlist_card(&parse_playlist(x)?) }))
+            .collect();
+        Ok((title, cards))
     }
 
     /// Вкладки «Смотреть всё» коллекции: block — playlists-liked-and-playlists-created или albums-liked-and-albums-presaved.
