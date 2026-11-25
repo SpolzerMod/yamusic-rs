@@ -630,14 +630,7 @@ fn menu_action(n: i32) {
             }
         }
         7 => open_artists(&t.artist_list),
-        8 => {
-            let uid = now::uid();
-            std::thread::spawn(move || {
-                if let Err(e) = api.dislike(&uid, &t.full_id(), false) {
-                    log(format!("дизлайк: {e}"));
-                }
-            });
-        }
+        8 => player.send(Cmd::DislikeTrack(t)),
         9 => crate::download::start(api, "", vec![t]),
         _ => {}
     }

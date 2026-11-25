@@ -4041,15 +4041,11 @@ impl Ctx {
         }))));
     }
 
-    /// Дизлайк снимает лайк, поэтому «Мне нравится» обновляется сразу, как при снятии сердечка.
     fn dislike(self: &Rc<Self>) {
-        let s = self.player.state();
-        if let (Some(t), false, Some(net)) = (s.track, s.disliked, self.st.borrow().net.clone()) {
-            if self.player.is_liked(&t.id) {
-                std::thread::spawn(move || net.like_saved(&t, false));
-            }
-        }
-        self.player.send(Cmd::Dislike);
+        let net = self.st.borrow().net.clone();
+        self.player.send(Cmd::Dislike(Some(Box::new(move |track, added, result| {
+            if let Some(net) = net.filter(|_| added && result.is_ok()) { net.dislike_saved(track); }
+        }))));
     }
 
     fn like_toast(self: &Rc<Self>, t: &Track, liked: bool) {
