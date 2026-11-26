@@ -2707,6 +2707,14 @@ fn track_link(t: &Track) -> String {
     }
 }
 
+/// Тост вставки в очередь (`play-queue.*-will-be-played-next/-last`): название без кавычек,
+/// у оригинала оно выделено жирным.
+fn queue_toast(what: &str, title: &str, next: bool) -> String {
+    let made = if what == "Глава" { "добавлена" } else { "добавлен" };
+    let place = if next { "в начало" } else { "в конец" };
+    format!("{what} {title} {made} {place} очереди")
+}
+
 /// Код для вставки плеера на сайт, как в окне «HTML-код» оригинала.
 fn iframe_code(path: &str, w: u32, h: u32, link: &str) -> String {
     format!(
@@ -3381,6 +3389,13 @@ impl Ctx {
             let vibe = if l.album.is_some() { "Моя волна по альбому" } else { "Моя волна по плейлисту" };
             items.push(self.menu_entry("list-vibe", vibe, icons.get_m_vibe(), false));
         }
+        // Как у оригинала (модули 98390 и 23942): только когда что-то играет и это не волна —
+        // в генеративный контекст список не вставить.
+        let s = self.player.state();
+        if !l.tracks.is_empty() && s.track.is_some() && s.source.station().is_none() {
+            items.push(self.menu_entry("list-next", "Играть следующим", icons.get_m_play_next(), false));
+            items.push(self.menu_entry("list-last", "Добавить в конец очереди", icons.get_m_play_last(), false));
+        }
         if !l.tracks.is_empty() {
             items.push(self.menu_entry("list-playlist", "Добавить в плейлист", icons.get_m_add_playlist(), true));
         }
@@ -3771,6 +3786,18 @@ impl Ctx {
                     }
                 }
                 "like" => self.list_like(),
+                // Альбом или плейлист целиком в очередь (модуль 98158), тост с обложкой списка.
+                "next" | "last" => {
+                    let Some(data) = self.list() else { return };
+                    let Data::List(l) = &*data else { return };
+                    if l.tracks.is_empty() {
+                        return;
+                    }
+                    let next = rest == "next";
+                    let what = if l.album.is_some() { "Альбом" } else { "Плейлист" };
+                    self.player.send(Cmd::Enqueue { tracks: l.tracks.clone(), next });
+                    self.toast_with_cover(queue_toast(what, &l.title, next), l.covers.first().map(|c| c.as_str()));
+                }
                 "trailer" => self.ui().global::<App>().invoke_list_trailer(),
                 "download" => self.ui().global::<App>().invoke_list_download(),
                 "download-stop" => {
@@ -3826,13 +3853,13 @@ impl Ctx {
                     });
                 });
             }
-            "next" => {
-                self.player.send(Cmd::Enqueue { track: t, next: true });
-                self.toast("Трек будет следующим");
-            }
-            "last" => {
-                self.player.send(Cmd::Enqueue { track: t, next: false });
-                self.toast("Трек добавлен в конец очереди");
+            "next" | "last" => {
+                let next = id == "next";
+                let what = if t.is_episode() { "Выпуск" } else if t.is_chapter() { "Глава" } else { "Трек" };
+                let msg = queue_toast(what, &t.title, next);
+                let cover = t.cover.clone();
+                self.player.send(Cmd::Enqueue { tracks: vec![t], next });
+                self.toast_with_cover(msg, cover.as_deref());
             }
             "dislike" => self.dislike(),
             "lyrics" => self.open_fullscreen(2),
@@ -4311,13 +4338,18 @@ impl Ctx {
         } else {
             format!("Трек «{}» удален из плейлиста «Мне нравится»", t.title)
         };
+        self.toast_with_cover(msg, t.cover.as_deref());
+    }
+
+    /// Тост с обложкой 40 слева, как BaseNotification с `cover`.
+    fn toast_with_cover(self: &Rc<Self>, msg: impl Into<String>, cover: Option<&str>) {
         self.toast(msg);
         let ui = self.ui();
         let app = ui.global::<App>();
         app.set_toast_cover(Image::default());
         app.set_toast_has_cover(true);
         let size = self.size_for(40.0);
-        if let Some(url) = t.cover_url(size) {
+        if let Some(url) = cover.map(|c| crate::api::pic(c, size)) {
             let w = self.ui.clone();
             self.images.get(&url, size, move |img| {
                 if let Some(ui) = w.upgrade() {
@@ -4938,4 +4970,13 @@ fn download_cancellation_belongs_to_the_selected_list() {
     assert!(likes.stop_for("10", Some("playlist:10:3")).is_some());
     assert!(likes.stop_for("20", Some("likes")).is_none());
     assert!(likes.stop_for("10", Some("likes")).is_some());
+}
+
+#[cfg(test)]
+#[test]
+fn queue_toasts_match_the_original_dictionary() {
+    assert_eq!(queue_toast("Альбом", "Sea", true), "Альбом Sea добавлен в начало очереди");
+    assert_eq!(queue_toast("Плейлист", "Мне нравится", false), "Плейлист Мне нравится добавлен в конец очереди");
+    assert_eq!(queue_toast("Глава", "Пролог", true), "Глава Пролог добавлена в начало очереди");
+    assert_eq!(queue_toast("Выпуск", "№1", false), "Выпуск №1 добавлен в конец очереди");
 }

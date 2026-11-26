@@ -127,8 +127,9 @@ pub enum Cmd {
     Jump(usize),
     Repeat(Repeat),
     Shuffle(bool),
-    /// «Играть следующим» (`next`) или «Добавить в конец очереди».
-    Enqueue { track: Track, next: bool },
+    /// «Играть следующим» (`next`) или «Добавить в конец очереди»: трек или весь альбом и
+    /// плейлист, в своём порядке.
+    Enqueue { tracks: Vec<Track>, next: bool },
     /// Переключатель «Треки 18+».
     AllowExplicit(bool),
     /// Сколько треки перетекают друг в друга; ноль — без кроссфейда.
@@ -1420,15 +1421,17 @@ impl Engine {
                 self.flush_feedback();
             }
             Cmd::Repeat(r) => self.repeat = r,
-            Cmd::Enqueue { track, next } => {
+            Cmd::Enqueue { tracks, next } => {
                 if next {
-                    self.queue.push_front(track);
+                    for t in tracks.into_iter().rev() {
+                        self.queue.push_front(t);
+                    }
                     self.prefetch = None;
                     if self.loaded {
                         self.prefetch_next();
                     }
                 } else {
-                    self.queue.push_back(track);
+                    self.queue.extend(tracks);
                 }
             }
             Cmd::AllowExplicit(allow) => self.set_allow_explicit(allow),
@@ -2077,6 +2080,18 @@ impl Engine {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn enqueued_list_keeps_its_order() {
+        let mut e = Engine::new(mpsc::channel().0, Default::default(), Default::default(), Arc::new(|| {}), Default::default());
+        let t = |id: u32| crate::api::parse_track(&serde_json::json!({"id": id, "title": "t"})).unwrap();
+        let ids = |e: &Engine| e.queue.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+        e.queue.push_back(t(1));
+        e.cmd(Cmd::Enqueue { tracks: vec![t(2), t(3)], next: true });
+        assert_eq!(ids(&e), ["2", "3", "1"]);
+        e.cmd(Cmd::Enqueue { tracks: vec![t(4), t(5)], next: false });
+        assert_eq!(ids(&e), ["2", "3", "1", "4", "5"]);
+    }
 
     #[test]
     fn closing_while_restored_track_loads_keeps_ynison_position() {
