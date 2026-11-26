@@ -197,6 +197,8 @@ impl Discord {
         // Что сейчас показано: (id трека, время старта). None — ничего.
         let mut shown: Option<(String, i64)> = None;
         let mut display_type_ok = true;
+        // Discord отклонил саму активность: не долбим его одной и той же ошибкой каждую секунду.
+        let mut retry_at = Instant::now();
         loop {
             thread::sleep(Duration::from_secs(1));
             let cfg = self.cfg.lock().unwrap().clone();
@@ -209,6 +211,7 @@ impl Discord {
                 shown = None;
                 conn_app = app.clone();
                 next_try = Instant::now();
+                retry_at = Instant::now();
             }
             if !cfg.enabled {
                 self.set_status("Выключено");
@@ -226,7 +229,7 @@ impl Discord {
                     Ok(c) => {
                         conn = Some(c);
                         shown = None;
-                        self.set_status("Подключено, статус виден в профиле");
+                        self.set_status("Подключено, статус отправлен");
                     }
                     Err(e) => {
                         self.set_status(e);
@@ -247,7 +250,7 @@ impl Discord {
                         Some((id, st)) => *id != t.id || (st - start).abs() > 3000, // новый трек или перемотка
                         None => true,
                     };
-                    if !changed {
+                    if !changed || Instant::now() < retry_at {
                         Ok(())
                     } else {
                         let mut r = c.set_activity(activity(&t, start, end, display_type_ok));
@@ -259,11 +262,15 @@ impl Discord {
                         match r {
                             Ok(None) => {
                                 shown = Some((t.id.clone(), start));
+                                self.set_status("Подключено, статус отправлен");
                                 Ok(())
                             }
                             Ok(Some(msg)) => {
+                                // Трек не считаем показанным: иначе он больше не переотправится,
+                                // а в настройках будет написано, что статус уже стоит.
                                 log(format!("discord SET_ACTIVITY: {msg}"));
-                                shown = Some((t.id.clone(), start)); // не долбим Discord повторами
+                                retry_at = Instant::now() + Duration::from_secs(30);
+                                self.set_status("Discord отклонил статус, повторю позже");
                                 Ok(())
                             }
                             Err(e) => Err(e),
