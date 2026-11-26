@@ -36,6 +36,7 @@ mod tags;
 #[cfg(windows)]
 mod tray;
 mod update;
+mod vibe;
 mod yandex_id;
 mod ynison;
 

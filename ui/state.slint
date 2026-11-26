@@ -326,6 +326,16 @@ export global App {
     in property <image> blob;
     in property <[color]> vibe-stops: [#000, #000, #000, #000, #000, #000, #000, #000, #000, #000, #000, #000, #000, #000, #000, #000];
     in property <color> vibe-edge: #000;
+    // Живое пятно — шейдер оригинала (src/vibe.rs): кадр и его место на холсте долями стороны.
+    in property <bool> vibe-anim;
+    in property <image> vibe-frame;
+    in property <float> vibe-x;
+    in property <float> vibe-y;
+    in property <float> vibe-w: 1;
+    in property <float> vibe-h: 1;
+    // Страница волны показана; видимая часть холста долями его стороны.
+    callback vibe-mount();
+    callback vibe-crop(float, float, float, float);
 
     // Текущий трек: подробности для плеера.
     in property <string> track-version;

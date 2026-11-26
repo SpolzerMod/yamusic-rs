@@ -399,6 +399,11 @@ component WaveTune inherits Rectangle {
 }
 
 export component WavePage inherits Rectangle {
+    // Сколько окна за краями страницы сверху, справа и снизу (`ui/app.slint`): пятно краем
+    // страницы не обрезается и доходит до краёв окна, как холст оригинала.
+    in property <length> spill-top;
+    in property <length> spill-right;
+    in property <length> spill-bottom;
     // Раскладка оригинала: колесо — левые 40%, справа мета с отступами 24 и 48.
     property <length> wheel-w: root.width * 0.4;
     property <length> text-x: wheel-w + 24px;
@@ -418,19 +423,43 @@ export component WavePage inherits Rectangle {
     property <float> shown: drag-progress >= 0 ? drag-progress : progress;
     property <bool> tune-from-top;
 
-    // Пятно: картинка оригинала, перекрашенная под трек. С движением медленно вращается,
-    // дышит и плывёт; периоды взаимно простые, чтобы рисунок не повторялся.
-    Image {
-        property <duration> tick: App.wave-motion ? animation-tick() : 0ms;
-        x: cx - blob / 2 + blob * 0.02 * sin(tick / 11s * 360deg);
-        y: 284px + db - blob / 2 + blob * 0.02 * cos(tick / 13s * 360deg);
+    // Холст анимации оригинала (`VibePage_vibeAnimation`, `width: 250%`): квадрат в 250% ширины
+    // блока с названием, по его центру.
+    property <length> canvas: text-w * 2.5;
+    property <length> canvas-x: cx - canvas / 2;
+    property <length> canvas-y: 284px + db - canvas / 2;
+    // Видимая часть холста в долях: за краем окна шейдер считать незачем. Слева край —
+    // сама страница: там меню, пятно под него не заходит.
+    property <{x0: float, y0: float, x1: float, y1: float}> crop: {
+        x0: max(0, -canvas-x / canvas),
+        y0: max(0, (-spill-top - canvas-y) / canvas),
+        x1: min(1, (root.width + spill-right - canvas-x) / canvas),
+        y1: min(1, (root.height + spill-bottom - canvas-y) / canvas),
+    };
+    changed crop => { App.vibe-crop(crop.x0, crop.y0, crop.x1, crop.y1); }
+    init => {
+        App.vibe-crop(crop.x0, crop.y0, crop.x1, crop.y1);
+        App.vibe-mount();
+    }
+
+    // Живое пятно: шейдер оригинала. Прозрачность 0,8 и проявление за секунду уже в кадре.
+    if App.vibe-anim: Image {
+        x: canvas-x + canvas * App.vibe-x;
+        y: canvas-y + canvas * App.vibe-y;
+        width: canvas * App.vibe-w;
+        height: canvas * App.vibe-h;
+        source: App.vibe-frame;
+        image-fit: fill;
+    }
+    // Без движения и в «Лёгком» режиме: картинка оригинала, перекрашенная под трек.
+    if !App.vibe-anim: Image {
+        x: cx - blob / 2;
+        y: 284px + db - blob / 2;
         width: blob;
         height: blob;
         source: App.blob;
         image-fit: contain;
         opacity: 0.8;
-        transform-rotation: tick / 60s * 360deg;
-        transform-scale: 1 + 0.04 * sin(tick / 7s * 360deg);
     }
 
     // Колесо вайбов: бесконечная лента, крутится колёсиком мыши.

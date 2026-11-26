@@ -108,12 +108,29 @@ struct State {
     blob_src: Option<SharedPixelBuffer<Rgba8Pixel>>,
     blob_requested: bool,
     vibe_key: Option<(bool, Option<[u8; 3]>)>,
+    vibe: VibeAnim,
     /// Анимация пятна: таймер есть, только пока волна играет на экране.
     trailer: Option<Trailer>,
     /// Настройки «Моей волны» с сервера, выбранный вариант в каждой группе и картинки вариантов.
     wave_tune: Vec<(crate::api::WaveSettingGroup, usize, Vec<Image>)>,
     /// Аккаунт и ключ списка, для которого можно отменить загрузку.
     download: Option<ListDownload>,
+}
+
+/// Живое пятно «Моей волны»: что уже отправлено потоку анимации, повторно одно и то же не шлётся.
+#[derive(Default)]
+struct VibeAnim {
+    handle: Option<crate::vibe::Vibe>,
+    mounted: bool,
+    visible: Option<bool>,
+    playing: Option<bool>,
+    palette: Option<crate::vibe::Palette>,
+    /// Трек и был ли он лайкнут: лайк того же трека — вспышка, как у оригинала.
+    like: Option<(String, bool)>,
+    /// Кадры не успевали: до перезапуска остаётся неподвижная картинка.
+    failed: bool,
+    /// Видимая часть холста в пикселях счёта; нули — страница её ещё не сообщила.
+    crop: [usize; 4],
 }
 
 /// Трейлер: треки звучат по 12,5 с с середины, потом следующий.
@@ -310,6 +327,7 @@ impl Ctx {
         app.set_can_prev(s.track.is_some());
         let playing_now = started && s.playing;
         self.sync_vibe(playing_now, s.track.as_ref().and_then(|t| t.color));
+        self.sync_vibe_anim(playing_now, s.track.as_ref().and_then(|t| t.color));
 
         self.sync_trailer(&s);
         self.sync_queue(&s);
@@ -327,7 +345,9 @@ impl Ctx {
             app.set_artists(SharedString::new());
             return;
         };
-        app.set_liked(self.player.is_liked(&t.id));
+        let liked = self.player.is_liked(&t.id);
+        app.set_liked(liked);
+        self.vibe_like(&t.id, liked);
         app.set_disliked(s.disliked);
         let changed = self.st.borrow().track_id.as_deref() != Some(t.id.as_str());
         if changed {
@@ -2016,6 +2036,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             blob_src: None,
             blob_requested: false,
             vibe_key: None,
+            vibe: VibeAnim::default(),
             trailer: None,
             wave_tune: Vec::new(),
             download: None,
@@ -4149,6 +4170,109 @@ impl Ctx {
         }
     }
 
+    /// Живое пятно — шейдер оригинала в своём потоке (`src/vibe.rs`), включается настройкой
+    /// «Движение волны». Здесь решается, считать ли его сейчас, и передаётся то же, что
+    /// оригинал шлёт воркеру. В «Лёгком» режиме остаётся неподвижная картинка.
+    fn sync_vibe_anim(self: &Rc<Self>, playing: bool, color: Option<[u8; 3]>) {
+        use crate::vibe::{Msg, Palette};
+        let ui = self.ui();
+        let app = ui.global::<App>();
+        let w = ui.window();
+        let on = app.get_wave_motion() && !self.lite.get() && !self.st.borrow().vibe.failed;
+        let mounted = on && app.get_page() == Page::Wave && !app.get_logged_out();
+        // За полноэкранным плеером, в мини-плеере, в трее и в свёрнутом окне пятна не видно.
+        // Под Wayland Slint может считать окно свёрнутым и после разворачивания из панели
+        // (см. `sys::minimize`), поэтому вне Windows смотрим только на видимость.
+        #[cfg(windows)]
+        let shown = sys::is_shown(w) && !sys::is_minimized(w);
+        #[cfg(not(windows))]
+        let shown = w.is_visible();
+        let visible = sys::created(w) && shown && !app.get_fullscreen() && !app.get_mini();
+        app.set_vibe_anim(on);
+        if !mounted && self.st.borrow().vibe.handle.is_none() {
+            return;
+        }
+        let existing = self.st.borrow().vibe.handle.clone();
+        let handle = existing.unwrap_or_else(|| {
+            let weak = self.ui.clone();
+            let handle = crate::vibe::Vibe::spawn(move |event| {
+                let _ = weak.upgrade_in_event_loop(move |ui| with_ctx(|c| c.on_vibe_event(&ui, event)));
+            });
+            let crop = self.st.borrow().vibe.crop;
+            if crop[2] > crop[0] {
+                handle.send(Msg::Crop(crop));
+            }
+            self.st.borrow_mut().vibe.handle = Some(handle.clone());
+            handle
+        });
+        let mut st = self.st.borrow_mut();
+        let v = &mut st.vibe;
+        // Цвета трека — пока он играет; на паузе пятно возвращается к цветам «Моей волны»
+        // (`isTrackColors: isPlaying || shuffle`, чанк 4362).
+        let palette = if playing { Palette::from_rgb(vibe_bucket(color).3) } else { Palette::DEFAULT };
+        if v.palette != Some(palette) {
+            v.palette = Some(palette);
+            handle.send(Msg::Palette(palette));
+        }
+        if v.playing != Some(playing) {
+            v.playing = Some(playing);
+            handle.send(Msg::Playing(playing));
+        }
+        if v.visible != Some(visible) {
+            v.visible = Some(visible);
+            handle.send(Msg::Visible(visible));
+        }
+        if v.mounted != mounted {
+            v.mounted = mounted;
+            handle.send(Msg::Mount(mounted));
+            if !mounted {
+                app.set_vibe_frame(Image::default());
+            }
+        }
+    }
+
+    fn on_vibe_event(&self, ui: &AppWindow, event: crate::vibe::Event) {
+        use crate::vibe::Event;
+        let app = ui.global::<App>();
+        let mut st = self.st.borrow_mut();
+        let v = &mut st.vibe;
+        match event {
+            // Кадр, пришедший после ухода со страницы, не нужен.
+            Event::Frame(_) if !v.mounted => {}
+            Event::Frame(frame) => {
+                // Место кадра на холсте — долями его стороны.
+                let side = crate::vibe::RES as f32;
+                let [x, y, w, h] = frame.rect.map(|v| v as f32 / side);
+                app.set_vibe_x(x);
+                app.set_vibe_y(y);
+                app.set_vibe_w(w);
+                app.set_vibe_h(h);
+                app.set_vibe_frame(Image::from_rgba8_premultiplied(frame.pixels));
+            }
+            Event::Fallback => {
+                v.failed = true;
+                v.mounted = false;
+                app.set_vibe_anim(false);
+                app.set_vibe_frame(Image::default());
+                return;
+            }
+        }
+        if let Some(h) = &v.handle {
+            h.frame_shown();
+        }
+    }
+
+    /// Лайк играющего трека: круги пятна вспыхивают.
+    fn vibe_like(&self, id: &str, liked: bool) {
+        let mut st = self.st.borrow_mut();
+        let was = st.vibe.like.replace((id.to_string(), liked));
+        if liked && was.is_some_and(|(prev, prev_liked)| prev == id && !prev_liked) {
+            if let Some(h) = &st.vibe.handle {
+                h.send(crate::vibe::Msg::Like);
+            }
+        }
+    }
+
     // ---------- настройки звука ----------
 
     fn apply_eq(&self) {
@@ -4825,6 +4949,23 @@ fn register_extra(app: &App) {
         })
     });
     app.on_open_wave_settings(|| with_ctx(|c| c.open_wave_settings()));
+    // Страница волны появилась: живое пятно запускается сразу, не дожидаясь тика плеера.
+    app.on_vibe_mount(|| {
+        Timer::single_shot(Duration::ZERO, || with_ctx(|c| c.sync_player()));
+    });
+    app.on_vibe_crop(|x0, y0, x1, y1| {
+        with_ctx(|c| {
+            let side = crate::vibe::RES as f32;
+            let lo = |v: f32| (v * side - 2.0).clamp(0.0, side) as usize;
+            let hi = |v: f32| (v * side + 2.0).clamp(0.0, side).ceil() as usize;
+            let crop = [lo(x0), lo(y0), hi(x1), hi(y1)];
+            let mut st = c.st.borrow_mut();
+            st.vibe.crop = crop;
+            if let Some(h) = &st.vibe.handle {
+                h.send(crate::vibe::Msg::Crop(crop));
+            }
+        })
+    });
     app.on_tune_wave(|group, option| {
         with_ctx(|c| {
             let (settings, activity) = {

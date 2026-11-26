@@ -128,7 +128,14 @@ export component AppWindow inherits Window {
 
         if App.page == Page.list: Fade { rise: 8px; ListPage { } }
         if App.page == Page.collection: Fade { rise: 8px; CollectionPage { } }
-        if App.page == Page.wave: Fade { rise: 8px; WavePage { } }
+        if App.page == Page.wave: Fade {
+            rise: 8px;
+            WavePage {
+                spill-top: content.y;
+                spill-right: pad-r;
+                spill-bottom: root.height - content.y - content.height;
+            }
+        }
         if App.page == Page.search: Fade { rise: 8px; SearchPage { } }
         if App.page == Page.artist: Fade { rise: 8px; ArtistPage { } }
         if App.page == Page.artists: Fade { rise: 8px; MyArtistsPage { } }
