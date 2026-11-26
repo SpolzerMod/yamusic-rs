@@ -30,6 +30,11 @@ pub fn pic(uri: &str, size: u32) -> String {
     // get-music-misc отдаёт только эти размеры, на остальные — 404.
     let size = if uri.contains("/get-music-misc/") {
         [30, 40, 50, 75, 80, 100, 150, 160, 200, 300, 400, 460, 600, 700, 800, 1000].into_iter().find(|&s| s >= size).unwrap_or(1000)
+    } else if uri.contains("/get-music-feed-promotion/") {
+        // У промо-картинок («Актуальное» в «Книгах и подкастах») нет 600x600 — 404, карточки
+        // оставались пустыми. Оригинал просит их в 400 и 800 для экрана с масштабом
+        // (`PromotionsCard`: size 400, srcset 2x).
+        if size <= 400 { 400 } else { 800 }
     } else {
         [50, 100, 200, 300, 400, 600, 1000].into_iter().find(|&s| s >= size).unwrap_or(1000)
     };
@@ -2123,6 +2128,9 @@ mod tests {
     #[test]
     fn pic_size() {
         assert_eq!(pic("avatars.yandex.net/a/%%", 200), "https://avatars.yandex.net/a/200x200");
+        let promo = "avatars.yandex.net/get-music-feed-promotion/1/a-landing.image/%%";
+        assert_eq!(pic(promo, 356), "https://avatars.yandex.net/get-music-feed-promotion/1/a-landing.image/400x400");
+        assert_eq!(pic(promo, 445), "https://avatars.yandex.net/get-music-feed-promotion/1/a-landing.image/800x800");
     }
 
     #[test]
