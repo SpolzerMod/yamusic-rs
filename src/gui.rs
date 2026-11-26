@@ -243,6 +243,7 @@ impl Ctx {
     fn toast(self: &Rc<Self>, msg: impl Into<String>) {
         let ui = self.ui();
         ui.global::<App>().set_toast_has_cover(false);
+        ui.global::<App>().set_toast_icon(Image::default());
         ui.global::<App>().set_toast(crate::i18n::tr(&msg.into()).into());
         let t = Timer::default();
         let weak = self.ui.clone();
@@ -252,6 +253,16 @@ impl Ctx {
             }
         });
         self.st.borrow_mut().toast_timer = Some(t);
+    }
+
+    /// Тост со значком на месте обложки: `unset` приглушает значок (выключенный режим).
+    fn toast_icon(self: &Rc<Self>, msg: &str, icon: Image, unset: bool) {
+        self.toast(msg);
+        let ui = self.ui();
+        let app = ui.global::<App>();
+        app.set_toast_icon(icon);
+        app.set_toast_icon_unset(unset);
+        app.set_toast_has_cover(true);
     }
 
     fn sync_player(self: &Rc<Self>) {
@@ -2067,9 +2078,28 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             (Repeat::One, false) => Repeat::Off,
         };
         p.send(Cmd::Repeat(next));
+        // Тост со значком режима, как у оригинала (3684-…js, notifications-info.change-repeat-*).
+        with_ctx(|c| {
+            let ui = c.ui();
+            let icons = ui.global::<Icons>();
+            match next {
+                Repeat::All => c.toast_icon("Повтор списка воспроизведения включен", icons.get_repeat(), false),
+                Repeat::One => c.toast_icon("Повтор трека включен", icons.get_repeat_one(), false),
+                Repeat::Off => c.toast_icon("Повтор выключен", icons.get_repeat(), true),
+            }
+        });
     });
     let p = player.clone();
-    app.on_toggle_shuffle(move || p.send(Cmd::Shuffle(!p.state().shuffle)));
+    app.on_toggle_shuffle(move || {
+        let on = !p.state().shuffle;
+        p.send(Cmd::Shuffle(on));
+        // Как у оригинала (3684-…js, notifications-info.shuffle-enabled/-disabled).
+        with_ctx(|c| {
+            let text = if on { "Случайный порядок" } else { "Воспроизведение подряд" };
+            let icon = c.ui().global::<Icons>().get_shuffle();
+            c.toast_icon(text, icon, !on);
+        });
+    });
     let p = player.clone();
     app.on_set_volume(move |v| {
         p.send(Cmd::Volume(v));

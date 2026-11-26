@@ -194,6 +194,9 @@ export global App {
     in property <string> toast;
     in property <image> toast-cover;
     in property <bool> toast-has-cover;
+    // Значок на месте обложки (тосты повтора и перемешивания); приглушён, когда режим выключен.
+    in property <image> toast-icon;
+    in property <bool> toast-icon-unset;
     // Новая версия на GitHub (src/update.rs): пусто — обновлений нет.
     in property <string> update-version;
     // Установщик скачивается.

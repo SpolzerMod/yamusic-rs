@@ -344,12 +344,27 @@ export component AppWindow inherits Window {
         drop-shadow-blur: 20px;
         drop-shadow-offset-y: 1px;
         drop-shadow-color: #0000003d;
-        if App.toast-has-cover: Cover {
+        if App.toast-has-cover && App.toast-icon.width == 0: Cover {
             x: 8px;
             width: 40px;
             height: 40px;
             radius: Theme.radius-size-s;
             source: App.toast-cover;
+        }
+        // Тосты повтора и перемешивания вместо обложки показывают значок режима, как
+        // NotificationRepeat/NotificationShuffle оригинала (3684-…js): значок xs на подложке
+        // background-color-secondary-enabled-blur, при выключенном режиме — цвет icon_unset.
+        if App.toast-has-cover && App.toast-icon.width > 0: Rectangle {
+            x: 8px;
+            width: 40px;
+            height: 40px;
+            border-radius: Theme.radius-size-s;
+            background: Theme.background-color-secondary-enabled-blur;
+            Icon {
+                source: App.toast-icon;
+                size: Theme.icon-size-xs;
+                colorize: App.toast-icon-unset ? Theme.controls-color-primary-text-enabled : Theme.controls-color-primary-text-enabled-variant;
+            }
         }
         toast-text := Text {
             x: 16px + cover-w - (App.toast-has-cover ? 8px : 0px);
