@@ -244,6 +244,7 @@ impl Ctx {
         let ui = self.ui();
         ui.global::<App>().set_toast_has_cover(false);
         ui.global::<App>().set_toast(crate::i18n::tr(&msg.into()).into());
+        ui.global::<App>().set_toast_link(SharedString::new());
         let t = Timer::default();
         let weak = self.ui.clone();
         t.start(TimerMode::SingleShot, Duration::from_secs(4), move || {
@@ -3369,9 +3370,21 @@ impl Ctx {
             false,
         )];
         if !likes && !app.get_list_own() {
+            // У подкаста и книги вместо лайка подписка, как ContextMenu подписки оригинала
+            // (модули 44988 и 108).
+            let label = match (l.album.as_ref().map(|a| a.kind.as_str()), liked) {
+                (Some("podcast"), false) => "Подписаться на подкаст",
+                (Some("podcast"), true) => "Вы подписаны",
+                (Some("audiobook"), false) => "Добавить на полку",
+                (Some("audiobook"), true) => "Убрать с полки",
+                (Some("fairy-tale"), false) => "Нравится",
+                (Some("fairy-tale"), true) => "Не нравится",
+                (_, false) => "Нравится",
+                (_, true) => "Удалить из коллекции",
+            };
             items.push(self.menu_entry(
                 "list-like",
-                if liked { "Удалить из коллекции" } else { "Нравится" },
+                label,
                 if liked { icons.get_m_liked() } else { icons.get_m_like() },
                 false,
             ));
@@ -3598,6 +3611,33 @@ impl Ctx {
             }
         }
         let title = l.title.clone();
+        // Подкаст, книга и сказка: тост с обложкой и ссылками (`notifications-info.*-collection`,
+        // модуль 96295), ошибка — `error-messages.error-during-action` (модуль 92966).
+        if let Some(a) = l.album.as_ref().filter(|a| matches!(a.kind.as_str(), "podcast" | "audiobook" | "fairy-tale")) {
+            let (kind_word, cover) = (a.kind.clone(), a.cover.clone());
+            std::thread::spawn(move || {
+                let saved = net.api.like_entity(&uid, kind, &id, !liked);
+                if saved.is_ok() {
+                    net.refresh("collection");
+                }
+                let _ = slint::invoke_from_event_loop(move || with_ctx(|c| match saved {
+                    Ok(()) => c.subscribe_toast(&kind_word, &title, &id, cover.as_deref(), liked),
+                    Err(e) => {
+                        log(format!("подписка на {id}: {e}"));
+                        // Не сохранилось — подписка остаётся прежней.
+                        {
+                            let mut st = c.st.borrow_mut();
+                            if liked { st.liked_albums.remove(&id) } else { st.liked_albums.insert(id.clone()) };
+                        }
+                        if c.st.borrow().list_key.as_deref() == Some(format!("album:{id}").as_str()) {
+                            c.ui().global::<App>().set_list_liked(!liked);
+                        }
+                        c.toast("При выполнении действия произошла ошибка");
+                    }
+                }));
+            });
+            return;
+        }
         std::thread::spawn(move || {
             let saved = net.api.like_entity(&uid, kind, &id, !liked);
             if saved.is_ok() && kind == "albums" {
@@ -3609,6 +3649,37 @@ impl Ctx {
                 Err(e) => format!("Не удалось сохранить: {e}"),
             });
         });
+    }
+
+    /// Тост подписки на подкаст, книгу или сказку, как BaseNotificationLike: «Подкаст {название}
+    /// добавлен в Коллекцию»; название ведёт на страницу, «Коллекцию» — в коллекцию.
+    fn subscribe_toast(self: &Rc<Self>, kind: &str, title: &str, id: &str, cover: Option<&str>, liked: bool) {
+        let (pre, mid) = match (kind, liked) {
+            ("audiobook", true) => ("Аудиокнига", "добавлена в"),
+            ("audiobook", false) => ("Аудиокнига", "удалена из"),
+            ("fairy-tale", true) => ("Сказка", "добавлена в"),
+            ("fairy-tale", false) => ("Сказка", "удалена из"),
+            (_, true) => ("Подкаст", "добавлен в"),
+            (_, false) => ("Подкаст", "удален из"),
+        };
+        self.toast(pre);
+        let ui = self.ui();
+        let app = ui.global::<App>();
+        app.set_toast_title(title.into());
+        app.set_toast_mid(crate::i18n::tr(mid).into());
+        app.set_toast_link(crate::i18n::tr(if liked { "Коллекцию" } else { "Коллекции" }).into());
+        app.set_toast_target(format!("album:{id}").into());
+        app.set_toast_cover(Image::default());
+        app.set_toast_has_cover(true);
+        let size = self.size_for(40.0);
+        if let Some(url) = cover.map(|c| crate::api::pic(c, size)) {
+            let w = self.ui.clone();
+            self.images.get(&url, size, move |img| {
+                if let Some(ui) = w.upgrade() {
+                    ui.global::<App>().set_toast_cover(img.clone());
+                }
+            });
+        }
     }
 
     /// Ссылка на открытый список или код для вставки на сайт.
@@ -4517,6 +4588,16 @@ fn register_extra(app: &App) {
     app.on_list_remove_track(|i| with_ctx(|c| c.list_remove_track(i.max(0) as usize)));
     app.on_account_action(|id| with_ctx(|c| c.account_action(&id)));
     app.on_setting(|id| with_ctx(|c| c.setting(&id)));
+    app.on_toast_open(|collection| {
+        with_ctx(|c| {
+            if collection {
+                c.navigate(Page::Collection, None, true);
+            } else {
+                let target = c.ui().global::<App>().get_toast_target().to_string();
+                c.navigate(Page::List, Some(target), true);
+            }
+        })
+    });
     app.on_open_grid(|block, title| {
         with_ctx(|c| {
             if matches!(block.as_str(), "label-releases" | "label-artists") {

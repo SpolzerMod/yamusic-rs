@@ -192,6 +192,13 @@ export global App {
     // так окно рисуется целиком после переноса на другой монитор.
     in property <bool> repaint;
     in property <string> toast;
+    // Тост подписки (BaseNotificationLike): `toast` — начало, дальше название (ссылка на
+    // `toast-target`), середина и ссылка на коллекцию. Пустая `toast-link` — обычный тост.
+    in property <string> toast-title;
+    in property <string> toast-mid;
+    in property <string> toast-link;
+    in property <string> toast-target;
+    callback toast-open(bool);
     in property <image> toast-cover;
     in property <bool> toast-has-cover;
     // Новая версия на GitHub (src/update.rs): пусто — обновлений нет.

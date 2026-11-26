@@ -335,7 +335,7 @@ export component AppWindow inherits Window {
         opacity: k;
         x: (parent.width - self.width) / 2;
         y: parent.height - (App.page == Page.wave ? 96px : 140px) + (1 - k) * 16px;
-        width: min(parent.width * 0.9, max(App.toast-has-cover ? 360px : 0px, toast-text.preferred-width + cover-w + 32px));
+        width: min(parent.width * 0.9, max(App.toast-has-cover ? 360px : 0px, (App.toast-link != "" ? rich.preferred-width : toast-text.preferred-width) + cover-w + 32px));
         height: 56px;
         border-radius: Theme.radius-size-l;
         background: Theme.background-color-primary-enabled-popover;
@@ -360,6 +360,55 @@ export component AppWindow inherits Window {
             color: Theme.controls-color-primary-text-enabled-variant;
             font-size: Theme.font-size-label-m;
             font-weight: 500;
+            visible: App.toast-link == "";
+        }
+        // Как BaseNotificationLike оригинала: текст цветом `primary-text-enabled`, название (не
+        // шире 120) и «Коллекцию» — ссылки цветом `enabled_variant`, под курсором `hovered`.
+        // Между частями пробел и неразрывный пробел.
+        rich := HorizontalLayout {
+            x: toast-text.x;
+            width: parent.width - self.x - 16px;
+            visible: App.toast-link != "";
+            alignment: start;
+            spacing: 7px;
+            Text {
+                text: App.toast;
+                vertical-alignment: center;
+                color: Theme.controls-color-primary-text-enabled;
+                font-size: Theme.font-size-label-m;
+                font-weight: 500;
+            }
+            Text {
+                max-width: 120px;
+                text: App.toast-title;
+                overflow: elide;
+                vertical-alignment: center;
+                color: title-ta.has-hover ? Theme.controls-color-primary-text-hovered : Theme.controls-color-primary-text-enabled-variant;
+                font-size: Theme.font-size-label-m;
+                font-weight: 500;
+                title-ta := TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => { App.toast-open(false); }
+                }
+            }
+            Text {
+                text: App.toast-mid;
+                vertical-alignment: center;
+                color: Theme.controls-color-primary-text-enabled;
+                font-size: Theme.font-size-label-m;
+                font-weight: 500;
+            }
+            Text {
+                text: App.toast-link;
+                vertical-alignment: center;
+                color: link-ta.has-hover ? Theme.controls-color-primary-text-hovered : Theme.controls-color-primary-text-enabled-variant;
+                font-size: Theme.font-size-label-m;
+                font-weight: 500;
+                link-ta := TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => { App.toast-open(true); }
+                }
+            }
         }
     }
 
