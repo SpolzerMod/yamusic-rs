@@ -2252,7 +2252,11 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         } else {
             pl.mini.set(window_pos(w).or(pl.mini.get()));
             app.set_mini(false);
-            w.set_maximized(false);
+            // Только если плашку всё же развернули: лишний set_maximized(false) на мониторе
+            // со 125% возвращал обычное окно в 1,25 раза больше прежнего.
+            if window_maximized(w) {
+                w.set_maximized(false);
+            }
             #[cfg(windows)]
             sys::set_mini_mode(w, false);
             w.with_winit_window(|ww| ww.set_min_inner_size(Some(LogicalSize::new(960.0, 640.0))));
