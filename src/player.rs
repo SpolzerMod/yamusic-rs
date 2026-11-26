@@ -364,6 +364,12 @@ const STALL_LIMIT: Duration = Duration::from_secs(3);
 /// Если выход снова сломался быстрее этого, не переоткрываем его, а ставим паузу до Play.
 const BROKEN_AGAIN: Duration = Duration::from_secs(30);
 
+/// Пауза перед повтором входа после сетевой ошибки: 2, 5, 10, 20, 30 с, дальше раз в минуту.
+fn account_retry_delay(attempt: u32) -> Duration {
+    const STEPS: [u64; 5] = [2, 5, 10, 20, 30];
+    Duration::from_secs(STEPS.get(attempt.saturating_sub(1) as usize).copied().unwrap_or(60))
+}
+
 fn load_track(api: &Api, t: &Track) -> Res<Audio> {
     let (url, format) = api.stream_url(&t.id)?;
     let (again, id) = (api.clone(), t.id.clone());
@@ -514,6 +520,8 @@ struct Engine {
     fetching: bool,
     batch_gen: u64,
     retry_at: Option<Instant>,
+    /// Вход не удался из-за сети: когда повторить и какая это попытка.
+    account_retry: Option<(Instant, u32)>,
     gen: u64,
     loaded: bool,
     paused: bool,
@@ -598,6 +606,7 @@ impl Engine {
             fetching: false,
             batch_gen: 0,
             retry_at: None,
+            account_retry: None,
             gen: 0,
             loaded: false,
             paused: true,
@@ -1095,6 +1104,17 @@ impl Engine {
                 self.fetch_batch();
             }
         }
+        if let (Some((at, n)), Some(api)) = (self.account_retry, self.api.clone()) {
+            if Instant::now() >= at {
+                // Повтор уже в пути: следующий срок назначит его ответ.
+                self.account_retry = Some((Instant::now() + Duration::from_secs(3600), n));
+                self.sh().status = Status::Connecting;
+                let tx = self.tx.clone();
+                thread::spawn(move || {
+                    let _ = tx.send(Msg::Account(api.account()));
+                });
+            }
+        }
         if self.fading.as_ref().is_some_and(|s| s.empty()) {
             self.fading = None;
         }
@@ -1155,6 +1175,7 @@ impl Engine {
             }
             Msg::Account(res) => match res {
                 Ok(acc) => {
+                    self.account_retry = None;
                     self.uid = acc.uid.clone();
                     {
                         let mut s = self.sh();
@@ -1181,8 +1202,18 @@ impl Engine {
                         });
                     }
                 }
+                // Сеть пропала на входе (таймаут, нет соединения): вход повторяется сам, иначе
+                // клиент остался бы без волны и запросов до перезапуска. Ошибка показывается
+                // один раз, дальше — «подключение». Отказ сервера (токен и т. п.) — как раньше.
+                Err(e) if e.starts_with("сеть") && self.api.is_some() => {
+                    log(format!("account: {e}"));
+                    let n = self.account_retry.map_or(0, |(_, n)| n) + 1;
+                    self.account_retry = Some((Instant::now() + account_retry_delay(n), n));
+                    self.sh().status = if n == 1 { Status::Failed(e) } else { Status::Connecting };
+                }
                 Err(e) => {
                     log(format!("account: {e}"));
+                    self.account_retry = None;
                     self.api = None;
                     self.sh().status = Status::Failed(e);
                 }
@@ -1266,6 +1297,7 @@ impl Engine {
     fn cmd(&mut self, c: Cmd) {
         match c {
             Cmd::Login(token) => {
+                self.account_retry = None;
                 self.reset();
                 self.reaction_writes.clear();
                 self.dislikes.clear();
@@ -1285,6 +1317,7 @@ impl Engine {
                 });
             }
             Cmd::Logout => {
+                self.account_retry = None;
                 self.reset();
                 self.api = None;
                 self.uid.clear();
@@ -2077,6 +2110,29 @@ impl Engine {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn login_retries_after_network_error() {
+        let mut e = Engine::new(mpsc::channel().0, Default::default(), Default::default(), Arc::new(|| {}), Default::default());
+        e.api = Some(Api::new(""));
+        // Сеть: ошибка показывается один раз, вход повторится через 2 с.
+        e.handle(Msg::Account(Err("сеть: operation timed out".into())));
+        assert!(matches!(e.sh().status, Status::Failed(_)));
+        assert!(e.api.is_some());
+        let (at, n) = e.account_retry.expect("повтор назначен");
+        assert_eq!(n, 1);
+        assert!(at > Instant::now() + Duration::from_millis(1500));
+        // Снова сеть: тоста больше нет, пауза длиннее.
+        e.handle(Msg::Account(Err("сеть: connection refused".into())));
+        assert_eq!(e.sh().status, Status::Connecting);
+        assert_eq!(e.account_retry.map(|(_, n)| n), Some(2));
+        // Отказ сервера — без повторов, как раньше.
+        e.handle(Msg::Account(Err("нет доступа (HTTP 401) — токен не подошёл или истёк.".into())));
+        assert!(e.account_retry.is_none() && e.api.is_none());
+        assert_eq!(account_retry_delay(1), Duration::from_secs(2));
+        assert_eq!(account_retry_delay(5), Duration::from_secs(30));
+        assert_eq!(account_retry_delay(9), Duration::from_secs(60));
+    }
 
     #[test]
     fn closing_while_restored_track_loads_keeps_ynison_position() {
