@@ -332,6 +332,24 @@ pub fn release_memory() {
     trim_memory();
 }
 
+/// Предпочитаемые языки интерфейса Windows по порядку («en-US», «ru-RU»): из них Chromium
+/// оригинала собирает `navigator.languages`.
+pub fn preferred_languages() -> Vec<String> {
+    use windows_sys::Win32::Globalization::{GetUserPreferredUILanguages, MUI_LANGUAGE_NAME};
+    let (mut count, mut len) = (0u32, 0u32);
+    // SAFETY: сначала спрашиваем длину списка, потом даём буфер ровно такой длины.
+    unsafe {
+        if GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &mut count, null_mut(), &mut len) == 0 || len == 0 {
+            return Vec::new();
+        }
+        let mut buf = vec![0u16; len as usize];
+        if GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &mut count, buf.as_mut_ptr(), &mut len) == 0 {
+            return Vec::new();
+        }
+        buf.split(|c| *c == 0).filter(|s| !s.is_empty()).map(String::from_utf16_lossy).collect()
+    }
+}
+
 /// Светлая ли тема Windows для приложений.
 pub fn system_light_theme() -> bool {
     let path = wide(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");

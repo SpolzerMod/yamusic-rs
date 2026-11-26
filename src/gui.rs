@@ -1875,7 +1875,15 @@ fn set_icons(ui: &AppWindow, sprite: &Sprite) {
 }
 
 pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
-    let cfg = Config::load();
+    // Настроек ещё нет — первый запуск: язык берём из языков системы, как оригинал. Дальше
+    // он сохраняется вместе с остальными настройками и уже не меняется сам.
+    let first_run = !crate::config::dir().join("config.json").exists();
+    let mut cfg = Config::load();
+    if first_run {
+        let preferred = sys::preferred_languages();
+        cfg.lang = crate::i18n::system_lang(&preferred, crate::i18n::available()).into();
+        log(format!("язык интерфейса по языкам системы {preferred:?}: {}", cfg.lang));
+    }
     crate::api::set_lang(&cfg.lang);
     crate::i18n::set_lang(&cfg.lang);
     let dark = match cfg.theme.as_str() {

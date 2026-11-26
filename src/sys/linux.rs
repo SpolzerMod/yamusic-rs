@@ -135,6 +135,20 @@ pub fn system_light_theme() -> bool {
     !matches!(out, Ok(o) if String::from_utf8_lossy(&o.stdout).contains("uint32 1"))
 }
 
+/// Предпочитаемые языки: `LANGUAGE` (список через двоеточие), затем первое непустое из
+/// `LC_ALL`, `LC_MESSAGES`, `LANG` — в таком порядке glibc выбирает язык сообщений.
+pub fn preferred_languages() -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(list) = std::env::var("LANGUAGE") {
+        out.extend(list.split(':').filter(|s| !s.is_empty()).map(String::from));
+    }
+    let locale = ["LC_ALL", "LC_MESSAGES", "LANG"].iter().filter_map(|v| std::env::var(v).ok()).find(|v| !v.is_empty());
+    if let Some(v) = locale.filter(|v| v != "C" && v != "POSIX") {
+        out.push(v);
+    }
+    out
+}
+
 fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
 }
