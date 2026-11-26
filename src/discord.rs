@@ -157,13 +157,15 @@ fn fit(s: &str, fallback: &str) -> String {
     s.chars().take(128).collect()
 }
 
-fn activity(t: &Track, start: i64, end: Option<i64>, playing: bool, with_display_type: bool) -> Value {
+fn activity(t: &Track, start: i64, end: Option<i64>, playing: bool, listening: bool, with_display_type: bool) -> Value {
+    let kind = if listening { 2 } else { 0 };
     let url = match &t.album_id {
         Some(a) => format!("https://music.yandex.ru/album/{a}/track/{}", t.id),
         None => format!("https://music.yandex.ru/track/{}", t.id),
     };
     let mut a = json!({
-        "type": 2, // «Слушает»
+        // 2 — «Слушает», 0 — «Играет»: так показываем, если клиент не принял «Слушает».
+        "type": kind,
         "details": fit(&t.title, "Без названия"),
         "state": fit(&t.artists, "Моя волна"),
         "buttons": [
@@ -218,6 +220,8 @@ impl Discord {
         // Что сейчас показано: (id трека, время старта, играет). None — ничего.
         let mut shown: Option<(String, i64, bool)> = None;
         let mut display_type_ok = true;
+        // Клиент может не знать «Слушает» (type 2) — тогда показываем статус как «Играет».
+        let mut listening_ok = true;
         // Discord отклонил саму активность: не долбим его одной и той же ошибкой каждую секунду.
         let mut retry_at = Instant::now();
         // Отправки за последние 20 секунд: Discord принимает не больше пяти.
@@ -284,11 +288,18 @@ impl Discord {
                     if !changed || Instant::now() < retry_at || !take_slot(&mut sends) {
                         Ok(())
                     } else {
-                        let mut r = c.set_activity(activity(&t, start, end, playing, display_type_ok));
-                        if display_type_ok && matches!(&r, Ok(Some(_))) {
+                        let mut r = c.set_activity(activity(&t, start, end, playing, listening_ok, display_type_ok));
+                        if matches!(&r, Ok(Some(_))) {
                             // Старый клиент Discord не знает status_display_type — повторим без него.
-                            display_type_ok = false;
-                            r = c.set_activity(activity(&t, start, end, playing, false));
+                            if display_type_ok {
+                                display_type_ok = false;
+                                r = c.set_activity(activity(&t, start, end, playing, listening_ok, false));
+                            }
+                            // Совсем старый клиент не знает «Слушает» — покажем как «Играет».
+                            if listening_ok && matches!(&r, Ok(Some(_))) {
+                                listening_ok = false;
+                                r = c.set_activity(activity(&t, start, end, playing, false, false));
+                            }
                         }
                         match r {
                             Ok(None) => {
