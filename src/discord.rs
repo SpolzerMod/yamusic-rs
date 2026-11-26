@@ -157,7 +157,7 @@ fn fit(s: &str, fallback: &str) -> String {
     s.chars().take(128).collect()
 }
 
-fn activity(t: &Track, start: i64, end: Option<i64>, with_display_type: bool) -> Value {
+fn activity(t: &Track, start: i64, end: Option<i64>, playing: bool, with_display_type: bool) -> Value {
     let url = match &t.album_id {
         Some(a) => format!("https://music.yandex.ru/album/{a}/track/{}", t.id),
         None => format!("https://music.yandex.ru/track/{}", t.id),
@@ -166,14 +166,17 @@ fn activity(t: &Track, start: i64, end: Option<i64>, with_display_type: bool) ->
         "type": 2, // «Слушает»
         "details": fit(&t.title, "Без названия"),
         "state": fit(&t.artists, "Моя волна"),
-        "timestamps": { "start": start },
         "buttons": [
             { "label": "Слушать в Яндекс Музыке", "url": url },
             { "label": env!("APP_NAME"), "url": PROJECT_URL },
         ],
     });
-    if let Some(end) = end {
-        a["timestamps"]["end"] = json!(end);
+    if playing {
+        // На паузе меток нет: иначе прогресс в профиле продолжал бы идти.
+        a["timestamps"] = json!({ "start": start });
+        if let Some(end) = end {
+            a["timestamps"]["end"] = json!(end);
+        }
     }
     if with_display_type {
         // В списке участников: «Слушает <название трека>», а не имя приложения.
@@ -212,8 +215,8 @@ impl Discord {
         let mut conn: Option<Conn> = None;
         let mut conn_app = String::new();
         let mut next_try = Instant::now();
-        // Что сейчас показано: (id трека, время старта). None — ничего.
-        let mut shown: Option<(String, i64)> = None;
+        // Что сейчас показано: (id трека, время старта, играет). None — ничего.
+        let mut shown: Option<(String, i64, bool)> = None;
         let mut display_type_ok = true;
         // Discord отклонил саму активность: не долбим его одной и той же ошибкой каждую секунду.
         let mut retry_at = Instant::now();
@@ -262,13 +265,18 @@ impl Discord {
             let Some(c) = conn.as_mut() else { continue };
 
             let s = player.state();
-            let want = if s.status == Status::Ready && s.playing && !s.loading { s.track.clone() } else { None };
-            let res = match want {
+            // Загрузка следующего трека и пауза не должны гасить статус: иначе он мигает
+            // и пропадает из профиля на каждой смене трека.
+            let track = if s.status == Status::Ready { s.track.clone() } else { None };
+            let res = match track {
+                Some(_) if s.loading => Ok(()), // дождёмся трека, показанное оставляем как есть
                 Some(t) => {
+                    let playing = s.playing;
                     let start = now_ms() - (s.position * 1000.0) as i64;
                     let end = (s.duration > 1.0).then(|| start + (s.duration * 1000.0) as i64);
                     let changed = match &shown {
-                        Some((id, st)) => *id != t.id || (st - start).abs() > 3000, // новый трек или перемотка
+                        // Новый трек, пауза/возобновление или перемотка.
+                        Some((id, st, was)) => *id != t.id || *was != playing || (playing && (st - start).abs() > 3000),
                         None => true,
                     };
                     // Лимит Discord исчерпан или прошлый отказ: подождём следующий круг,
@@ -276,15 +284,15 @@ impl Discord {
                     if !changed || Instant::now() < retry_at || !take_slot(&mut sends) {
                         Ok(())
                     } else {
-                        let mut r = c.set_activity(activity(&t, start, end, display_type_ok));
+                        let mut r = c.set_activity(activity(&t, start, end, playing, display_type_ok));
                         if display_type_ok && matches!(&r, Ok(Some(_))) {
                             // Старый клиент Discord не знает status_display_type — повторим без него.
                             display_type_ok = false;
-                            r = c.set_activity(activity(&t, start, end, false));
+                            r = c.set_activity(activity(&t, start, end, playing, false));
                         }
                         match r {
                             Ok(None) => {
-                                shown = Some((t.id.clone(), start));
+                                shown = Some((t.id.clone(), start, playing));
                                 self.set_status("Подключено, статус отправлен");
                                 Ok(())
                             }
