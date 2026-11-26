@@ -5,9 +5,16 @@ import { Theme } from "theme.slint";
 import { Icons, Icon, ExplicitMark } from "widgets.slint";
 import { App, InfoLine } from "state.slint";
 
+// Высота строки YS Text и YS Music Headline без `line-height`: в шрифтах hhea 928 и −244 на
+// 1000 единиц, то есть 1,172 размера шрифта. `line-height-factor` Slint считается от неё.
+global Fonts {
+    out property <float> natural-line: 1.172;
+}
+
 // Строка `InfoBlock`: заголовок (h4, шрифт заголовков 16 medium) и под ним значение (Caption
-// оригинала: text l, medium), между ними 4. Строка не ниже 24 — `line-height` оригинала
-// (`font-line-height-label-l`), иначе блоки стоят теснее, чем у него.
+// оригинала: text l, medium), между ними 4. Строки переносятся целиком, каждая строка текста
+// высотой 24 — `line-height` оригинала (`font-line-height-label-l`), иначе блоки стоят теснее,
+// чем у него.
 component InfoRow inherits VerticalLayout {
     in property <InfoLine> line;
     callback clicked;
@@ -15,7 +22,7 @@ component InfoRow inherits VerticalLayout {
     if line.title != "": Text {
         text: line.title;
         wrap: word-wrap;
-        min-height: Theme.font-line-height-label-l;
+        line-height-factor: Theme.font-line-height-label-l / (Theme.font-size-label-l * Fonts.natural-line);
         font-family: "YS Music Headline";
         font-size: Theme.font-size-label-l;
         font-weight: 500;
@@ -24,7 +31,7 @@ component InfoRow inherits VerticalLayout {
     Text {
         text: line.value;
         wrap: word-wrap;
-        min-height: Theme.font-line-height-label-l;
+        line-height-factor: Theme.font-line-height-label-l / (Theme.font-size-label-l * Fonts.natural-line);
         font-size: Theme.font-size-label-l;
         font-weight: 500;
         color: line.link && link-ta.has-hover ? Theme.controls-color-primary-text-enabled-variant : Theme.controls-color-primary-text-enabled;
@@ -60,12 +67,14 @@ export component TrackAboutModal inherits Rectangle {
     drop-shadow-color: Theme.dark ? #0000007a : #0000003d;
     TouchArea { }
 
-    // Шапка: поля 20 сверху и снизу, 16 по бокам; крестик 32 справа.
+    // Шапка: поля 20 сверху и снизу, 16 по бокам; крестик 32 справа. Название переносится на
+    // сколько угодно строк, шапка растёт под него, как у оригинала (заголовок модального окна —
+    // `Heading` h3 размера s: 22 на строку 32, `word-break: break-word`).
     header := HorizontalLayout {
         x: 17px;
         y: 1px;
         width: root.width - 34px;
-        height: 72px;
+        height: self.preferred-height;
         padding-top: Theme.spacer-size-xl;
         padding-bottom: Theme.spacer-size-xl;
         spacing: Theme.spacer-size-xxs;
@@ -73,39 +82,57 @@ export component TrackAboutModal inherits Rectangle {
             horizontal-stretch: 1;
             spacing: 6px;
             alignment: start;
-            Text {
-                text: App.track-about-title;
-                overflow: elide;
-                vertical-alignment: center;
+            // Версия у оригинала — `span` внутри заголовка через пробел (`.version:before`),
+            // другим цветом, и переносится вместе с названием. Одним `Text` разные цвета не
+            // нарисовать, поэтому название с версией — цветом версии, а сверху тем же шрифтом
+            // и той же ширины ещё раз одно название: строки до конца названия переносятся
+            // одинаково, и оно ложится точно на своё место.
+            title-text := Text {
+                text: App.track-about-version != "" ? App.track-about-title + " " + App.track-about-version : App.track-about-title;
+                wrap: word-wrap;
+                line-height-factor: Theme.font-line-height-headline-s / (Theme.font-size-headline-s * Fonts.natural-line);
                 font-family: "YS Music Headline";
-                font-size: Theme.font-size-headline-xs;
+                font-size: Theme.font-size-headline-s;
                 font-weight: 700;
-                color: Theme.controls-color-primary-text-enabled-variant;
+                color: App.track-about-version != "" ? Theme.controls-color-primary-text-enabled : Theme.controls-color-primary-text-enabled-variant;
+                if App.track-about-version != "": Text {
+                    x: 0;
+                    y: 0;
+                    width: title-text.width;
+                    height: title-text.height;
+                    text: App.track-about-title;
+                    wrap: word-wrap;
+                    vertical-alignment: top;
+                    line-height-factor: title-text.line-height-factor;
+                    font-family: "YS Music Headline";
+                    font-size: Theme.font-size-headline-s;
+                    font-weight: 700;
+                    color: Theme.controls-color-primary-text-enabled-variant;
+                }
             }
-            if App.track-about-version != "": Text {
-                text: App.track-about-version;
-                overflow: elide;
-                vertical-alignment: center;
-                font-family: "YS Music Headline";
-                font-size: Theme.font-size-headline-xs;
-                font-weight: 700;
-                color: Theme.controls-color-primary-text-enabled;
-            }
+            // E у оригинала стоит в конце заголовка; картинку в текст Slint не вставить, поэтому
+            // она справа от названия на уровне его последней строки.
             if App.track-about-explicit: VerticalLayout {
-                alignment: center;
+                alignment: end;
+                padding-bottom: (Theme.font-line-height-headline-s - 16px) / 2;
                 ExplicitMark { size: 16px; }
             }
         }
-        Rectangle {
-            width: 32px;
-            height: 32px;
-            border-radius: 16px;
-            background: close-ta.has-hover ? Theme.controls-color-secondary-default-hovered : Theme.controls-color-secondary-default-enabled;
-            animate background { duration: App.motion ? Theme.duration-transition : 0ms; easing: ease; }
-            Icon { source: Icons.close-small; size: 20px; colorize: Theme.controls-color-primary-text-enabled-variant; }
-            close-ta := TouchArea {
-                mouse-cursor: MouseCursor.pointer;
-                clicked => { App.track-about-open = false; }
+        // Крестик прижат к верху шапки (`align-items: flex-start`), а не к середине длинного
+        // названия.
+        VerticalLayout {
+            alignment: start;
+            Rectangle {
+                width: 32px;
+                height: 32px;
+                border-radius: 16px;
+                background: close-ta.has-hover ? Theme.controls-color-secondary-default-hovered : Theme.controls-color-secondary-default-enabled;
+                animate background { duration: App.motion ? Theme.duration-transition : 0ms; easing: ease; }
+                Icon { source: Icons.close-small; size: 20px; colorize: Theme.controls-color-primary-text-enabled-variant; }
+                close-ta := TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => { App.track-about-open = false; }
+                }
             }
         }
     }
