@@ -8,7 +8,7 @@ mod landing_ui;
 mod track_about;
 
 use crate::save::{file_name_max, save_track, saved_already};
-use crate::api::{album_kind_word, Album, Api, Card, Collection, Pin, Playlist, Track};
+use crate::api::{album_kind_word, Album, Api, Card, Collection, Named, Pin, Playlist, Track};
 use crate::assets::Sprite;
 use crate::config::{log, Config};
 use crate::images::Images;
@@ -2700,6 +2700,19 @@ fn card_from_playlist(p: &Playlist) -> Card {
     }
 }
 
+/// Исполнители трека для меню: за составным идут его части, как в ArtistItem оригинала.
+fn menu_artists(t: &Track) -> Vec<&Named> {
+    fn push<'a>(list: &'a [Named], out: &mut Vec<&'a Named>) {
+        for a in list {
+            out.push(a);
+            push(&a.decomposed, out);
+        }
+    }
+    let mut out = Vec::new();
+    push(&t.artist_list, &mut out);
+    out
+}
+
 fn track_link(t: &Track) -> String {
     match &t.album_id {
         Some(a) => format!("https://music.yandex.ru/album/{a}/track/{}", t.id),
@@ -3176,7 +3189,13 @@ impl Ctx {
         if t.album_id.is_some() {
             items.push(self.menu_entry("album", "Перейти к альбому", icons.get_m_album(), false));
         }
-        if !t.artist_list.is_empty() {
+        // Как у оригинала (818-…js, модуль 33139): если исполнителей вместе с частями составных
+        // больше одного, «Перейти к исполнителям» открывает подменю с ними.
+        let artists = menu_artists(&t);
+        if artists.len() > 1 {
+            self.set_menu_artists(&artists);
+            items.push(self.menu_entry("artists", "Перейти к исполнителям", icons.get_m_artist(), true));
+        } else if !artists.is_empty() {
             items.push(self.menu_entry("artist", "Перейти к исполнителю", icons.get_m_artist(), false));
         }
         // Заголовок по типу (`track-modal.*-title`): глава, выпуск или трек.
@@ -3186,6 +3205,23 @@ impl Ctx {
         self.st.borrow_mut().menu_track = Some(t);
         self.show_menu(items, x, y, below);
         self.load_menu_playlists();
+    }
+
+    /// Подменю «Перейти к исполнителям»: имена и круглые аватарки 24 px (ArtistItem оригинала).
+    fn set_menu_artists(self: &Rc<Self>, artists: &[&Named]) {
+        let ui = self.ui();
+        let app = ui.global::<App>();
+        let names: Vec<SharedString> = artists.iter().map(|a| a.name.as_str().into()).collect();
+        app.set_menu_artists(ModelRc::from(Rc::new(VecModel::from(names))));
+        let covers = Rc::new(VecModel::from(vec![Image::default(); artists.len()]));
+        app.set_menu_artist_covers(ModelRc::from(covers.clone()));
+        let size = self.size_for(24.0);
+        for (i, a) in artists.iter().enumerate() {
+            if let Some(cover) = &a.cover {
+                let covers = covers.clone();
+                self.images.get(&crate::api::pic(cover, size), size, move |img| covers.set_row_data(i, img.clone()));
+            }
+        }
     }
 
     fn account_action(self: &Rc<Self>, id: &str) {
@@ -3861,6 +3897,13 @@ impl Ctx {
             }
             "artist" => {
                 if let Some(a) = t.artist_list.first() {
+                    self.ui().global::<App>().set_fullscreen(false);
+                    self.navigate(Page::Artist, Some(format!("artist:{}", a.id)), true);
+                }
+            }
+            _ if id.starts_with("go-artist:") => {
+                let i: usize = id["go-artist:".len()..].parse().unwrap_or(usize::MAX);
+                if let Some(a) = menu_artists(&t).get(i) {
                     self.ui().global::<App>().set_fullscreen(false);
                     self.navigate(Page::Artist, Some(format!("artist:{}", a.id)), true);
                 }

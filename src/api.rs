@@ -44,6 +44,9 @@ pub struct Named {
     /// Фото без фона: телефон ставит его над названием трека в «Моей волне».
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub cutout: Option<String>,
+    /// Составной исполнитель («A & B») по частям: меню трека открывает их по отдельности.
+    #[cfg_attr(target_os = "android", allow(dead_code))]
+    pub decomposed: Vec<Named>,
 }
 
 #[derive(Clone, Debug)]
@@ -374,21 +377,22 @@ pub(crate) fn hex_color(v: Option<&Value>) -> Option<[u8; 3]> {
 }
 
 fn artists_of(v: &Value) -> Vec<Named> {
-    v.get("artists")
-        .and_then(|a| a.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| {
-                    Some(Named {
-                        id: s(x.get("id")).unwrap_or_default(),
-                        name: x.get("name")?.as_str()?.to_string(),
-                        cover: x.pointer("/cover/uri").and_then(|u| u.as_str()).map(String::from),
-                        cutout: x.pointer("/cutoutCover/uri").and_then(|u| u.as_str()).map(String::from),
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+    v.get("artists").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(named).collect()).unwrap_or_default()
+}
+
+fn named(x: &Value) -> Option<Named> {
+    // `decomposed` приходит парами «разделитель, исполнитель»: `[" & ", {…}, ", ", {…}]`;
+    // как у оригинала (модуль 53399), берётся исполнитель, перед которым стоит строка.
+    let decomposed = x.get("decomposed").and_then(|d| d.as_array()).map(|d| {
+        d.windows(2).filter(|w| w[0].is_string()).filter_map(|w| named(&w[1])).collect()
+    });
+    Some(Named {
+        id: s(x.get("id")).unwrap_or_default(),
+        name: x.get("name")?.as_str()?.to_string(),
+        cover: x.pointer("/cover/uri").and_then(|u| u.as_str()).map(String::from),
+        cutout: x.pointer("/cutoutCover/uri").and_then(|u| u.as_str()).map(String::from),
+        decomposed: decomposed.unwrap_or_default(),
+    })
 }
 
 fn join_names(a: &[Named]) -> String {
@@ -2118,6 +2122,18 @@ mod tests {
         assert_eq!(l[2].to, Some(80.0));
         assert_eq!(l[0].to, Some(5.99));
         assert_eq!(l[1].text, "");
+    }
+
+    #[test]
+    fn decomposed_artist() {
+        let t = parse_track(&json!({"id": 1, "title": "A", "artists": [
+            {"id": 3, "name": "A & B", "decomposed": [{"id": 9, "name": "без разделителя"}, " & ", {"id": 4, "name": "B"}, ", "]},
+            {"id": 5, "name": "C"}
+        ]})).unwrap();
+        assert_eq!(t.artists, "A & B, C");
+        let parts: Vec<&str> = t.artist_list[0].decomposed.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(parts, ["B"]);
+        assert!(t.artist_list[1].decomposed.is_empty());
     }
 
     #[test]
