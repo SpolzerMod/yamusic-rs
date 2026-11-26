@@ -5,6 +5,7 @@ slint::include_modules!();
 mod history_ui;
 mod keys;
 mod landing_ui;
+mod playlist_cards;
 mod track_about;
 
 use crate::save::{file_name_max, save_track, saved_already};
@@ -56,6 +57,9 @@ struct State {
     tune_seeds: Vec<String>,
     liked_albums: std::collections::HashSet<String>,
     liked_playlists: std::collections::HashSet<String>,
+    pending_playlist_likes: HashMap<String, Arc<()>>,
+    playlist_card_menu: Option<(String, String)>,
+    play_target_request: u64,
     /// «Смотреть всё»: ключ страницы, её вкладки и выбранная вкладка.
     grid_key: Option<String>,
     grid_titles: HashMap<String, String>,
@@ -414,6 +418,7 @@ impl Ctx {
                         Ok(keys) => c.st.borrow_mut().liked_playlists = keys.into_iter().collect(),
                         Err(e) => log(format!("понравившиеся плейлисты: {e}")),
                     }
+                    c.update_playlist_cards();
                     if let Some(on) = less_ai {
                         crate::api::LESS_AI.store(on, std::sync::atomic::Ordering::Relaxed);
                         app.set_less_ai(on);
@@ -454,6 +459,7 @@ impl Ctx {
             }
         }
         self.st.borrow_mut().pins = pins;
+        self.update_playlist_cards();
     }
 
     fn navigate(self: &Rc<Self>, page: Page, key: Option<String>, remember: bool) {
@@ -869,7 +875,11 @@ impl Ctx {
         app.set_playlist_tab(tab as i32);
         let model = Rc::new(VecModel::from(
             pls.iter()
-                .map(|p| CardItem { title: p.title.clone().into(), ..Default::default() })
+                .map(|p| CardItem {
+                    title: p.title.clone().into(),
+                    playlist_target: format!("playlist:{}:{}", p.uid, p.kind).into(),
+                    ..Default::default()
+                })
                 .collect::<Vec<_>>(),
         ));
         app.set_playlists(ModelRc::from(model.clone()));
@@ -1970,6 +1980,9 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             tune_seeds: Vec::new(),
             liked_albums: Default::default(),
             liked_playlists: Default::default(),
+            pending_playlist_likes: HashMap::new(),
+            playlist_card_menu: None,
+            play_target_request: 0,
             grid_key: None,
             landing_key: None,
             grid_titles: HashMap::new(),
@@ -2190,6 +2203,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
 
     register_extra(&app);
     landing_ui::register(&app);
+    playlist_cards::register(&app);
     history_ui::register(&app);
     track_about::register(&app);
     landing_ui::load_concert_assets(&app);
@@ -2835,6 +2849,10 @@ impl Ctx {
             st.started = false;
             st.uid.clear();
             st.pins.clear();
+            st.liked_playlists.clear();
+            st.pending_playlist_likes.clear();
+            st.playlist_card_menu = None;
+            st.play_target_request = st.play_target_request.wrapping_add(1);
             st.history.clear();
             st.forward.clear();
         }
@@ -2859,6 +2877,7 @@ impl Ctx {
             .iter()
             .map(|c| CardItem {
                 title: c.title.clone().into(),
+                playlist_target: playlist_cards::card_target(&c.target),
                 subtitle: c.subtitle.clone().into(),
                 round: c.round,
                 year: c.year.clone().into(),
@@ -3126,7 +3145,10 @@ impl Ctx {
         if tracks.is_empty() {
             return;
         }
-        if self.player.state().track.as_ref().map(|t| t.id.as_str()) == tracks.get(start).map(|t| t.id.as_str()) {
+        let playing = self.player.state();
+        let same_playlist = matches!(&playing.source, Source::List { kind: ListKind::Playlist, id: current, .. } if current == id);
+        if playing.track.as_ref().map(|t| t.id.as_str()) == tracks.get(start).map(|t| t.id.as_str())
+            && (kind != ListKind::Playlist || same_playlist) {
             self.player.send(Cmd::PlayPause);
             return;
         }
@@ -3577,30 +3599,32 @@ impl Ctx {
     fn list_like(self: &Rc<Self>) {
         let Some(data) = self.list() else { return };
         let Data::List(l) = &*data else { return };
+        if let Some(p) = &l.playlist {
+            let key = format!("playlist:{}:{}", p.uid, p.kind);
+            self.toggle_playlist_like(&key, &l.title);
+            return;
+        }
+        let Some(a) = &l.album else { return };
         let Some(net) = self.st.borrow().net.clone() else { return };
         let uid = self.st.borrow().uid.clone();
         let ui = self.ui();
         let app = ui.global::<App>();
-        let (kind, id, key) = match (&l.playlist, &l.album) {
-            (Some(p), _) => ("playlists", format!("{}:{}", p.uid, p.kind), format!("playlist:{}:{}", p.uid, p.kind)),
-            (_, Some(a)) => ("albums", a.id.clone(), a.id.clone()),
-            _ => return,
-        };
+        let id = a.id.clone();
         let liked = !app.get_list_liked();
         app.set_list_liked(liked);
         {
             let st = &mut *self.st.borrow_mut();
-            let set = if kind == "albums" { &mut st.liked_albums } else { &mut st.liked_playlists };
+            let set = &mut st.liked_albums;
             if liked {
-                set.insert(key);
+                set.insert(id.clone());
             } else {
-                set.remove(&key);
+                set.remove(&id);
             }
         }
         let title = l.title.clone();
         std::thread::spawn(move || {
-            let saved = net.api.like_entity(&uid, kind, &id, !liked);
-            if saved.is_ok() && kind == "albums" {
+            let saved = net.api.like_entity(&uid, "albums", &id, !liked);
+            if saved.is_ok() {
                 net.refresh("collection");
             }
             net.say(match saved {
@@ -3732,6 +3756,10 @@ impl Ctx {
     }
 
     fn menu_action(self: &Rc<Self>, id: &str) {
+        if let Some(action) = id.strip_prefix("playlist-card-") {
+            self.playlist_card_menu_action(action);
+            return;
+        }
         if matches!(id, "label-sort-popular" | "label-sort-date") {
             let ui = self.ui();
             let app = ui.global::<App>();

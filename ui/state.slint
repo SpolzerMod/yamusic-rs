@@ -2,6 +2,13 @@
 // Rust пишет сюда данные и подписывается на колбэки.
 
 export enum Page { wave, search, trends, concerts, nonmusic, collection, list, artist, artists, settings, grid, chart, history, landing }
+export enum PlaylistCardAction { play, pin, like, trailer, menu }
+
+export struct PlaylistCardState {
+    pinned: bool,
+    liked: bool,
+    can-like: bool,
+}
 
 // Строка окна «Горячие клавиши»: подпись и клавиши по ячейкам («—» — пусто).
 export struct ShortcutItem {
@@ -30,6 +37,7 @@ export struct PinItem {
 
 export struct CardItem {
     title: string,
+    playlist-target: string,
     subtitle: string,
     cover: image,
     round: bool,
@@ -80,6 +88,7 @@ export struct LTab {
 // Карточка блока лендинга; блоку нужны только свои поля.
 export struct LCard {
     title: string,
+    playlist-target: string,
     subtitle: string,
     sub2: string,
     extra: string,
@@ -561,6 +570,9 @@ export global App {
     callback open-search-tracks();
     callback open-suggest(int);
     callback open-card(string, int);
+    in property <int> playlist-card-revision;
+    pure callback playlist-card-state(string, int) -> PlaylistCardState;
+    callback playlist-card-action(PlaylistCardAction, string, string, length, length);
     callback play-chart(int);
     callback like-chart(int);
     callback play-result(int);

@@ -16,11 +16,11 @@ import { FullscreenPlayer } from "fullscreen.slint";
 import { TrackMenu, SoundSettings } from "popups.slint";
 import { ShortcutsModal, OverviewModal } from "modals.slint";
 import { TrackAboutModal } from "track_about.slint";
-import { T, App, Page, TrackItem, PinItem, CardItem, TopArtistItem, WheelEntry, ChartRow, LyricLine, MenuEntry, InfoLine } from "state.slint";
+import { T, App, Page, TrackItem, PinItem, CardItem, TopArtistItem, WheelEntry, ChartRow, LyricLine, MenuEntry, InfoLine, PlaylistCardAction, PlaylistCardState } from "state.slint";
 import { LandingPage, ChartPage } from "landing.slint";
 import { HistoryPage } from "history.slint";
 
-export { Theme, Icons, App, T, Page, TrackItem, PinItem, CardItem, TopArtistItem, WheelEntry, ChartRow, LyricLine, MenuEntry, InfoLine }
+export { Theme, Icons, App, T, Page, TrackItem, PinItem, CardItem, TopArtistItem, WheelEntry, ChartRow, LyricLine, MenuEntry, InfoLine, PlaylistCardAction, PlaylistCardState }
 
 component CaptionButton inherits Rectangle {
     in property <int> kind; // 0 свернуть, 1 развернуть, 2 закрыть, 3 мини-плеер
