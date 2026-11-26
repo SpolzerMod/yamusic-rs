@@ -56,6 +56,12 @@ struct State {
     tune_seeds: Vec<String>,
     liked_albums: std::collections::HashSet<String>,
     liked_playlists: std::collections::HashSet<String>,
+    /// Волны в Коллекции, ключи — `api::wave_key`.
+    liked_waves: std::collections::HashSet<String>,
+    /// Включённые серверные эксперименты оригинала (`WebNext…` с группой `on`).
+    experiments: std::collections::HashSet<String>,
+    /// Пункты меню волны, чей запрос ещё идёт: повторный клик по ним ничего не делает.
+    wave_busy: std::collections::HashSet<&'static str>,
     /// «Смотреть всё»: ключ страницы, её вкладки и выбранная вкладка.
     grid_key: Option<String>,
     grid_titles: HashMap<String, String>,
@@ -185,6 +191,29 @@ fn is_activity(seed: &str) -> bool {
     seed.starts_with("activity:")
 }
 
+/// Волну можно закрепить и лайкнуть (`isLikeEnabled` оригинала, `1775`): сид не «Моя волна»,
+/// не «Перемешать» (`diversity:reshuffle`) и не плейлист. Только у таких волн у челки меню.
+fn wave_menu_enabled(station: &str) -> bool {
+    station != crate::api::WAVE && station != "diversity:reshuffle" && !station.starts_with("playlist:")
+}
+
+/// Тост закрепа волны (`NotificationPin` оригинала): с экспериментом `WebNextVibeDescription`
+/// — `notifications-info.entity-(un)pinned-in-menu` с описанием волны, без него —
+/// `notifications-info.my-vibe-(un)pinned-in-menu`.
+fn wave_pin_toast(pin: bool, described: bool, title: &str, about: &str) -> String {
+    match (described, pin) {
+        (true, true) => format!("{about} {title} теперь в боковом меню"),
+        (true, false) => format!("{about} {title} больше не в боковом меню"),
+        (false, true) => format!("Моя волна {title} закреплена в боковом меню"),
+        (false, false) => format!("Моя волна {title} удалена из бокового меню"),
+    }
+}
+
+/// «Поделиться» (`isShareEnabled`): ещё и тип станции не `multivibe` и не `user`.
+fn wave_share_enabled(station: &str) -> bool {
+    wave_menu_enabled(station) && !matches!(station.split(':').next(), Some("multivibe" | "user"))
+}
+
 fn plural<'a>(n: u64, one: &'a str, few: &'a str, many: &'a str) -> &'a str {
     let (m10, m100) = (n % 10, n % 100);
     if m10 == 1 && m100 != 11 {
@@ -305,6 +334,7 @@ impl Ctx {
         };
         app.set_source_title(source_title.into());
         app.set_wave_context(context);
+        self.sync_wave_menu(&s.source);
         self.sync_wheel(&s.source);
 
         app.set_can_prev(s.track.is_some());
@@ -383,6 +413,8 @@ impl Ctx {
             let pins = api.pins();
             let liked_albums = api.liked_album_ids(&uid);
             let liked_playlists = api.liked_playlist_keys(&uid);
+            let liked_waves = api.liked_waves();
+            let experiments = api.experiments_on();
             let less_ai = api.account_settings().ok().and_then(|v| v.get("aiContentReductionEnabled").and_then(|b| b.as_bool()));
             let _ = slint::invoke_from_event_loop(move || {
                 with_ctx(|c| {
@@ -413,6 +445,14 @@ impl Ctx {
                     match liked_playlists {
                         Ok(keys) => c.st.borrow_mut().liked_playlists = keys.into_iter().collect(),
                         Err(e) => log(format!("понравившиеся плейлисты: {e}")),
+                    }
+                    match liked_waves {
+                        Ok(keys) => c.st.borrow_mut().liked_waves = keys,
+                        Err(e) => log(format!("волны в Коллекции: {e}")),
+                    }
+                    match experiments {
+                        Ok(on) => c.st.borrow_mut().experiments = on,
+                        Err(e) => log(format!("эксперименты: {e}")),
                     }
                     if let Some(on) = less_ai {
                         crate::api::LESS_AI.store(on, std::sync::atomic::Ordering::Relaxed);
@@ -1970,6 +2010,9 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             tune_seeds: Vec::new(),
             liked_albums: Default::default(),
             liked_playlists: Default::default(),
+            liked_waves: Default::default(),
+            experiments: Default::default(),
+            wave_busy: Default::default(),
             grid_key: None,
             landing_key: None,
             grid_titles: HashMap::new(),
@@ -3415,6 +3458,155 @@ impl Ctx {
                     .or_else(|| k.strip_prefix("familiar:"))
                     .map_or_else(|| k.to_string(), |id| format!("artist:{id}")),
             ),
+        }
+    }
+
+    /// Эксперимент `WebNextWaveLikesAndShares`: без него у оригинала челка — только сброс
+    /// (`4362`: `checkExperiment(WebNextWaveLikesAndShares, "on") ? VibeContextButton : …`).
+    fn wave_likes(&self) -> bool {
+        self.st.borrow().experiments.contains("WebNextWaveLikesAndShares")
+    }
+
+    /// Меню челки волны (`VibeContextButton` оригинала) и кнопка настроек под плеером.
+    fn sync_wave_menu(&self, source: &Source) {
+        let ui = self.ui();
+        let app = ui.global::<App>();
+        let station = match source {
+            Source::Seed { station, .. } => Some(station.as_str()),
+            _ => None,
+        };
+        let menu = self.wave_likes() && station.is_some_and(wave_menu_enabled);
+        app.set_wave_tunable(station.is_some_and(is_activity));
+        app.set_wave_menu(menu);
+        if !menu || app.get_page() != Page::Wave {
+            app.set_wave_menu_open(false);
+        }
+        let Some(station) = station.filter(|_| menu) else { return };
+        app.set_wave_share(wave_share_enabled(station));
+        // Раз в 250 мс, поэтому без строк: закреп волны — `station:<станция>`.
+        let pinned = self.st.borrow().pins.iter().any(|p| p.target.strip_prefix("station:") == Some(station));
+        app.set_wave_pinned(pinned);
+        let liked = self.st.borrow().liked_waves.contains(station);
+        app.set_wave_liked(liked);
+    }
+
+    /// Пункт меню волны: закрепить, «Нравится», «Поделиться». Тексты тостов — из словаря
+    /// оригинала (`notifications-info.my-vibe-*`, `shared-vibe.link-successfully-copied`).
+    fn wave_menu_action(self: &Rc<Self>, action: &str) {
+        let ui = self.ui();
+        let app = ui.global::<App>();
+        app.set_wave_menu_open(false);
+        let key: &'static str = match action {
+            "pin" => "pin",
+            "like" => "like",
+            "share" => "share",
+            _ => return,
+        };
+        let s = self.player.state();
+        let Source::Seed { station, header, title } = &s.source else { return };
+        if !self.wave_likes() || !wave_menu_enabled(station) {
+            return;
+        }
+        let Some(net) = self.st.borrow().net.clone() else { return };
+        // У волны один сид — станция, её ключ в Коллекции — она сама.
+        let liked = self.st.borrow().liked_waves.contains(station);
+        // Без Плюса оригинал вместо лайка и ссылки открывает окно подписки, его здесь нет.
+        if !s.has_plus && (key == "share" || key == "like" && !liked) {
+            self.toast("У вас пока нет мультиподписки Плюс");
+            return;
+        }
+        if !self.st.borrow_mut().wave_busy.insert(key) {
+            return;
+        }
+        let seeds = vec![station.clone()];
+        let name = if title.is_empty() { header.clone() } else { title.clone() };
+        let header = header.clone();
+        match key {
+            "pin" => {
+                let target = format!("station:{station}");
+                let pin = !self.is_pinned(&target);
+                // Закреп снимается — название и подпись берутся из него, пока он ещё в списке.
+                let old = self.st.borrow().pins.iter().find(|p| p.target == target).cloned();
+                let described = self.st.borrow().experiments.contains("WebNextVibeDescription");
+                std::thread::spawn(move || {
+                    let r = net.api.pin(&target, pin);
+                    let pins = r.as_ref().ok().and_then(|_| net.api.pins().ok());
+                    let _ = slint::invoke_from_event_loop(move || {
+                        with_ctx(|c| {
+                            c.st.borrow_mut().wave_busy.remove("pin");
+                            if let Err(e) = r {
+                                log(format!("закреп волны: {e}"));
+                                c.toast("При выполнении действия произошла ошибка");
+                                return;
+                            }
+                            let entry = if pin { pins.as_ref().and_then(|p| p.iter().find(|p| p.target == target).cloned()) } else { old };
+                            if let Some(pins) = pins {
+                                c.set_pins(pins);
+                            }
+                            let title = entry.as_ref().map_or(name, |p| p.title.clone());
+                            let about = entry.map_or(header, |p| p.subtitle);
+                            c.toast(wave_pin_toast(pin, described, &title, &about));
+                        })
+                    });
+                });
+            }
+            "like" => {
+                // Как у оригинала: отметка ставится сразу, при ошибке возвращается, после
+                // успеха список волн в Коллекции перечитывается.
+                let wave = crate::api::wave_key(&seeds);
+                self.set_wave_liked(&wave, !liked);
+                std::thread::spawn(move || {
+                    let r = net.api.like_wave(&seeds, !liked);
+                    let fresh = r.as_ref().ok().and_then(|_| net.api.liked_waves().ok());
+                    let _ = slint::invoke_from_event_loop(move || {
+                        with_ctx(|c| {
+                            c.st.borrow_mut().wave_busy.remove("like");
+                            match r {
+                                Ok(()) => {
+                                    if let Some(keys) = fresh {
+                                        c.st.borrow_mut().liked_waves = keys;
+                                    }
+                                    c.toast(if liked { "Моя волна удалена из Коллекции" } else { "Моя волна добавлена в Коллекцию" });
+                                }
+                                Err(e) => {
+                                    log(format!("лайк волны: {e}"));
+                                    c.set_wave_liked(&wave, liked);
+                                    c.toast("При выполнении действия произошла ошибка");
+                                }
+                            }
+                        })
+                    });
+                });
+            }
+            _ => {
+                std::thread::spawn(move || {
+                    let r = net.api.share_wave(&seeds);
+                    let _ = slint::invoke_from_event_loop(move || {
+                        with_ctx(|c| {
+                            c.st.borrow_mut().wave_busy.remove("share");
+                            match r {
+                                Ok(url) => {
+                                    sys::copy_text(&url);
+                                    c.toast("Ссылка на Мою волну скопирована");
+                                }
+                                Err(e) => {
+                                    log(format!("ссылка на волну: {e}"));
+                                    c.toast("При выполнении действия произошла ошибка");
+                                }
+                            }
+                        })
+                    });
+                });
+            }
+        }
+    }
+
+    fn set_wave_liked(&self, wave: &str, liked: bool) {
+        let mut st = self.st.borrow_mut();
+        if liked {
+            st.liked_waves.insert(wave.to_string());
+        } else {
+            st.liked_waves.remove(wave);
         }
     }
 
@@ -4866,6 +5058,7 @@ fn register_extra(app: &App) {
             c.start();
         })
     });
+    app.on_wave_menu_action(|action| with_ctx(|c| c.wave_menu_action(&action)));
     app.on_reset_wave(|| {
         with_ctx(|c| {
             c.st.borrow_mut().trailer = None;
@@ -4920,6 +5113,23 @@ fn register_extra(app: &App) {
         crate::eq::PRESETS.iter().map(|p| SharedString::from(p.0)).collect::<Vec<_>>(),
     ))));
     with_ctx(|c| c.apply_eq());
+}
+
+#[cfg(test)]
+#[test]
+fn wave_menu_follows_like_and_share_rules_of_original() {
+    for station in ["genre:rock", "artist:1", "track:2", "activity:road-trip", "mood:calm"] {
+        assert!(wave_menu_enabled(station), "{station}");
+        assert!(wave_share_enabled(station), "{station}");
+    }
+    for station in [crate::api::WAVE, "diversity:reshuffle", "playlist:10_3"] {
+        assert!(!wave_menu_enabled(station), "{station}");
+        assert!(!wave_share_enabled(station), "{station}");
+    }
+    assert!(wave_menu_enabled("multivibe:abc") && !wave_share_enabled("multivibe:abc"));
+    assert!(wave_menu_enabled("user:other") && !wave_share_enabled("user:other"));
+    assert_eq!(wave_pin_toast(true, false, "Рок", "Моя волна по жанру"), "Моя волна Рок закреплена в боковом меню");
+    assert_eq!(wave_pin_toast(false, true, "Рок", "Моя волна по жанру"), "Моя волна по жанру Рок больше не в боковом меню");
 }
 
 #[cfg(test)]

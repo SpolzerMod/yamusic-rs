@@ -201,8 +201,77 @@ component FitTitle inherits Rectangle {
     }
 }
 
-// «Челка» над пятном: источник волны и отдельная круглая кнопка сброса. У волны челка со
-// стрелкой открывает её настройки, как VibeContextButton оригинала.
+// Пункт меню волны (`VibeContextButton_menuItem`): поля 8 сверху и снизу, 12 по бокам, значок 20,
+// между значком и подписью 12. У «Нравится» после лайка подпись и значок светлее
+// (`menuItem_active`).
+component VibeMenuItem inherits Rectangle {
+    in property <string> text;
+    in property <image> icon;
+    in property <bool> active;
+    callback clicked;
+    property <brush> ink: root.active || ta.has-hover ? #ffffffe6 : #ffffff80;
+    height: 36px;
+    border-radius: Theme.radius-size-m;
+    background: ta.has-hover ? #ffffff14 : transparent;
+    animate background { duration: App.motion ? 150ms : 0ms; }
+    HorizontalLayout {
+        padding-left: Theme.spacer-size-m;
+        padding-right: Theme.spacer-size-m;
+        spacing: Theme.spacer-size-m;
+        VerticalLayout {
+            alignment: center;
+            Icon { source: root.icon; size: Theme.icon-size-xxs; colorize: root.ink; }
+        }
+        Text {
+            text: root.text;
+            vertical-alignment: center;
+            font-size: Theme.font-size-label-m;
+            font-weight: 500;
+            color: root.ink;
+            animate color { duration: App.motion ? 150ms : 0ms; }
+        }
+    }
+    ta := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Меню волны под челкой (`VibeContextButton_menu`): по ширине пунктов, поля 10 сверху и снизу,
+// 8 по бокам, фон — чёрный на 70%.
+component VibeMenu inherits Rectangle {
+    width: col.preferred-width;
+    height: col.preferred-height;
+    border-radius: Theme.radius-size-xl;
+    background: Theme.controls-color-primary-on-default-enabled.transparentize(30%);
+    TouchArea { }
+    col := VerticalLayout {
+        padding-top: Theme.spacer-size-s;
+        padding-bottom: Theme.spacer-size-s;
+        padding-left: Theme.spacer-size-xs;
+        padding-right: Theme.spacer-size-xs;
+        VibeMenuItem {
+            text: App.wave-pinned ? T.t("Открепить") : T.t("Закрепить");
+            icon: App.wave-pinned ? Icons.m-unpin : Icons.m-pin;
+            clicked => { App.wave-menu-action("pin"); }
+        }
+        VibeMenuItem {
+            text: T.t("Нравится");
+            icon: App.wave-liked ? Icons.m-liked : Icons.m-like;
+            active: App.wave-liked;
+            clicked => { App.wave-menu-action("like"); }
+        }
+        if App.wave-share: VibeMenuItem {
+            text: T.t("Поделиться");
+            icon: Icons.m-share;
+            clicked => { App.wave-menu-action("share"); }
+        }
+    }
+}
+
+// «Челка» над пятном: источник волны и отдельная круглая кнопка сброса. У волны, которую можно
+// закрепить и добавить в Коллекцию, челка со стрелкой открывает меню, как VibeContextButton
+// оригинала: оно под челкой по центру, на 4 ниже (`offsetOptions: 4`).
 component ContextPill inherits Rectangle {
     in property <string> text;
     in property <bool> menu;
@@ -213,6 +282,10 @@ component ContextPill inherits Rectangle {
     property <length> btn: 48px;
     property <length> arrow: root.menu ? 24px : 0px;
     property <length> pill-w: min(label.preferred-width + 48px + arrow, root.width - btn - 4px);
+    if root.menu && root.menu-open: VibeMenu {
+        x: pill.x + (pill.width - self.width) / 2;
+        y: root.height + 4px;
+    }
     pill := Rectangle {
         x: (root.width - pill-w - 4px - btn) / 2;
         width: pill-w;
@@ -416,7 +489,6 @@ export component WavePage inherits Rectangle {
     property <float> progress: App.duration > 0 ? App.position / App.duration : 0;
     property <float> drag-progress: -1;
     property <float> shown: drag-progress >= 0 ? drag-progress : progress;
-    property <bool> tune-from-top;
 
     // Пятно: картинка оригинала, перекрашенная под трек. С движением медленно вращается,
     // дышит и плывёт; периоды взаимно простые, чтобы рисунок не повторялся.
@@ -494,24 +566,6 @@ export component WavePage inherits Rectangle {
         font-weight: 700;
         color: #ffff00;
     }
-    if App.has-track && App.wave-context: ContextPill {
-        x: text-x;
-        y: 24px;
-        width: text-w;
-        text: App.source-title;
-        menu: App.is-wave;
-        menu-open: App.wave-settings-open;
-        reset => { App.reset-wave(); }
-        toggle => {
-            if App.wave-settings-open {
-                App.wave-settings-open = false;
-            } else {
-                root.tune-from-top = true;
-                App.open-wave-settings();
-            }
-        }
-    }
-
     // Сохраняем размер оригинала, пока заголовок помещается в одну строку.
     if !App.has-track || paused: Rectangle {
         x: text-x;
@@ -705,24 +759,39 @@ export component WavePage inherits Rectangle {
         }
     }
 
-    // Настройки «Моей волны» — только у неё самой и пока она не играет, как у оригинала.
+    // Челка со своим меню — поверх заголовка и плеера; клик мимо меню закрывает его.
+    if App.wave-menu-open && App.wave-menu: TouchArea {
+        clicked => { App.wave-menu-open = false; }
+    }
+    if App.has-track && App.wave-context: ContextPill {
+        x: text-x;
+        y: 24px;
+        width: text-w;
+        text: App.source-title;
+        menu: App.wave-menu;
+        menu-open: App.wave-menu-open;
+        reset => {
+            App.wave-menu-open = false;
+            App.reset-wave();
+        }
+        toggle => { App.wave-menu-open = !App.wave-menu-open; }
+    }
+
+    // Настройки «Моей волны» — у неё самой и у волны «Под занятие» (сиды `user:onyourwave`
+    // или `activity:*`, как у кнопки настроек оригинала), пока она не играет.
     tune := TunePill {
         x: cx - self.width / 2;
         y: 664px + dp;
-        visible: !App.wave-context && (!App.has-track || paused);
-        clicked => {
-            root.tune-from-top = false;
-            App.open-wave-settings();
-        }
+        visible: (!App.wave-context || App.wave-tunable) && (!App.has-track || paused);
+        clicked => { App.open-wave-settings(); }
     }
     if App.wave-settings-open: TouchArea {
         clicked => { App.wave-settings-open = false; }
     }
     // Панель справа от кнопки; в узком окне прижимается к правому краю.
-    // Из челки панель открывается под ней.
     if App.wave-settings-open: WaveTune {
-        limit: min(480px, root.tune-from-top ? parent.height - 80px - 16px : parent.height - 32px);
-        x: root.tune-from-top ? clamp(cx - self.width / 2, 16px, parent.width - self.width - 16px) : min(tune.x + tune.width + 12px, parent.width - self.width - 16px);
-        y: root.tune-from-top ? 80px : clamp(tune.y + tune.height - self.height, 16px, parent.height - self.height - 16px);
+        limit: min(480px, parent.height - 32px);
+        x: min(tune.x + tune.width + 12px, parent.width - self.width - 16px);
+        y: clamp(tune.y + tune.height - self.height, 16px, parent.height - self.height - 16px);
     }
 }

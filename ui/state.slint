@@ -271,6 +271,17 @@ export global App {
     in property <string> track-format;
     in property <[WaveSettingGroup]> wave-settings;
     in-out property <bool> wave-settings-open;
+    // Играет волна «Под занятие»: кнопка настроек остаётся, хотя над пятном челка.
+    in property <bool> wave-tunable;
+    // Меню челки волны (`VibeContextButton`): есть, если волну можно лайкать (`isLikeEnabled`
+    // оригинала); «Поделиться» — если ещё и `isShareEnabled`.
+    in property <bool> wave-menu;
+    in-out property <bool> wave-menu-open;
+    in property <bool> wave-share;
+    in property <bool> wave-pinned;
+    in property <bool> wave-liked;
+    // «pin», «like» или «share».
+    callback wave-menu-action(string);
     in property <[string]> artist-list;
     in property <string> artists-longest;
     // Фаза анимации пятна, секунды; идёт только во время игры на странице волны.

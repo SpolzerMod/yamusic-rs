@@ -1021,6 +1021,34 @@ fn short(s: &str) -> String {
     s.chars().take(200).collect()
 }
 
+/// Ключ волны в Коллекции, как у карты `library.vibes` оригинала: сиды без повторов, по
+/// порядку, через запятую.
+pub fn wave_key(seeds: &[String]) -> String {
+    let mut seeds: Vec<&str> = seeds.iter().map(String::as_str).collect();
+    seeds.sort_unstable();
+    seeds.dedup();
+    seeds.join(",")
+}
+
+/// Ответ `account/experiments/details` → имена экспериментов с группой `on`.
+fn experiments_on(v: &Value) -> std::collections::HashSet<String> {
+    v.as_object()
+        .map(|m| m.iter().filter(|(_, e)| e.get("group").and_then(|g| g.as_str()) == Some("on")).map(|(k, _)| k.clone()).collect())
+        .unwrap_or_default()
+}
+
+/// Ответ `collection/sync` → ключи волн из `likedWaves`.
+fn parse_liked_waves(v: &Value) -> Option<std::collections::HashSet<String>> {
+    let liked = v.pointer("/values/likedWaves/values/liked")?.as_array()?;
+    Some(
+        liked
+            .iter()
+            .filter_map(|w| w.get("seeds")?.as_array())
+            .map(|seeds| wave_key(&seeds.iter().filter_map(|s| s.as_str().map(String::from)).collect::<Vec<_>>()))
+            .collect(),
+    )
+}
+
 impl Api {
     pub fn new(token: &str) -> Self {
         let http = Client::builder()
@@ -1283,6 +1311,37 @@ impl Api {
         } else {
             Err(format!("HTTP {status}: {}", short(&text)))
         }
+    }
+
+    /// Включённые серверные эксперименты оригинала (`account/experiments/details`): имена с
+    /// группой `on`, как у `checkExperiment(имя, "on")`.
+    pub fn experiments_on(&self) -> Res<std::collections::HashSet<String>> {
+        let v = self.get_raw("/account/experiments/details")?;
+        Ok(experiments_on(&v))
+    }
+
+    /// Волны в Коллекции (ключи — `wave_key`): `collection/sync` только с `likedWaves`, как
+    /// `library.getData([LIKED_VIBES])` оригинала.
+    pub fn liked_waves(&self) -> Res<std::collections::HashSet<String>> {
+        let v = self.post_raw("/collection/sync", &json!({ "likedWaves": { "allValuesRequired": true } }))?;
+        parse_liked_waves(&v).ok_or_else(|| "в ответе нет likedWaves".into())
+    }
+
+    /// «Нравится» у волны: `collection/v1/waves/like` или `unlike`, сиды — без повторов и по
+    /// порядку, как в `library.toggleVibeLike` оригинала.
+    pub fn like_wave(&self, seeds: &[String], like: bool) -> Res<()> {
+        let path = if like { "/collection/v1/waves/like" } else { "/collection/v1/waves/unlike" };
+        let key = wave_key(seeds);
+        let seeds: Vec<&str> = key.split(',').collect();
+        self.post_raw(path, &json!({ "waves": [{ "seeds": seeds }] })).map(|_| ())
+    }
+
+    /// «Поделиться» волной: `PUT wave/v1/shares` с сидами отдаёт `shareId`, ссылка —
+    /// `/myvibe/<shareId>` на сайте Музыки, как у `ShareVibeMenuItem` оригинала.
+    pub fn share_wave(&self, seeds: &[String]) -> Res<String> {
+        let v = self.send_raw(self.desktop_req(Method::PUT, "/wave/v1/shares").json(&json!({ "seeds": seeds })))?;
+        let id = s(v.get("shareId")).ok_or("в ответе нет shareId")?;
+        Ok(format!("https://music.yandex.ru/myvibe/{id}"))
     }
 
     /// Лайк альбома или исполнителя: `kind` — albums или artists.
@@ -2090,6 +2149,34 @@ impl Api {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn liked_waves_are_keyed_by_sorted_unique_seeds() {
+        let v = serde_json::json!({ "values": { "likedWaves": { "info": { "revision": 7 }, "values": { "liked": [
+            { "seeds": ["genre:rock"], "timestamp": "2026-11-01T00:00:00Z" },
+            { "seeds": ["mood:calm", "activity:road-trip", "mood:calm"], "timestamp": "2026-11-02T00:00:00Z" },
+            { "timestamp": "2026-11-03T00:00:00Z" }
+        ] } } } });
+        let keys = parse_liked_waves(&v).unwrap();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains("genre:rock"));
+        assert!(keys.contains("activity:road-trip,mood:calm"));
+        assert_eq!(wave_key(&["mood:calm".into(), "activity:road-trip".into()]), "activity:road-trip,mood:calm");
+        assert!(parse_liked_waves(&serde_json::json!({ "values": {} })).is_none());
+    }
+
+    #[test]
+    fn experiments_on_are_those_in_group_on() {
+        let v = serde_json::json!({
+            "WebNextWaveLikesAndShares": { "group": "on", "value": { "title": "on" } },
+            "WebNextVibeDescription": { "group": "default", "value": { "title": "default" } },
+            "WebNextOther": { "value": { "title": "on" } }
+        });
+        let on = experiments_on(&v);
+        assert!(on.contains("WebNextWaveLikesAndShares"));
+        assert_eq!(on.len(), 1);
+        assert!(experiments_on(&serde_json::json!([])).is_empty());
+    }
 
     #[test]
     fn album_label_link_requires_a_numeric_id() {
