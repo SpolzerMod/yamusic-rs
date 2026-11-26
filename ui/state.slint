@@ -513,6 +513,15 @@ export global App {
     in property <bool> crossfade;
     // Режим работы: «Плавный» — анимации и кэш слоёв, «Лёгкий» — без них.
     in property <bool> motion: true;
+    // Плавная прокрутка (`src/gui/wheel.rs`) отдаёт щелчок колёсика десятками мелких сдвигов
+    // и на это время поднимает `wheel-smooth`; `wheel-notch` — сколько пикселей в щелчке.
+    in property <bool> wheel-smooth;
+    in property <length> wheel-notch: 60px;
+    // Громкость колёсиком: 2% за щелчок. Доля щелчка от плавной прокрутки даёт долю шага,
+    // чтобы за щелчок набралось те же 2%.
+    public pure function wheel-volume(dy: length) -> float {
+        return max(0, min(1, volume + (wheel-smooth ? 0.02 * dy / wheel-notch : (dy > 0 ? 0.02 : -0.02))));
+    }
     // Статус «Слушает» в профиле Discord и что с ним сейчас.
     in property <bool> discord-on;
     in property <string> discord-status;

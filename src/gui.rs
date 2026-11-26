@@ -6,6 +6,7 @@ mod history_ui;
 mod keys;
 mod landing_ui;
 mod track_about;
+mod wheel;
 
 use crate::save::{file_name_max, save_track, saved_already};
 use crate::api::{album_kind_word, Album, Api, Card, Collection, Pin, Playlist, Track};
@@ -1452,6 +1453,7 @@ fn window_maximized(w: &slint::Window) -> bool {
 
 thread_local! {
     static MOVED: Timer = Timer::default();
+    static VOLUME_SAVE: Timer = Timer::default();
 }
 
 /// Окно сдвинули: перерисовать целиком, когда его перестанут двигать.
@@ -2074,10 +2076,13 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     app.on_set_volume(move |v| {
         p.send(Cmd::Volume(v));
         with_ctx(|c| {
-            let mut st = c.st.borrow_mut();
-            st.cfg.volume = v;
-            st.cfg.save();
+            // Сразу, а не со следующей сверкой с плеером: щелчок колёсика с плавной прокруткой
+            // приходит десятками мелких шагов, и каждый прибавляет к уже новой громкости.
+            c.ui().global::<App>().set_volume(v);
+            c.st.borrow_mut().cfg.volume = v;
         });
+        // На диск — когда громкость перестанет меняться, а не на каждый такой шаг.
+        VOLUME_SAVE.with(|t| t.start(TimerMode::SingleShot, Duration::from_millis(500), || with_ctx(|c| c.st.borrow().cfg.save())));
     });
     app.on_format_time(|s| mmss(s).into());
 
@@ -2370,6 +2375,14 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             WindowEvent::ModifiersChanged(m) => {
                 keys::set_modifiers(m.state());
                 EventResult::Propagate
+            }
+            // Щелчок колёсика мыши: страница едет анимацией, как в официальном приложении.
+            WindowEvent::MouseWheel { delta: winit::event::MouseScrollDelta::LineDelta(lx, ly), .. } => {
+                if wheel::notch(*lx, *ly) {
+                    EventResult::PreventDefault
+                } else {
+                    EventResult::Propagate
+                }
             }
             WindowEvent::KeyboardInput { event, is_synthetic: false, .. } => {
                 if let winit::keyboard::PhysicalKey::Code(code) = event.physical_key {

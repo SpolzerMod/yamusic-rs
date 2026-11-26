@@ -65,7 +65,7 @@ export component VolumePopup inherits Rectangle {
             }
         }
         scroll-event(e) => {
-            App.set-volume(max(0, min(1, App.volume + (e.delta-y > 0 ? 0.02 : -0.02))));
+            App.set-volume(App.wheel-volume(e.delta-y));
             accept
         }
     }

@@ -46,7 +46,7 @@ component GlassButton inherits Rectangle {
             if !root.scroll-volume {
                 return reject;
             }
-            App.set-volume(max(0, min(1, App.volume + (e.delta-y > 0 ? 0.02 : -0.02))));
+            App.set-volume(App.wheel-volume(e.delta-y));
             accept
         }
         pointer-event(e) => {
