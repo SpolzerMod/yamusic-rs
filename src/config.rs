@@ -272,6 +272,10 @@ pub fn log(msg: impl AsRef<str>) {
     let msg = msg.as_ref();
     #[cfg(debug_assertions)]
     eprintln!("{msg}");
+    // Тесты нарочно вызывают ошибки («Лайк не сохранился: offline»): настоящему журналу они не нужны.
+    if cfg!(test) {
+        return;
+    }
     let _ = std::fs::create_dir_all(dir());
     let path = dir().join("log.txt");
     if std::fs::metadata(&path).map(|m| m.len() > 512 * 1024).unwrap_or(false) {
