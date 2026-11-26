@@ -219,6 +219,10 @@ export global App {
     in-out property <int> shortcut-row: -1;
     in-out property <int> shortcut-slot;
     callback shortcuts-reset();
+    // Окно «О приложении»; ссылки из него открываются в браузере.
+    in-out property <bool> about-open;
+    in property <string> repository;
+    callback open-url(string);
     // У поля ввода (`Field`) фокус и где это поле: горячие клавиши в это время не работают,
     // клик мимо поля снимает с него фокус.
     in-out property <bool> text-focused;

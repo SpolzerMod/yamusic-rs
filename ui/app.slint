@@ -14,7 +14,7 @@ import { GridPage } from "grid.slint";
 import { AccountMenu, SettingsPage, LoginScreen } from "account.slint";
 import { FullscreenPlayer } from "fullscreen.slint";
 import { TrackMenu, SoundSettings } from "popups.slint";
-import { ShortcutsModal, OverviewModal } from "modals.slint";
+import { ShortcutsModal, OverviewModal, AboutModal } from "modals.slint";
 import { TrackAboutModal } from "track_about.slint";
 import { T, App, Page, TrackItem, PinItem, CardItem, TopArtistItem, WheelEntry, ChartRow, LyricLine, MenuEntry, InfoLine } from "state.slint";
 import { LandingPage, ChartPage } from "landing.slint";
@@ -268,6 +268,20 @@ export component AppWindow inherits Window {
         height: shortcuts.height;
         rise: 8px;
         shortcuts := ShortcutsModal { }
+    }
+
+    // «О приложении»: так же, по центру на подложке (overlayColor «full» у оригинала).
+    if App.about-open: Rectangle {
+        background: Theme.background-color-primary-enabled-overlay;
+        TouchArea { clicked => { App.about-open = false; } }
+    }
+    if App.about-open: Fade {
+        x: (parent.width - about.width) / 2;
+        y: (parent.height - about.height) / 2;
+        width: about.width;
+        height: about.height;
+        rise: 8px;
+        about := AboutModal { limit: root.height - Theme.spacer-size-xxxxl; }
     }
 
     if App.menu-open: Fade {

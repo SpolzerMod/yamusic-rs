@@ -511,7 +511,7 @@ export component SettingsPage inherits Rectangle {
             SettingItem {
                 title: T.t("О приложении");
                 desc: App.app-name + " · " + T.t("Версия ") + App.version;
-                clicked => { App.setting("about"); }
+                clicked => { App.about-open = true; }
             }
         }
     }
