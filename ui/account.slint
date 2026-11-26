@@ -467,12 +467,24 @@ export component SettingsPage inherits Rectangle {
                 on: App.less-ai;
                 clicked => { App.setting("less-ai"); }
             }
-            SettingItem {
-                title: T.t("Статус в Discord");
-                desc: App.discord-on && App.discord-status != "" ? App.discord-status : T.t("Показывать в профиле Discord, что вы слушаете");
-                toggle: true;
-                on: App.discord-on;
-                clicked => { App.setting("discord"); }
+            VerticalLayout {
+                spacing: 8px;
+                SettingItem {
+                    title: T.t("Статус в Discord");
+                    desc: App.discord-on && App.discord-status != "" ? App.discord-status : T.t("Показывать в профиле Discord, что вы слушаете");
+                    toggle: true;
+                    on: App.discord-on;
+                    clicked => { App.setting("discord"); }
+                }
+                // Частая причина «у меня видно, у друзей нет» — выключенная настройка Discord,
+                // а не приложение: подсказываем, где её включить.
+                if App.discord-on: Text {
+                    text: T.t("Если статус не видят другие, включите «Делиться активностью» в настройках Discord");
+                    wrap: word-wrap;
+                    font-size: 12px;
+                    font-weight: 500;
+                    color: Theme.controls-color-primary-text-enabled;
+                }
             }
             SettingItem {
                 title: App.linux ? T.t("Запускать вместе с системой") : T.t("Запускать вместе с Windows");
