@@ -128,6 +128,11 @@ impl Conn {
 
     /// Ok(None) — принято, Ok(Some(msg)) — Discord вернул ошибку на эту активность.
     fn set_activity(&mut self, activity: Value) -> Result<Option<String>, String> {
+        // YAMUSIC_DISCORD_DEBUG=1 — в журнал попадают отправленный JSON и ответ Discord.
+        let debug = std::env::var_os("YAMUSIC_DISCORD_DEBUG").is_some();
+        if debug {
+            log(format!("discord TX {}", serde_json::to_string(&activity).unwrap_or_default()));
+        }
         self.nonce += 1;
         let nonce = self.nonce.to_string();
         self.send(
@@ -149,7 +154,13 @@ impl Conn {
                     }
                     if v.get("evt").and_then(|e| e.as_str()) == Some("ERROR") {
                         let msg = v.pointer("/data/message").and_then(|m| m.as_str()).unwrap_or("?");
+                        if debug {
+                            log(format!("discord RX {}", serde_json::to_string(&v).unwrap_or_default()));
+                        }
                         return Ok(Some(msg.to_string()));
+                    }
+                    if debug {
+                        log(format!("discord OK {}", serde_json::to_string(&v).unwrap_or_default()));
                     }
                     return Ok(None);
                 }
