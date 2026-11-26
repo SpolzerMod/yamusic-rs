@@ -19,6 +19,13 @@ const PROJECT_URL: &str = env!("CARGO_PKG_REPOSITORY");
 /// Discord принимает не больше 5 обновлений статуса за 20 секунд.
 const RATE_MAX: usize = 5;
 const RATE_WINDOW: Duration = Duration::from_secs(20);
+/// Discord ограничивает тексты 128 символами, а подпись кнопки — 32, но сервер
+/// считает именно байты UTF-8. Если лимит превышен, он молча выбрасывает всю
+/// активность, хотя клиент отвечает «принято»: статус виден только себе.
+const TEXT_MAX: usize = 128;
+const LABEL_MAX: usize = 32;
+/// «Слушать в Яндекс Музыке» — 43 байта, и статус перестаёт уходить другим.
+const LISTEN_LABEL: &str = "Слушать в Музыке"; // 30 байт
 
 #[derive(Clone, Default)]
 pub struct DiscordCfg {
@@ -151,10 +158,18 @@ impl Conn {
     }
 }
 
-fn fit(s: &str, fallback: &str) -> String {
+fn fit(s: &str, max: usize, fallback: &str) -> String {
     let s = s.trim();
     let s = if s.chars().count() < 2 { fallback } else { s };
-    s.chars().take(128).collect()
+    let mut out = String::new();
+    for c in s.chars() {
+        // Режем по байтам, не разрывая многобайтовый символ.
+        if out.len() + c.len_utf8() > max {
+            break;
+        }
+        out.push(c);
+    }
+    out.trim_end().to_string()
 }
 
 fn activity(t: &Track, start: i64, end: Option<i64>, playing: bool, listening: bool, with_display_type: bool) -> Value {
@@ -166,11 +181,11 @@ fn activity(t: &Track, start: i64, end: Option<i64>, playing: bool, listening: b
     let mut a = json!({
         // 2 — «Слушает», 0 — «Играет»: так показываем, если клиент не принял «Слушает».
         "type": kind,
-        "details": fit(&t.title, "Без названия"),
-        "state": fit(&t.artists, "Моя волна"),
+        "details": fit(&t.title, TEXT_MAX, "Без названия"),
+        "state": fit(&t.artists, TEXT_MAX, "Моя волна"),
         "buttons": [
-            { "label": "Слушать в Яндекс Музыке", "url": url },
-            { "label": env!("APP_NAME"), "url": PROJECT_URL },
+            { "label": LISTEN_LABEL, "url": url },
+            { "label": fit(env!("APP_NAME"), LABEL_MAX, "yamusic-rs"), "url": PROJECT_URL },
         ],
     });
     if playing {
@@ -184,12 +199,12 @@ fn activity(t: &Track, start: i64, end: Option<i64>, playing: bool, listening: b
         // В списке участников: «Слушает <название трека>», а не имя приложения.
         a["status_display_type"] = json!(2);
     }
-    let album = if t.album_title.is_empty() { env!("APP_NAME").to_string() } else { fit(&t.album_title, env!("APP_NAME")) };
+    let album = fit(&t.album_title, TEXT_MAX, env!("APP_NAME"));
     a["assets"] = json!({
         "large_image": t.cover_url(400).unwrap_or_else(|| "logo".into()),
         "large_text": album,
         "small_image": "logo",
-        "small_text": env!("APP_NAME"),
+        "small_text": fit(env!("APP_NAME"), TEXT_MAX, "yamusic-rs"),
     });
     a
 }
@@ -351,5 +366,19 @@ mod tests {
         let r = Conn::connect("1");
         println!("{:?}", r.as_ref().err());
         assert!(matches!(r, Err(ref e) if e.contains("Application ID")));
+    }
+
+    /// Discord считает лимиты в байтах: кириллическая подпись кнопки должна
+    /// уложиться в 32 байта, иначе сервер выбрасывает всю активность.
+    #[test]
+    fn fit_counts_utf8_bytes() {
+        let label = fit("Слушать в Яндекс Музыке", LABEL_MAX, "Слушать");
+        assert!(label.len() <= LABEL_MAX, "{label:?} — {} байт", label.len());
+        assert!(label.starts_with("Слушать"));
+        assert_eq!(fit("  title  ", TEXT_MAX, ""), "title");
+        assert_eq!(fit("", TEXT_MAX, "fallback"), "fallback");
+        let long = "я".repeat(200);
+        assert!(fit(&long, TEXT_MAX, "").len() <= TEXT_MAX);
+        assert_eq!(fit(&long, TEXT_MAX, "").chars().count(), TEXT_MAX / 2);
     }
 }
