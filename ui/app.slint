@@ -232,10 +232,7 @@ export component AppWindow inherits Window {
         sound := SoundSettings { available-height: max(0px, sound-bottom - top); }
     }
 
-    // «О треке» (TrackAboutModalDesktop): панель справа на прозрачной подложке, клик мимо
-    // закрывает. Отступы — как у оригинала в приложении для Windows (`root_withCustomControls`):
-    // 40 от верха и 12 от правого края контента, высота — окно без 156; низ, как у оригинала,
-    // срезает край контента. Поверх полноэкранного плеера — от краёв окна, высота — окно без 64.
+    // «О треке»: панель справа в пределах области контента. Клик мимо закрывает панель.
     if App.track-about-open: TouchArea {
         clicked => { App.track-about-open = false; }
     }
@@ -250,7 +247,10 @@ export component AppWindow inherits Window {
             x: parent.width - self.width - Theme.spacer-size-m;
             y: Theme.spacer-size-xxxxl;
             width: 430px;
-            height: root.height - (App.fullscreen ? 2 * Theme.spacer-size-xxl + Theme.spacer-size-l : 156px);
+            height: max(0px, min(
+                root.height - (App.fullscreen ? 2 * Theme.spacer-size-xxl + Theme.spacer-size-l : 156px),
+                parent.height - self.y - Theme.spacer-size-m
+            ));
             rise: 8px;
             TrackAboutModal { height: parent.height; }
         }
