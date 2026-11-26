@@ -315,7 +315,7 @@ fn bind_player(ui: &App, player: &Player, sleep: &Rc<RefCell<SleepTimer>>) {
         }
     });
     let p = player.clone();
-    now.on_dislike(move || p.send(Cmd::Dislike));
+    now.on_dislike(move || p.send(Cmd::Dislike(None)));
     let p = player.clone();
     now.on_seek(move |f| {
         let s = p.state();

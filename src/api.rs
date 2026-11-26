@@ -7,6 +7,7 @@ use reqwest::blocking::{Client, RequestBuilder};
 use reqwest::Method;
 use serde_json::{json, Value};
 use sha2::Sha256;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -137,6 +138,7 @@ pub struct Album {
     pub cover: Option<String>,
     pub likes: u64,
     pub label: String,
+    pub label_id: Option<NonZeroU64>,
     pub artist_cover: Option<String>,
     pub artist_list: Vec<Named>,
 }
@@ -503,6 +505,13 @@ pub(crate) fn parse_album(v: &Value) -> Option<Album> {
             .map(String::from),
         likes: v.get("likesCount").and_then(|c| c.as_u64()).unwrap_or(0),
         label: v.pointer("/labels/0/name").and_then(|l| l.as_str()).unwrap_or("").to_string(),
+        label_id: v.pointer("/labels/0/id").and_then(|id| {
+            if let Some(id) = id.as_str() {
+                id.parse().ok()
+            } else {
+                id.as_u64().and_then(NonZeroU64::new)
+            }
+        }),
         artist_cover: v.pointer("/artists/0/cover/uri").and_then(|u| u.as_str()).map(String::from),
     })
 }
@@ -884,7 +893,7 @@ pub fn parse_card(it: &Value) -> Option<Card> {
                 .unwrap_or_default(),
             round: false,
             explicit: false,
-            target: format!("tag:{}", d.pointer("/action/weblink").and_then(|w| w.as_str()).unwrap_or("").trim_start_matches("/tag/")),
+            target: d.pointer("/action/weblink").and_then(|w| w.as_str()).map(crate::landing::web_target).unwrap_or_default(),
         },
         _ => return None,
     })
@@ -1293,6 +1302,32 @@ impl Api {
         Ok(cards(&self.get_raw(&format!("/landing/block/{id}/entities?page=0&pageSize=100"))?))
     }
 
+    /// Подборка (`/tag/autumn`): название тега и его плейлисты, как TagPage оригинала —
+    /// `tags/{id}/playlist-ids`, затем сами плейлисты `playlists?playlistIds=uid:kind,…`.
+    pub fn tag_playlists(&self, id: &str) -> Res<(String, Vec<Card>)> {
+        let v = self.get_raw(&format!("/tags/{id}/playlist-ids"))?;
+        let title = v.pointer("/tag/name").and_then(|t| t.as_str()).unwrap_or("").to_string();
+        let ids: Vec<String> = v
+            .get("ids")
+            .and_then(|i| i.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|x| Some(format!("{}:{}", s(x.get("uid"))?, s(x.get("kind"))?)))
+            .collect();
+        if ids.is_empty() {
+            return Ok((title, Vec::new()));
+        }
+        let v = self.get_raw(&format!("/playlists?resumeStream=false&playlistIds={}", ids.join(",")))?;
+        let cards = v
+            .get("playlists")
+            .and_then(|p| p.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|x| Some(Card { likes: x.get("likesCount").and_then(|l| l.as_u64()), ..playlist_card(&parse_playlist(x)?) }))
+            .collect();
+        Ok((title, cards))
+    }
+
     /// Вкладки «Смотреть всё» коллекции: block — playlists-liked-and-playlists-created или albums-liked-and-albums-presaved.
     pub fn collection_tabs(&self, block: &str) -> Res<Vec<(String, Vec<Card>)>> {
         let v = self.get_raw(&format!("/landing-blocks/collection/{block}?count=500"))?;
@@ -1308,6 +1343,19 @@ impl Api {
     pub fn artist_albums(&self, id: &str, path: &str) -> Res<Vec<Card>> {
         let v = self.get_raw(&format!("/artists/{id}/{path}?page=0&page-size=200&sort-by=year"))?;
         Ok(v.get("albums").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(parse_album).map(|a| album_card(&a)).collect()).unwrap_or_default())
+    }
+
+    pub fn label_albums(&self, id: &str, limit: usize, by_popularity: bool) -> Res<Vec<Card>> {
+        let page_size = limit.to_string();
+        let sort = if by_popularity { "rating" } else { "year" };
+        let v = self.get(&format!("/labels/{id}/albums"), &[("page", "0"), ("pageSize", &page_size), ("sortBy", sort), ("sortOrder", "desc")])?;
+        Ok(v.get("albums").and_then(Value::as_array).into_iter().flatten().filter_map(parse_album).map(|a| album_card(&a)).collect())
+    }
+
+    pub fn label_artists(&self, id: &str, limit: usize) -> Res<Vec<Card>> {
+        let page_size = limit.to_string();
+        let v = self.get(&format!("/labels/{id}/artists"), &[("page", "0"), ("pageSize", &page_size)])?;
+        Ok(v.get("artists").and_then(Value::as_array).into_iter().flatten().filter_map(parse_artist).map(|a| artist_card(&a)).collect())
     }
 
     pub fn similar_artists(&self, id: &str) -> Res<Vec<Card>> {
@@ -2006,6 +2054,25 @@ impl Api {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn album_label_link_requires_a_numeric_id() {
+        let mut data = serde_json::json!({
+            "id": 1, "title": "Album", "labels": [{"id": 12, "name": "Label"}]
+        });
+        for (id, expected) in [
+            (serde_json::json!(12), Some(12)),
+            (serde_json::json!("12"), Some(12)),
+            (Value::Null, None),
+            (serde_json::json!(0), None),
+            (serde_json::json!("12/other"), None),
+        ] {
+            data["labels"][0]["id"] = id;
+            let album = parse_album(&data).unwrap();
+            assert_eq!(album.label, "Label");
+            assert_eq!(album.label_id.map(NonZeroU64::get), expected);
+        }
+    }
 
     #[test]
     fn lrc() {

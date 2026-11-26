@@ -469,17 +469,29 @@ export component WavePage inherits Rectangle {
         reset => { App.reset-wave(); }
     }
 
-    // «Моя волна» без трека и на паузе — замер оригинала: 103 px в одну строку.
-    if !App.has-track || paused: Text {
+    // Сохраняем размер оригинала, пока заголовок помещается в одну строку.
+    if !App.has-track || paused: Rectangle {
         x: text-x;
         y: 171px + dt;
         width: text-w;
-        text: T.t("Моя волна");
-        horizontal-alignment: center;
-        font-family: "YS Music Headline";
-        font-size: 103px / App.ui-scale;
-        font-weight: 700;
-        color: #ffffff;
+        height: title.preferred-height;
+
+        title-metrics := Text {
+            visible: false;
+            text: T.t("Моя волна");
+            font-family: "YS Music Headline";
+            font-size: 103px / App.ui-scale;
+            font-weight: 700;
+        }
+        title := Text {
+            width: parent.width;
+            text: title-metrics.text;
+            horizontal-alignment: center;
+            font-family: title-metrics.font-family;
+            font-size: title-metrics.font-size * min(1, self.width / max(1px, title-metrics.preferred-width));
+            font-weight: title-metrics.font-weight;
+            color: #ffffff;
+        }
     }
 
     // Исполнитель крупно: клик открывает его страницу.
