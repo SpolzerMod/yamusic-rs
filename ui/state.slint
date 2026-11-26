@@ -273,6 +273,12 @@ export global App {
     in-out property <bool> wave-settings-open;
     in property <[string]> artist-list;
     in property <string> artists-longest;
+    // Фото исполнителя без фона для «Моей волны»: есть ли оно у трека и сама картинка, когда
+    // загрузится (низ уже растворён, как маской оригинала).
+    in property <bool> has-cutout;
+    in property <image> cutout;
+    // Раскладка волны сообщает, с какой доли высоты фото растворять его низ.
+    callback cutout-fade(float);
     // Фаза анимации пятна, секунды; идёт только во время игры на странице волны.
 
 

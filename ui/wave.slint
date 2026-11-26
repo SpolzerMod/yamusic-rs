@@ -143,10 +143,12 @@ component WheelSlot inherits Rectangle {
 
 // Заголовок волны: самый крупный размер от 104 до 48, при котором слова не рвутся
 // и текст влезает по высоте (не больше 4 строк), — как useDynamicText оригинала.
+// С фото исполнителя (`compact`) — от 64 до 24 и не больше двух строк (`iB` оригинала).
 component FitTitle inherits Rectangle {
     in property <string> text;
     in property <string> longest;
     in property <bool> link;
+    in property <bool> compact;
     callback clicked;
 
     property <length> w: root.width;
@@ -158,6 +160,9 @@ component FitTitle inherits Rectangle {
     p72 := Text { visible: false; width: w; text: root.text; wrap: word-wrap; font-family: "YS Music Headline"; font-weight: 700; font-size: 72px; }
     p64 := Text { visible: false; width: w; text: root.text; wrap: word-wrap; font-family: "YS Music Headline"; font-weight: 700; font-size: 64px; }
     p56 := Text { visible: false; width: w; text: root.text; wrap: word-wrap; font-family: "YS Music Headline"; font-weight: 700; font-size: 56px; }
+    p48 := Text { visible: false; width: w; text: root.text; wrap: word-wrap; font-family: "YS Music Headline"; font-weight: 700; font-size: 48px; }
+    p40 := Text { visible: false; width: w; text: root.text; wrap: word-wrap; font-family: "YS Music Headline"; font-weight: 700; font-size: 40px; }
+    p32 := Text { visible: false; width: w; text: root.text; wrap: word-wrap; font-family: "YS Music Headline"; font-weight: 700; font-size: 32px; }
     w104 := Text { visible: false; text: root.longest; font-family: "YS Music Headline"; font-weight: 700; font-size: 104px; }
     w96 := Text { visible: false; text: root.longest; font-family: "YS Music Headline"; font-weight: 700; font-size: 96px; }
     w88 := Text { visible: false; text: root.longest; font-family: "YS Music Headline"; font-weight: 700; font-size: 88px; }
@@ -165,16 +170,28 @@ component FitTitle inherits Rectangle {
     w72 := Text { visible: false; text: root.longest; font-family: "YS Music Headline"; font-weight: 700; font-size: 72px; }
     w64 := Text { visible: false; text: root.longest; font-family: "YS Music Headline"; font-weight: 700; font-size: 64px; }
     w56 := Text { visible: false; text: root.longest; font-family: "YS Music Headline"; font-weight: 700; font-size: 56px; }
+    w48 := Text { visible: false; text: root.longest; font-family: "YS Music Headline"; font-weight: 700; font-size: 48px; }
+    w40 := Text { visible: false; text: root.longest; font-family: "YS Music Headline"; font-weight: 700; font-size: 40px; }
+    w32 := Text { visible: false; text: root.longest; font-family: "YS Music Headline"; font-weight: 700; font-size: 32px; }
 
+    property <length> top: compact ? 64px : 104px;
+    property <length> bottom: compact ? 24px : 48px;
+    property <int> lines: compact ? 2 : 4;
+    pure function fits(word: length, text: length, s: length) -> bool {
+        return s <= top && s >= bottom && word <= w && text <= min(h, lines * s * 1.25);
+    }
     property <length> size:
-          w104.preferred-width <= w && p104.preferred-height <= min(h, 4 * 104px * 1.25) ? 104px
-        : w96.preferred-width <= w && p96.preferred-height <= min(h, 4 * 96px * 1.25) ? 96px
-        : w88.preferred-width <= w && p88.preferred-height <= min(h, 4 * 88px * 1.25) ? 88px
-        : w80.preferred-width <= w && p80.preferred-height <= min(h, 4 * 80px * 1.25) ? 80px
-        : w72.preferred-width <= w && p72.preferred-height <= min(h, 4 * 72px * 1.25) ? 72px
-        : w64.preferred-width <= w && p64.preferred-height <= min(h, 4 * 64px * 1.25) ? 64px
-        : w56.preferred-width <= w && p56.preferred-height <= min(h, 4 * 56px * 1.25) ? 56px
-        : 48px;
+          fits(w104.preferred-width, p104.preferred-height, 104px) ? 104px
+        : fits(w96.preferred-width, p96.preferred-height, 96px) ? 96px
+        : fits(w88.preferred-width, p88.preferred-height, 88px) ? 88px
+        : fits(w80.preferred-width, p80.preferred-height, 80px) ? 80px
+        : fits(w72.preferred-width, p72.preferred-height, 72px) ? 72px
+        : fits(w64.preferred-width, p64.preferred-height, 64px) ? 64px
+        : fits(w56.preferred-width, p56.preferred-height, 56px) ? 56px
+        : fits(w48.preferred-width, p48.preferred-height, 48px) ? 48px
+        : fits(w40.preferred-width, p40.preferred-height, 40px) ? 40px
+        : fits(w32.preferred-width, p32.preferred-height, 32px) ? 32px
+        : bottom;
 
     shown := Text {
         width: w;
@@ -418,6 +435,28 @@ export component WavePage inherits Rectangle {
     property <float> shown: drag-progress >= 0 ? drag-progress : progress;
     property <bool> tune-from-top;
 
+    // Фото исполнителя (`VibePage_artistCover`): занимает блок меты от заголовка до плашки
+    // плеера и прижато к его низу; надпись тогда уходит наверх, в полосу 64 px со сдвигом 16
+    // (`textContainer_withCover`). Фото нет при высоте контейнера `vibe-page` ≤ 640 px
+    // (`@container vibe-page (max-height: 640px)` → `VibePage_artistCover { display: none }`,
+    // `750797f00b76a063.css`); контейнер на 44 px ниже окна (32 сверху и 12 снизу), так что
+    // фото пропадает на окне ≤ 684 px.
+    property <bool> with-cutout: App.has-track && !paused && App.has-cutout && wh > 684px;
+    property <length> meta-top: title-y;
+    property <length> art-h: 496px + dp - meta-top;
+    // `VibeArtistCover_cover`: ширина min(100cqw, (100cqh − 16) · 5/4), соотношение 1,25,
+    // поле 16 сверху; картинка вписана в него целиком.
+    property <length> art-w: min(text-w, (art-h - 16px) * 1.25);
+    property <length> art-box: art-w / 1.25;
+    // Маска оригинала гаснет от 80% высоты блока до его низа; фото прижато к низу блока
+    // и занимает `art-box − 16`, отсюда начало растворения в долях высоты фото.
+    property <float> cutout-from: max(0, min(1, 1 - 0.2 * art-h / max(1px, art-box - 16px)));
+    changed cutout-from => {
+        if with-cutout {
+            App.cutout-fade(self.cutout-from);
+        }
+    }
+
     // Пятно: картинка оригинала, перекрашенная под трек. С движением медленно вращается,
     // дышит и плывёт; периоды взаимно простые, чтобы рисунок не повторялся.
     Image {
@@ -540,13 +579,40 @@ export component WavePage inherits Rectangle {
     // Исполнитель крупно: клик открывает его страницу.
     if App.has-track && !paused: FitTitle {
         x: text-x;
-        y: title-y;
+        // С фото: середина полосы 64 px, текст в две строки свисает за неё, как в оригинале.
+        y: with-cutout ? meta-top + 16px + 32px - self.height / 2 : title-y;
         width: text-w;
-        height: 382px + dp - title-y;
+        height: with-cutout ? 2 * 64px * 1.25 : 382px + dp - title-y;
+        compact: with-cutout;
         text: App.artists;
         longest: App.artists-longest;
         link: App.artist-list.length > 0;
         clicked => { App.open-current-artist(0); }
+    }
+
+    // Фото рисуется поверх надписи (в оригинале блок идёт после неё), под курсором растёт
+    // до 1,01 от нижнего края (`VibeArtistCover_root:hover`, ease-in-out).
+    if with-cutout: Rectangle {
+        init => { App.cutout-fade(root.cutout-from); }
+        x: text-x;
+        y: meta-top;
+        width: text-w;
+        height: art-h;
+        transform-origin: { x: self.width / 2, y: self.height };
+        transform-scale: art-ta.has-hover ? 1.01 : 1;
+        animate transform-scale { duration: App.motion ? Theme.duration-transition : 0ms; easing: ease-in-out; }
+        if App.cutout.width > 0: Image {
+            x: (parent.width - root.art-w) / 2;
+            y: parent.height - root.art-box + 16px;
+            width: root.art-w;
+            height: root.art-box - 16px;
+            source: App.cutout;
+            image-fit: contain;
+        }
+        art-ta := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { App.open-current-artist(0); }
+        }
     }
 
     // Обложка открывает альбом трека, а не плеер на весь экран.

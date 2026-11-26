@@ -78,6 +78,13 @@ struct State {
     history: Vec<(Page, Option<String>)>,
     forward: Vec<(Page, Option<String>)>,
     track_id: Option<String>,
+    /// Фото исполнителя для «Моей волны» как пришло; `cutout_gen` растёт с каждой сменой фото.
+    cutout_raw: Option<SharedPixelBuffer<Rgba8Pixel>>,
+    cutout_gen: u64,
+    /// С какой доли высоты фото растворять его низ — сообщает раскладка страницы волны.
+    cutout_from: Option<f32>,
+    /// Фото растворяется в фоне: следующий расчёт — когда закончится этот.
+    cutout_busy: bool,
     toast_timer: Option<Timer>,
     cards: HashMap<String, Vec<Card>>,
     search_shown: Option<Arc<Data>>,
@@ -233,6 +240,40 @@ impl Ctx {
         self.ui.upgrade().expect("окно живо")
     }
 
+    /// Растворить низ фото исполнителя под нынешнюю раскладку волны. Фото до 1000 px, а доля
+    /// меняется на каждом шаге перетаскивания края окна, поэтому считаем в фоне и по одному:
+    /// пока идёт расчёт, новые доли только запоминаются, а по готовности считается последняя.
+    fn fade_cutout_soon(&self) {
+        let (raw, from, gen) = {
+            let mut st = self.st.borrow_mut();
+            let (Some(raw), Some(from)) = (st.cutout_raw.clone(), st.cutout_from) else { return };
+            if st.cutout_busy {
+                return;
+            }
+            st.cutout_busy = true;
+            (raw, from, st.cutout_gen)
+        };
+        std::thread::spawn(move || {
+            let faded = fade_cutout(raw, from);
+            let _ = slint::invoke_from_event_loop(move || {
+                with_ctx(|c| {
+                    let (same, stale) = {
+                        let mut st = c.st.borrow_mut();
+                        st.cutout_busy = false;
+                        let same = st.cutout_gen == gen;
+                        (same, !same || st.cutout_from.is_some_and(|f| (f - from).abs() > 0.002))
+                    };
+                    if same {
+                        c.ui().global::<App>().set_cutout(Image::from_rgba8(faded));
+                    }
+                    if stale {
+                        c.fade_cutout_soon();
+                    }
+                })
+            });
+        });
+    }
+
     /// Ближайший размер обложки для `css` логических пикселей.
     fn size_for(&self, css: f32) -> u32 {
         // Ровно под экран: картинка 1:1 рисуется без сглаживания, а это вдвое быстрее.
@@ -359,6 +400,27 @@ impl Ctx {
                             if let Some(ui) = weak.upgrade() {
                                 ui.global::<App>().set_cover(img.clone());
                             }
+                        }
+                    })
+                });
+            }
+            // Фото исполнителя над названием в «Моей волне». Место под него раскладка держит
+            // сразу (`textContainer_withCover` оригинала), а картинка появляется, когда придёт.
+            app.set_cutout(Image::default());
+            {
+                let mut st = self.st.borrow_mut();
+                st.cutout_raw = None;
+                st.cutout_gen += 1;
+            }
+            let cutout = t.cutout_url();
+            app.set_has_cutout(cutout.is_some());
+            if let Some(url) = cutout {
+                let id = t.id.clone();
+                self.images.get(&url, 1000, move |img| {
+                    with_ctx(|c| {
+                        if c.st.borrow().track_id.as_deref() == Some(id.as_str()) {
+                            c.st.borrow_mut().cutout_raw = img.to_rgba8();
+                            c.fade_cutout_soon();
                         }
                     })
                 });
@@ -1989,6 +2051,10 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             history: Vec::new(),
             forward: Vec::new(),
             track_id: None,
+            cutout_raw: None,
+            cutout_gen: 0,
+            cutout_from: None,
+            cutout_busy: false,
             toast_timer: None,
             cards: HashMap::new(),
             search_shown: None,
@@ -2629,6 +2695,24 @@ fn vibe_bucket(c: Option<[u8; 3]>) -> &'static (&'static str, u16, u16, [u8; 3],
             .and_then(|(_, b)| by_name(b.0))
     };
     found.unwrap_or(fallback)
+}
+
+/// Растворить низ фото исполнителя. У оригинала это маска `VibeArtistCover_root`:
+/// `linear-gradient(180deg, #000 80%, transparent)` по высоте блока. Масок у Slint нет,
+/// поэтому прозрачность пишется в пиксели. `from` — где в долях высоты фото проходят 80%
+/// блока (считает `ui/wave.slint`), к низу фото прозрачность доходит до нуля.
+fn fade_cutout(mut buf: SharedPixelBuffer<Rgba8Pixel>, from: f32) -> SharedPixelBuffer<Rgba8Pixel> {
+    let from = from.clamp(0.0, 0.999);
+    let (w, h) = (buf.width() as usize, buf.height() as usize);
+    let pixels = buf.make_mut_slice();
+    for y in ((h as f32 * from) as usize).min(h)..h {
+        let v = (y as f32 + 0.5) / h as f32;
+        let k = ((1.0 - v) / (1.0 - from)).clamp(0.0, 1.0);
+        for p in &mut pixels[y * w..(y + 1) * w] {
+            p.a = (p.a as f32 * k).round() as u8;
+        }
+    }
+    buf
 }
 
 /// Режим наложения luminosity: оттенок фона, яркость картинки.
@@ -4634,6 +4718,16 @@ fn register_extra(app: &App) {
             }
         })
     });
+    app.on_cutout_fade(|from| {
+        with_ctx(|c| {
+            let old = c.st.borrow().cutout_from;
+            // Сдвиг меньше пикселя на фото не виден — не пересчитываем.
+            if old.is_none_or(|f| (f - from).abs() > 0.002) {
+                c.st.borrow_mut().cutout_from = Some(from);
+                c.fade_cutout_soon();
+            }
+        })
+    });
     app.on_open_current_artist(|i| {
         with_ctx(|c| {
             if let Some(a) = c.player.state().track.and_then(|t| t.artist_list.get(i.max(0) as usize).cloned()) {
@@ -4938,4 +5032,17 @@ fn download_cancellation_belongs_to_the_selected_list() {
     assert!(likes.stop_for("10", Some("playlist:10:3")).is_some());
     assert!(likes.stop_for("20", Some("likes")).is_none());
     assert!(likes.stop_for("10", Some("likes")).is_some());
+}
+
+#[cfg(test)]
+#[test]
+fn cutout_bottom_fades_to_transparent() {
+    let mut buf = SharedPixelBuffer::<Rgba8Pixel>::new(1, 10);
+    buf.make_mut_slice().fill(Rgba8Pixel { r: 9, g: 9, b: 9, a: 255 });
+    let out = fade_cutout(buf, 0.5);
+    let a: Vec<u8> = out.as_slice().iter().map(|p| p.a).collect();
+    // Выше начала растворения фото как было, дальше прозрачность к низу падает до нуля.
+    assert_eq!(a[..5], [255; 5]);
+    assert!(a[5..].windows(2).all(|w| w[0] > w[1]), "{a:?}");
+    assert!(a[9] < 30, "{a:?}");
 }

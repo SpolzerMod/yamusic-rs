@@ -41,8 +41,7 @@ pub struct Named {
     pub id: String,
     pub name: String,
     pub cover: Option<String>,
-    /// Фото без фона: телефон ставит его над названием трека в «Моей волне».
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    /// Фото без фона: его ставят над названием трека в «Моей волне».
     pub cutout: Option<String>,
 }
 
@@ -66,6 +65,9 @@ pub struct Track {
     pub artist_list: Vec<Named>,
     pub duration_ms: u64,
     pub cover: Option<String>,
+    /// Фото без фона, выпущенное к самому релизу (`cutoutCover` трека); есть не у всех.
+    #[cfg_attr(target_os = "android", allow(dead_code))]
+    pub cutout: Option<String>,
     pub explicit: bool,
     pub lyrics: bool,
     pub color: Option<[u8; 3]>,
@@ -117,6 +119,17 @@ impl Track {
 
     pub fn cover_url(&self, size: u32) -> Option<String> {
         self.cover.as_deref().map(|c| pic(c, size))
+    }
+
+    /// Фото над названием в «Моей волне», как у `VibePage` оригинала: только при главном
+    /// исполнителе (первом), сначала фото релиза, иначе фото этого исполнителя. Размер `orig`,
+    /// как у оригинала (`size: "orig"`): это кадр 5:4 с прозрачными краями, а квадратный
+    /// размер сервер обрезает по бокам.
+    #[cfg_attr(target_os = "android", allow(dead_code))]
+    pub fn cutout_url(&self) -> Option<String> {
+        let main = self.artist_list.first()?;
+        let uri = self.cutout.as_deref().or(main.cutout.as_deref())?;
+        Some(format!("https://{}", uri.trim_start_matches("https://").replace("%%", "orig")))
     }
 }
 
@@ -454,6 +467,7 @@ pub(crate) fn parse_track(v: &Value) -> Option<Track> {
         artist_list,
         duration_ms: v.get("durationMs").and_then(|d| d.as_u64()).unwrap_or(0),
         cover: v.get("coverUri").and_then(|c| c.as_str()).map(String::from),
+        cutout: v.pointer("/cutoutCover/uri").and_then(|c| c.as_str()).map(String::from),
         explicit: v.get("contentWarning").and_then(|c| c.as_str()) == Some("explicit")
             || v.get("explicit").and_then(|c| c.as_bool()).unwrap_or(false),
         lyrics: flag("hasAvailableSyncLyrics") || flag("hasAvailableTextLyrics"),
@@ -2150,5 +2164,18 @@ mod tests {
         assert!(!t("music").is_episode() && !t("music").is_chapter());
         let plain = parse_track(&json!({"id": 1, "title": "A"})).unwrap();
         assert!(!plain.is_episode() && !plain.is_chapter());
+    }
+
+    #[test]
+    fn cutout_like_vibe_page() {
+        let artist = json!({"id": 2, "name": "B", "cutoutCover": {"uri": "avatars.yandex.net/artist/%%"}});
+        // Сначала фото релиза, иначе фото главного исполнителя; размер orig.
+        let release = parse_track(&json!({"id": 1, "title": "A", "artists": [artist], "cutoutCover": {"uri": "avatars.yandex.net/release/%%"}})).unwrap();
+        assert_eq!(release.cutout_url().as_deref(), Some("https://avatars.yandex.net/release/orig"));
+        let own = parse_track(&json!({"id": 1, "title": "A", "artists": [artist]})).unwrap();
+        assert_eq!(own.cutout_url().as_deref(), Some("https://avatars.yandex.net/artist/orig"));
+        // Без главного исполнителя фото нет.
+        let none = parse_track(&json!({"id": 1, "title": "A", "cutoutCover": {"uri": "avatars.yandex.net/release/%%"}})).unwrap();
+        assert_eq!(none.cutout_url(), None);
     }
 }
