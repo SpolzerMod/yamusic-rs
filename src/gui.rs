@@ -1836,6 +1836,7 @@ fn set_icons(ui: &AppWindow, sprite: &Sprite) {
     icons.set_liked_m(get("liked_m"));
     icons.set_play_m(get("play_m"));
     icons.set_pause_m(get("pause_m"));
+    icons.set_shuffle_small(get("shuffle_xxs"));
     icons.set_repeat_small(get("repeat_xxs"));
     icons.set_repeat_one_small(get("repeat_one_xxs"));
     icons.set_users(get("users_xxxs"));
