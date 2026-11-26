@@ -504,6 +504,7 @@ impl Ctx {
                         st.view.clear();
                         drop(st);
                         self.tracks.set_vec(Vec::new());
+                        app.set_list_disks(ModelRc::default());
                         app.set_list_filter(SharedString::new());
                         app.set_list_edit(0);
                         app.set_list_desc_raw(SharedString::new());
@@ -913,6 +914,8 @@ impl Ctx {
             artist_names: ModelRc::from(Rc::new(VecModel::from(
                 t.artist_list.iter().map(|a| SharedString::from(a.name.as_str())).collect::<Vec<_>>(),
             ))),
+            shift: 0,
+            num: 0,
         }
     }
 
@@ -1103,10 +1106,31 @@ impl Ctx {
             .filter(|(_, t)| matches_track_filter(t, &q))
             .map(|(i, _)| i)
             .collect();
-        let items: Vec<TrackItem> = view
+        let mut items: Vec<TrackItem> = view
             .iter()
             .map(|&i| self.track_item(&l.tracks[i]))
             .collect();
+        // «Диск N» — строка той же высоты, что и трек, поэтому строка трека сдвигается на число
+        // заголовков над ней, а счёт треков после заголовка идёт снова с 1. Только когда видны
+        // все треки: поиска по альбому нет.
+        let mut heads: Vec<DiskRow> = Vec::new();
+        if l.kind == ListKind::Album && view.len() == l.tracks.len() {
+            // «Сезон N» у подкаста и книги (`isNonMusic` оригинала).
+            let season = l.album.as_ref().is_some_and(|a| matches!(a.kind.as_str(), "podcast" | "audiobook" | "fairy-tale"));
+            let word = crate::i18n::tr(if season { "Сезон {number}" } else { "Диск {number}" });
+            let mut start = 0;
+            for (row, (item, t)) in items.iter_mut().zip(&l.tracks).enumerate() {
+                if let Some(n) = t.disk {
+                    heads.push(DiskRow { slot: (row + heads.len()) as i32, text: word.replace("{number}", &n.to_string()).into() });
+                    start = row;
+                }
+                if !heads.is_empty() {
+                    item.shift = heads.len() as i32;
+                    item.num = (row - start + 1) as i32;
+                }
+            }
+        }
+        self.ui().global::<App>().set_list_disks(ModelRc::from(Rc::new(VecModel::from(heads))));
         self.st.borrow_mut().view = view;
         self.tracks.set_vec(items);
         self.update_list_current();
@@ -4219,6 +4243,7 @@ impl Ctx {
                 st.view.clear();
                 drop(st);
                 self.tracks.set_vec(Vec::new());
+                app.set_list_disks(ModelRc::default());
                 app.set_list_cover(Image::default());
                 app.set_list_artist_cover(Image::default());
             }

@@ -80,6 +80,8 @@ pub struct Track {
     pub mood: Option<Mood>,
     /// `type` трека: music, podcast-episode, audiobook, fairy-tale… Пусто — music.
     pub kind: String,
+    /// Первый трек тома в альбоме из нескольких томов: номер диска для заголовка «Диск N».
+    pub disk: Option<u32>,
 }
 
 /// `trackParameters` из ответа API.
@@ -464,7 +466,27 @@ pub(crate) fn parse_track(v: &Value) -> Option<Track> {
         batch_id: String::new(),
         mood: mood_of(v),
         kind: str_of(v, "type"),
+        disk: None,
     })
+}
+
+/// Треки всех томов альбома одним списком. Как `makeFlatVolumeItems` оригинала: заголовок
+/// «Диск N» стоит перед каждым томом, только если томов больше одного; номер —
+/// `albums[0].trackPosition.volume` первого трека тома.
+fn album_tracks(v: &Value) -> Vec<Track> {
+    let vols: Vec<&Vec<Value>> = v.get("volumes").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_array).collect();
+    let mut tracks: Vec<Track> = Vec::new();
+    for (k, vol) in vols.iter().enumerate() {
+        let start = tracks.len();
+        tracks.extend(vol.iter().filter_map(parse_track));
+        if vols.len() > 1 {
+            if let Some(first) = tracks.get_mut(start) {
+                let number = vol.first().and_then(|t| t.pointer("/albums/0/trackPosition/volume")).and_then(Value::as_u64);
+                first.disk = Some(number.map_or(k as u32 + 1, |n| n as u32));
+            }
+        }
+    }
+    tracks
 }
 
 fn mood_of(v: &Value) -> Option<Mood> {
@@ -1759,12 +1781,7 @@ impl Api {
     pub fn album(&self, id: &str) -> Res<(Album, Vec<Track>)> {
         let v = self.get(&format!("/albums/{id}/with-tracks"), &[])?;
         let album = parse_album(&v).ok_or("нет данных об альбоме")?;
-        let tracks = v
-            .get("volumes")
-            .and_then(|x| x.as_array())
-            .map(|vols| vols.iter().filter_map(|d| d.as_array()).flatten().filter_map(parse_track).collect())
-            .unwrap_or_default();
-        Ok((album, tracks))
+        Ok((album, album_tracks(&v)))
     }
 
     pub fn playlist(&self, uid: &str, kind: &str) -> Res<(Playlist, Vec<Track>)> {
@@ -2138,6 +2155,20 @@ mod tests {
         assert!(parse_credits(&json!({})).is_empty());
         assert_eq!(plain_text("<p>Гость &laquo;А&raquo;</p><p>Ведущие: <b>Б</b> &amp; В<br/>Слушайте</p>"), "Гость «А»\nВедущие: Б & В\nСлушайте");
         assert_eq!(plain_text("просто текст"), "просто текст");
+    }
+
+    #[test]
+    fn album_disks() {
+        let disks = |v: Value| album_tracks(&v).iter().map(|t| t.disk).collect::<Vec<_>>();
+        let t = |id: u32, vol: u32| json!({"id": id, "title": "t", "albums": [{"id": 1, "trackPosition": {"volume": vol, "index": 1}}]});
+        // Один том — без заголовков.
+        assert_eq!(disks(json!({"volumes": [[t(1, 1), t(2, 1)]]})), vec![None, None]);
+        assert_eq!(disks(json!({"volumes": [[t(1, 1), t(2, 1)], [t(3, 2)], [t(4, 3), t(5, 3)]]})), vec![Some(1), None, Some(2), Some(3), None]);
+        // Сезоны подкаста идут с последнего: номер берётся из `trackPosition.volume`.
+        assert_eq!(disks(json!({"volumes": [[t(1, 3)], [t(2, 2), t(3, 2)], [t(4, 1)]]})), vec![Some(3), Some(2), None, Some(1)]);
+        // Без `trackPosition` — номер тома по порядку; пустой том заголовка не получает.
+        let bare = |id: u32| json!({"id": id, "title": "t"});
+        assert_eq!(disks(json!({"volumes": [[bare(1)], [], [bare(2)]]})), vec![Some(1), Some(3)]);
     }
 
     #[test]

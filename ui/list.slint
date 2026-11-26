@@ -62,14 +62,19 @@ component ListContent inherits TouchArea {
     property <length> rows-y: album ? buttons-y + 94px : search-y + 57px;
     property <length> row-x: playlist && App.list-own ? pad + 12px : pad;
     property <length> row-h: 56px;
+    // Заголовки «Диск N» — строки той же высоты между треками.
+    property <int> disk-rows: App.list-disks.length;
     // Flickable передаёт нажатие с задержкой, поэтому строку под курсором определяем по координатам.
+    // Номер строки считая заголовки дисков: у трека это idx + shift.
     property <int> hovered-row: self.has-hover && self.mouse-x >= row-x && self.mouse-x < self.width - 33px
         ? floor((self.mouse-y - flick.content-y - rows-y) / row-h) : -1;
 
     flick := Flickable {
-        content-height: rows-y + App.tracks.length * row-h + (album && App.list-label != "" ? 80px : 32px);
-        property <int> first: max(0, floor((-self.content-y - rows-y) / row-h));
-        property <int> shown-rows: min(App.tracks.length - first, ceil(self.height / row-h) + 2);
+        content-height: rows-y + (App.tracks.length + disk-rows) * row-h + (album && App.list-label != "" ? 80px : 32px);
+        // Заголовки дисков выше первого видимого трека сдвигают его вниз: берём с запасом на их
+        // число и рисуем на столько же строк больше.
+        property <int> first: max(0, floor((-self.content-y - rows-y) / row-h) - disk-rows);
+        property <int> shown-rows: min(App.tracks.length - first, ceil(self.height / row-h) + 2 + disk-rows);
 
         Rectangle {
             y: 0;
@@ -405,11 +410,28 @@ component ListContent inherits TouchArea {
             }
         }
 
+        // «Диск N», как `TextVolume_root` оригинала: строка высотой с трек
+        // (`--album-page-track-height`), текст прижат к низу с отступом 16 и сдвинут на 8 слева;
+        // шрифт `CommonAlbumPage_text` — label-m, 500, цвет `primary-text-enabled_variant`.
+        for d in App.list-disks: Text {
+            x: row-x + 8px;
+            y: rows-y + d.slot * row-h + row-h - 16px - Theme.font-line-height-label-m;
+            width: parent.width - row-x - 33px - 8px;
+            height: Theme.font-line-height-label-m;
+            text: d.text;
+            overflow: elide;
+            vertical-alignment: center;
+            font-size: Theme.font-size-label-m;
+            font-weight: 500;
+            color: Theme.controls-color-primary-text-enabled-variant;
+        }
+
         for k in max(0, shown-rows): Rectangle {
             property <int> idx: flick.first + k;
             property <string> track-id: App.tracks[idx].id;
+            property <int> slot: idx + App.tracks[idx].shift;
             x: row-x;
-            y: rows-y + idx * row-h;
+            y: rows-y + slot * row-h;
             width: parent.width - row-x - 33px;
             height: row-h;
             init => { App.request-cover(idx); }
@@ -417,7 +439,7 @@ component ListContent inherits TouchArea {
             changed track-id => { App.request-cover(idx); }
             if !album: TrackRow {
                 width: parent.width;
-                hot: idx == root.hovered-row;
+                hot: parent.slot == root.hovered-row;
                 item: App.tracks[idx];
                 block: "list";
                 index: idx;
@@ -429,10 +451,11 @@ component ListContent inherits TouchArea {
             }
             if album: AlbumTrackRow {
                 width: parent.width;
-                hot: idx == root.hovered-row;
+                hot: parent.slot == root.hovered-row;
                 item: App.tracks[idx];
                 current: idx == App.list-current;
-                pos: idx + 1;
+                // После заголовка «Диск N» счёт снова с 1.
+                pos: App.tracks[idx].num > 0 ? App.tracks[idx].num : idx + 1;
                 block: "list";
                 index: idx;
                 play => { App.play-list(idx); }
@@ -443,7 +466,7 @@ component ListContent inherits TouchArea {
         if album && App.list-label != "": HorizontalLayout {
             x: pad;
             width: self.preferred-width;
-            y: rows-y + App.tracks.length * row-h + 24px;
+            y: rows-y + (App.tracks.length + disk-rows) * row-h + 24px;
             height: 21px;
             spacing: 3px;
             Text { text: T.t("Лейбл:"); font-size: Theme.font-size-label-s; color: Theme.controls-color-primary-text-enabled; vertical-alignment: center; }

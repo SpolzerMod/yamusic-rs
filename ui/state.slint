@@ -19,6 +19,16 @@ export struct TrackItem {
     explicit: bool,
     available: bool,
     artist-names: [string],
+    // Альбом из нескольких дисков: сколько заголовков «Диск N» выше строки (на столько строк
+    // она ниже) и номер трека внутри диска; 0 — номер по порядку списка.
+    shift: int,
+    num: int,
+}
+
+// Заголовок «Диск N» («Сезон N» у подкаста) в списке альбома: место среди строк и текст.
+export struct DiskRow {
+    slot: int,
+    text: string,
 }
 
 export struct PinItem {
@@ -305,6 +315,7 @@ export global App {
     in property <image> list-artist-cover;
     in property <color> list-tint: #00000000;
     in property <[TrackItem]> tracks;
+    in property <[DiskRow]> list-disks;
     in property <bool> list-loading;
     in property <int> list-current: -1;
     in-out property <string> list-filter;
