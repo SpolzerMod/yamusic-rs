@@ -143,6 +143,21 @@ pub fn scale(w: &slint::Window) -> f32 {
     dpi_scale(handle(w))
 }
 
+/// Сколько логических пикселей даёт щелчок колёсика — как у Chromium оригинала
+/// (`WebMouseWheelEventBuilder`): 100/3 px на строку, строк за щелчок — из настройки Windows
+/// (по умолчанию 3, то есть 100 px), по горизонтали — знаков за щелчок (по умолчанию 1).
+/// `None` при настройке «на один экран»: Chromium тогда листает страницами, здесь шаг остаётся
+/// шагом Slint.
+pub fn wheel_px(horizontal: bool) -> Option<f32> {
+    let (action, default) = if horizontal { (SPI_GETWHEELSCROLLCHARS, 1) } else { (SPI_GETWHEELSCROLLLINES, 3) };
+    let mut n: u32 = default;
+    if unsafe { SystemParametersInfoW(action, 0, &mut n as *mut u32 as *mut c_void, 0) } == 0 {
+        n = default;
+    }
+    // WHEEL_PAGESCROLL
+    (n != u32::MAX).then(|| n as f32 * 100.0 / 3.0)
+}
+
 pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }

@@ -1399,7 +1399,6 @@ fn full_repaint(ui: &AppWindow) {
     });
 }
 
-#[cfg(target_os = "linux")]
 thread_local! {
     static LAST_CURSOR: std::cell::Cell<slint::LogicalPosition> = const { std::cell::Cell::new(slint::LogicalPosition::new(0.0, 0.0)) };
 }
@@ -2363,9 +2362,21 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
                 let p = position.to_logical::<f32>(_w.scale_factor() as f64);
                 let p = slint::LogicalPosition::new(p.x, p.y);
                 keys::set_cursor(p);
-                #[cfg(target_os = "linux")]
                 LAST_CURSOR.set(p);
                 EventResult::Propagate
+            }
+            // Slint даёт 60 px на щелчок колёсика при любой настройке системы, а Chromium
+            // оригинала — столько, сколько задано в Windows (sys::wheel_px).
+            WindowEvent::MouseWheel { delta: winit::event::MouseScrollDelta::LineDelta(lx, ly), .. } => {
+                let Some(k) = sys::wheel_px(*lx != 0.0) else {
+                    return EventResult::Propagate;
+                };
+                _w.dispatch_event(slint::platform::WindowEvent::PointerScrolled {
+                    position: LAST_CURSOR.get(),
+                    delta_x: lx * k,
+                    delta_y: ly * k,
+                });
+                EventResult::PreventDefault
             }
             WindowEvent::ModifiersChanged(m) => {
                 keys::set_modifiers(m.state());

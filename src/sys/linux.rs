@@ -59,6 +59,11 @@ pub fn scale(w: &slint::Window) -> f32 {
     w.with_winit_window(|w| w.scale_factor() as f32).unwrap_or(1.0)
 }
 
+/// Общей настройки «строк за щелчок колёсика» нет: шаг остаётся шагом Slint.
+pub fn wheel_px(_horizontal: bool) -> Option<f32> {
+    None
+}
+
 /// Монитор с окном целиком: панели окружения winit не знает. На Wayland монитор
 /// бывает неизвестен — тогда отсчёт от размера окна.
 pub fn work_area(w: &slint::Window) -> (i32, i32, i32, i32) {
