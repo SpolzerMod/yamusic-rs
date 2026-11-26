@@ -5,6 +5,7 @@ use crate::api::Track;
 use crate::config::log;
 use crate::player::{Player, Status};
 use serde_json::{json, Value};
+use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -15,6 +16,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub const APP_ID: &str = "1570815647133474856";
 /// Ссылка второй кнопки статуса.
 const PROJECT_URL: &str = env!("CARGO_PKG_REPOSITORY");
+/// Discord принимает не больше 5 обновлений статуса за 20 секунд.
+const RATE_MAX: usize = 5;
+const RATE_WINDOW: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Default)]
 pub struct DiscordCfg {
@@ -54,6 +58,20 @@ fn open_pipe(i: u32) -> Option<Pipe> {
 
 fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+/// Отмечает отправку в лимите Discord: 5 обновлений за 20 секунд. false — лимит исчерпан,
+/// отправку лучше повторить на следующем круге, а не терять.
+fn take_slot(sends: &mut VecDeque<Instant>) -> bool {
+    let now = Instant::now();
+    while sends.front().is_some_and(|t| now.duration_since(*t) >= RATE_WINDOW) {
+        sends.pop_front();
+    }
+    if sends.len() >= RATE_MAX {
+        return false;
+    }
+    sends.push_back(now);
+    true
 }
 
 impl Conn {
@@ -199,6 +217,8 @@ impl Discord {
         let mut display_type_ok = true;
         // Discord отклонил саму активность: не долбим его одной и той же ошибкой каждую секунду.
         let mut retry_at = Instant::now();
+        // Отправки за последние 20 секунд: Discord принимает не больше пяти.
+        let mut sends: VecDeque<Instant> = VecDeque::new();
         loop {
             thread::sleep(Duration::from_secs(1));
             let cfg = self.cfg.lock().unwrap().clone();
@@ -229,6 +249,7 @@ impl Discord {
                     Ok(c) => {
                         conn = Some(c);
                         shown = None;
+                        sends.clear(); // у нового соединения свежий лимит
                         self.set_status("Подключено, статус отправлен");
                     }
                     Err(e) => {
@@ -250,7 +271,9 @@ impl Discord {
                         Some((id, st)) => *id != t.id || (st - start).abs() > 3000, // новый трек или перемотка
                         None => true,
                     };
-                    if !changed || Instant::now() < retry_at {
+                    // Лимит Discord исчерпан или прошлый отказ: подождём следующий круг,
+                    // трек не потеряется.
+                    if !changed || Instant::now() < retry_at || !take_slot(&mut sends) {
                         Ok(())
                     } else {
                         let mut r = c.set_activity(activity(&t, start, end, display_type_ok));
@@ -278,8 +301,12 @@ impl Discord {
                     }
                 }
                 None if shown.is_some() => {
-                    shown = None;
-                    c.set_activity(Value::Null).map(|_| ())
+                    if !take_slot(&mut sends) {
+                        Ok(())
+                    } else {
+                        shown = None;
+                        c.set_activity(Value::Null).map(|_| ())
+                    }
                 }
                 None => Ok(()),
             };
