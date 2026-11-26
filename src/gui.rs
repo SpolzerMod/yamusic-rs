@@ -2707,6 +2707,15 @@ fn track_link(t: &Track) -> String {
     }
 }
 
+/// Подпись плеера плейлиста: ссылка на него и на владельца. Без имени или логина владельца
+/// оригинал оставляет подпись пустой.
+fn owner_link(link: &str, name: &str, login: &str) -> String {
+    if name.is_empty() || login.is_empty() {
+        return String::new();
+    }
+    format!("{link} — <a href=\"https://music.yandex.ru/users/{login}\">{name}</a>")
+}
+
 /// Код для вставки плеера на сайт, как в окне «HTML-код» оригинала.
 fn iframe_code(path: &str, w: u32, h: u32, link: &str) -> String {
     format!(
@@ -3625,7 +3634,25 @@ impl Ctx {
             _ => (format!("users/{uid}/playlists/3"), format!("playlist/{uid}/3")),
         };
         let url = format!("https://music.yandex.ru/{page}");
-        Some(if html { iframe_code(&frame, 614, 450, &format!("<a href=\"{url}\">{}</a>", l.title)) } else { url })
+        if !html {
+            return Some(url);
+        }
+        // Подпись — `setListenMessage` оригинала: у альбома после названия ссылка на первого
+        // исполнителя (у сборника — ничего), у плейлиста — на владельца, а без имени или логина
+        // владельца подпись пустая. Размер 614 × 556 — `dm` оригинала.
+        let link = format!("<a href=\"{url}\">{}</a>", l.title);
+        let msg = match (&l.playlist, &l.album) {
+            (Some(p), _) => owner_link(&link, &p.owner, &p.login),
+            (_, Some(a)) => match a.artist_list.first().filter(|n| !n.various) {
+                Some(n) => format!("{link} — <a href=\"https://music.yandex.ru/artist/{}\">{}</a>", n.id, n.name),
+                None => link,
+            },
+            _ => {
+                let ui = self.ui();
+                owner_link(&link, &ui.global::<App>().get_login(), &self.player.state().login)
+            }
+        };
+        Some(iframe_code(&frame, 614, 556, &msg))
     }
 
     fn open_artist_menu(self: &Rc<Self>, x: f32, y: f32) {
@@ -4938,4 +4965,17 @@ fn download_cancellation_belongs_to_the_selected_list() {
     assert!(likes.stop_for("10", Some("playlist:10:3")).is_some());
     assert!(likes.stop_for("20", Some("likes")).is_none());
     assert!(likes.stop_for("10", Some("likes")).is_some());
+}
+
+#[cfg(test)]
+#[test]
+fn playlist_embed_caption_needs_owner() {
+    let link = "<a href=\"https://music.yandex.ru/users/ya/playlists/7\">Лето</a>";
+    assert_eq!(
+        iframe_code("playlist/ya/7", 614, 556, &owner_link(link, "Яна", "ya")),
+        "<iframe frameborder=\"0\" allow=\"clipboard-write\" style=\"border:none;width:614px;height:556px;\" width=\"614\" height=\"556\" src=\"https://music.yandex.ru/iframe/playlist/ya/7\">Слушайте <a href=\"https://music.yandex.ru/users/ya/playlists/7\">Лето</a> — <a href=\"https://music.yandex.ru/users/ya\">Яна</a> на Яндекс Музыке</iframe>"
+    );
+    // Как у оригинала: без владельца подпись пустая, остаётся только «Слушайте  на Яндекс Музыке».
+    assert_eq!(owner_link(link, "", "ya"), "");
+    assert_eq!(owner_link(link, "Яна", ""), "");
 }

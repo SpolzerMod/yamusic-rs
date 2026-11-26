@@ -44,6 +44,9 @@ pub struct Named {
     /// Фото без фона: телефон ставит его над названием трека в «Моей волне».
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub cutout: Option<String>,
+    /// «Сборник» вместо исполнителя.
+    #[cfg_attr(target_os = "android", allow(dead_code))]
+    pub various: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -384,6 +387,7 @@ fn artists_of(v: &Value) -> Vec<Named> {
                         name: x.get("name")?.as_str()?.to_string(),
                         cover: x.pointer("/cover/uri").and_then(|u| u.as_str()).map(String::from),
                         cutout: x.pointer("/cutoutCover/uri").and_then(|u| u.as_str()).map(String::from),
+                        various: x.get("various").and_then(|v| v.as_bool()).unwrap_or(false),
                     })
                 })
                 .collect()
