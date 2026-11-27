@@ -1073,6 +1073,72 @@ fn xml_tag<'a>(xml: &'a str, name: &str) -> Res<&'a str> {
     Ok(&xml[start..end])
 }
 
+/// Прямая ссылка `get-mp3` из XML download-info.
+fn direct_mp3(xml: &str) -> Res<String> {
+    let host = xml_tag(xml, "host")?;
+    let path = xml_tag(xml, "path")?;
+    let ts = xml_tag(xml, "ts")?;
+    let sg = xml_tag(xml, "s")?;
+    let digest = Md5::digest(format!("{MP3_SALT}{}{sg}", path.get(1..).unwrap_or("")).as_bytes());
+    let hash: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    Ok(format!("https://{host}/get-mp3/{hash}/{ts}{path}"))
+}
+
+/// Какой вариант download-info уже играет: докачка ищет его, а не выбирает качество заново.
+#[derive(PartialEq, Eq)]
+struct VariantKey {
+    codec: String,
+    bitrate: u64,
+    preview: bool,
+}
+
+fn variant_key(x: &Value) -> VariantKey {
+    VariantKey {
+        codec: x.get("codec").and_then(|c| c.as_str()).unwrap_or("mp3").to_string(),
+        bitrate: x.get("bitrateInKbps").and_then(|b| b.as_u64()).unwrap_or(0),
+        preview: x.get("preview").and_then(|p| p.as_bool()).unwrap_or(false),
+    }
+}
+
+fn find_variant<'a>(arr: &'a [Value], key: &VariantKey) -> Option<&'a Value> {
+    arr.iter().find(|x| variant_key(x) == *key)
+}
+
+/// Вариант под текущее качество: 0 — максимальный mp3, 1 — mp3 до 192, 2 — минимальный mp3.
+fn pick_variant(arr: &[Value], quality: u8) -> Option<&Value> {
+    let rank = |x: &&Value| {
+        (
+            !x.get("preview").and_then(|p| p.as_bool()).unwrap_or(false),
+            x.get("bitrateInKbps").and_then(|b| b.as_u64()).unwrap_or(0),
+        )
+    };
+    let mp3 = || arr.iter().filter(|x| x.get("codec").and_then(|c| c.as_str()) == Some("mp3"));
+    let full = |x: &&Value| !x.get("preview").and_then(|p| p.as_bool()).unwrap_or(false);
+    let bitrate = |x: &&Value| x.get("bitrateInKbps").and_then(|b| b.as_u64()).unwrap_or(0);
+    match quality {
+        2 => mp3().filter(full).min_by_key(bitrate),
+        1 => mp3().filter(full).filter(|x| bitrate(x) <= 192).max_by_key(bitrate),
+        _ => None,
+    }
+    .or_else(|| mp3().max_by_key(rank))
+    .or_else(|| arr.iter().max_by_key(rank))
+}
+
+/// Прямая ссылка на аудио и его формат («MP3 320»).
+/// Поле для повторной подписи скрыто: его читает только [`Api::stream_again`].
+pub struct StreamUrl {
+    pub url: String,
+    pub format: String,
+    again: Again,
+}
+
+enum Again {
+    /// Тот же вариант download-info.
+    Variant(VariantKey),
+    /// get-file-info с тем же качеством и одним кодеком.
+    File { quality: &'static str, codec: String },
+}
+
 fn short(s: &str) -> String {
     s.chars().take(200).collect()
 }
@@ -2107,14 +2173,42 @@ impl Api {
     // ---------- аудио ----------
 
     /// Прямая ссылка на аудио и его формат («MP3 320»): сначала download-info (mp3 до 320),
-    /// потом get-file-info.
-    pub fn stream_url(&self, track_id: &str) -> Res<(String, String)> {
+    /// потом get-file-info. Для докачки с середины — [`Self::stream_again`]: подпись живёт
+    /// недолго, но вариант файла остаётся тот, с которого загрузка началась.
+    pub fn stream_url(&self, track_id: &str) -> Res<StreamUrl> {
         match self.stream_url_legacy(track_id) {
             Ok(u) => Ok(u),
             Err(e1) => self
                 .file_info(track_id, "nq", "mp3,aac,he-aac")
-                .map(|(codec, u)| (u, codec.replace("he-", "HE-").to_uppercase()))
+                .map(|(codec, url)| StreamUrl {
+                    format: codec.replace("he-", "HE-").to_uppercase(),
+                    url,
+                    again: Again::File { quality: "nq", codec },
+                })
                 .map_err(|e2| format!("download-info: {e1}; get-file-info: {e2}")),
+        }
+    }
+
+    /// Новая подпись того же файла, что у `link`. Качество из настроек здесь не читается:
+    /// пока трек качался, его могли сменить, и продолжение с середины другого файла
+    /// сломало бы уже скачанное.
+    pub fn stream_again(&self, track_id: &str, link: &StreamUrl) -> Res<String> {
+        match &link.again {
+            Again::Variant(key) => {
+                let v = self.get(&format!("/tracks/{track_id}/download-info"), &[])?;
+                let arr = v.as_array().ok_or("пустой download-info")?;
+                let pick = find_variant(arr, key).ok_or("вариант файла больше не отдаётся")?;
+                let info_url = pick.get("downloadInfoUrl").and_then(|u| u.as_str()).ok_or("нет downloadInfoUrl")?;
+                self.mp3_from_info(info_url)
+            }
+            Again::File { quality, codec } => {
+                let codecs = if codec.is_empty() { "mp3,aac,he-aac" } else { codec.as_str() };
+                let (got, url) = self.file_info(track_id, quality, codecs)?;
+                if !codec.is_empty() && !got.eq_ignore_ascii_case(codec) {
+                    return Err(format!("докачка получила кодек {got}"));
+                }
+                Ok(url)
+            }
         }
     }
 
@@ -2124,32 +2218,22 @@ impl Api {
         Ok(codec.starts_with("flac").then_some(url))
     }
 
-    fn stream_url_legacy(&self, track_id: &str) -> Res<(String, String)> {
+    fn stream_url_legacy(&self, track_id: &str) -> Res<StreamUrl> {
         let v = self.get(&format!("/tracks/{track_id}/download-info"), &[])?;
         let arr = v.as_array().ok_or("пустой download-info")?;
-        let key = |x: &&Value| {
-            (
-                !x.get("preview").and_then(|p| p.as_bool()).unwrap_or(false),
-                x.get("bitrateInKbps").and_then(|b| b.as_u64()).unwrap_or(0),
-            )
-        };
-        let mp3 = || arr.iter().filter(|x| x.get("codec").and_then(|c| c.as_str()) == Some("mp3"));
-        let full = |x: &&Value| !x.get("preview").and_then(|p| p.as_bool()).unwrap_or(false);
-        let bitrate = |x: &&Value| x.get("bitrateInKbps").and_then(|b| b.as_u64()).unwrap_or(0);
-        let pick = match QUALITY.load(std::sync::atomic::Ordering::Relaxed) {
-            2 => mp3().filter(full).min_by_key(bitrate),
-            1 => mp3().filter(full).filter(|x| bitrate(x) <= 192).max_by_key(bitrate),
-            _ => None,
-        }
-        .or_else(|| mp3().max_by_key(key))
-        .or_else(|| arr.iter().max_by_key(key))
-        .ok_or("нет вариантов загрузки")?;
-        let codec = pick.get("codec").and_then(|c| c.as_str()).unwrap_or("mp3").to_uppercase();
-        let format = match bitrate(&pick) {
+        let pick = pick_variant(arr, QUALITY.load(std::sync::atomic::Ordering::Relaxed)).ok_or("нет вариантов загрузки")?;
+        let key = variant_key(pick);
+        let codec = key.codec.to_uppercase();
+        let format = match key.bitrate {
             0 => codec,
             kbps => format!("{codec} {kbps}"),
         };
         let info_url = pick.get("downloadInfoUrl").and_then(|u| u.as_str()).ok_or("нет downloadInfoUrl")?;
+        Ok(StreamUrl { url: self.mp3_from_info(info_url)?, format, again: Again::Variant(key) })
+    }
+
+    /// XML одного варианта download-info → прямая ссылка.
+    fn mp3_from_info(&self, info_url: &str) -> Res<String> {
         if !reqwest::Url::parse(info_url).is_ok_and(|u| token_allowed(&u)) {
             return Err("download-info: адрес не на сервере Яндекса".into());
         }
@@ -2157,13 +2241,7 @@ impl Api {
         if !status.is_success() {
             return Err(format!("download-info HTTP {status}"));
         }
-        let host = xml_tag(&xml, "host")?;
-        let path = xml_tag(&xml, "path")?;
-        let ts = xml_tag(&xml, "ts")?;
-        let sg = xml_tag(&xml, "s")?;
-        let digest = Md5::digest(format!("{MP3_SALT}{}{sg}", path.get(1..).unwrap_or("")).as_bytes());
-        let hash: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-        Ok((format!("https://{host}/get-mp3/{hash}/{ts}{path}"), format))
+        direct_mp3(&xml)
     }
 
     /// Кодек и ссылка из get-file-info.
@@ -2383,5 +2461,43 @@ mod tests {
         // Без главного исполнителя фото нет.
         let none = parse_track(&json!({"id": 1, "title": "A", "cutoutCover": {"uri": "avatars.yandex.net/release/%%"}})).unwrap();
         assert_eq!(none.cutout_url(), None);
+    }
+
+    fn variants() -> Vec<Value> {
+        vec![
+            json!({"codec": "mp3", "bitrateInKbps": 320, "preview": true, "downloadInfoUrl": "https://storage.mds.yandex.net/preview"}),
+            json!({"codec": "mp3", "bitrateInKbps": 64, "preview": false, "downloadInfoUrl": "https://storage.mds.yandex.net/low"}),
+            json!({"codec": "mp3", "bitrateInKbps": 192, "preview": false, "downloadInfoUrl": "https://storage.mds.yandex.net/mid"}),
+            json!({"codec": "mp3", "bitrateInKbps": 320, "preview": false, "downloadInfoUrl": "https://storage.mds.yandex.net/high"}),
+        ]
+    }
+
+    #[test]
+    fn quality_picks_bitrate_and_resume_keeps_that_variant() {
+        let arr = variants();
+        assert_eq!(pick_variant(&arr, 0).unwrap()["downloadInfoUrl"], "https://storage.mds.yandex.net/high");
+        assert_eq!(pick_variant(&arr, 1).unwrap()["downloadInfoUrl"], "https://storage.mds.yandex.net/mid");
+        assert_eq!(pick_variant(&arr, 2).unwrap()["downloadInfoUrl"], "https://storage.mds.yandex.net/low");
+        let key = variant_key(pick_variant(&arr, 0).unwrap());
+        // Список пришёл в другом порядке, в настройках уже другое качество.
+        let later = [
+            json!({"codec": "mp3", "bitrateInKbps": 64, "preview": false, "downloadInfoUrl": "https://storage.mds.yandex.net/low-2"}),
+            json!({"codec": "mp3", "bitrateInKbps": 320, "preview": false, "downloadInfoUrl": "https://storage.mds.yandex.net/high-2"}),
+            json!({"codec": "aac", "bitrateInKbps": 320, "preview": false, "downloadInfoUrl": "https://storage.mds.yandex.net/aac"}),
+        ];
+        let again = find_variant(&later, &key).unwrap();
+        assert_eq!(again["bitrateInKbps"], 320);
+        assert_eq!(again["codec"], "mp3");
+        assert_eq!(pick_variant(&later, 2).unwrap()["downloadInfoUrl"], "https://storage.mds.yandex.net/low-2");
+        assert!(find_variant(&later[..1], &key).is_none());
+    }
+
+    #[test]
+    fn direct_mp3_keeps_host_path_and_ts() {
+        let xml = "<download-info><host>storage.mds.yandex.net</host><path>/x/y</path><ts>1700000000</ts><s>abc</s></download-info>";
+        let url = direct_mp3(xml).unwrap();
+        assert!(url.starts_with("https://storage.mds.yandex.net/get-mp3/"), "{url}");
+        assert!(url.ends_with("/1700000000/x/y"), "{url}");
+        assert_eq!(url, direct_mp3(xml).unwrap());
     }
 }
