@@ -6,9 +6,10 @@ mod history_ui;
 mod keys;
 mod landing_ui;
 mod track_about;
+mod wheel;
 
 use crate::save::{file_name_max, save_track, saved_already};
-use crate::api::{album_kind_word, Album, Api, Card, Collection, Pin, Playlist, Track};
+use crate::api::{album_kind_word, Album, Api, Card, Collection, Named, Pin, Playlist, Track};
 use crate::assets::Sprite;
 use crate::config::{log, Config};
 use crate::images::Images;
@@ -56,6 +57,12 @@ struct State {
     tune_seeds: Vec<String>,
     liked_albums: std::collections::HashSet<String>,
     liked_playlists: std::collections::HashSet<String>,
+    /// Волны в Коллекции, ключи — `api::wave_key`.
+    liked_waves: std::collections::HashSet<String>,
+    /// Включённые серверные эксперименты оригинала (`WebNext…` с группой `on`).
+    experiments: std::collections::HashSet<String>,
+    /// Пункты меню волны, чей запрос ещё идёт: повторный клик по ним ничего не делает.
+    wave_busy: std::collections::HashSet<&'static str>,
     /// «Смотреть всё»: ключ страницы, её вкладки и выбранная вкладка.
     grid_key: Option<String>,
     grid_titles: HashMap<String, String>,
@@ -192,6 +199,29 @@ fn is_activity(seed: &str) -> bool {
     seed.starts_with("activity:")
 }
 
+/// Волну можно закрепить и лайкнуть (`isLikeEnabled` оригинала, `1775`): сид не «Моя волна»,
+/// не «Перемешать» (`diversity:reshuffle`) и не плейлист. Только у таких волн у челки меню.
+fn wave_menu_enabled(station: &str) -> bool {
+    station != crate::api::WAVE && station != "diversity:reshuffle" && !station.starts_with("playlist:")
+}
+
+/// Тост закрепа волны (`NotificationPin` оригинала): с экспериментом `WebNextVibeDescription`
+/// — `notifications-info.entity-(un)pinned-in-menu` с описанием волны, без него —
+/// `notifications-info.my-vibe-(un)pinned-in-menu`.
+fn wave_pin_toast(pin: bool, described: bool, title: &str, about: &str) -> String {
+    match (described, pin) {
+        (true, true) => format!("{about} {title} теперь в боковом меню"),
+        (true, false) => format!("{about} {title} больше не в боковом меню"),
+        (false, true) => format!("Моя волна {title} закреплена в боковом меню"),
+        (false, false) => format!("Моя волна {title} удалена из бокового меню"),
+    }
+}
+
+/// «Поделиться» (`isShareEnabled`): ещё и тип станции не `multivibe` и не `user`.
+fn wave_share_enabled(station: &str) -> bool {
+    wave_menu_enabled(station) && !matches!(station.split(':').next(), Some("multivibe" | "user"))
+}
+
 fn plural<'a>(n: u64, one: &'a str, few: &'a str, many: &'a str) -> &'a str {
     let (m10, m100) = (n % 10, n % 100);
     if m10 == 1 && m100 != 11 {
@@ -284,7 +314,9 @@ impl Ctx {
     fn toast(self: &Rc<Self>, msg: impl Into<String>) {
         let ui = self.ui();
         ui.global::<App>().set_toast_has_cover(false);
+        ui.global::<App>().set_toast_icon(Image::default());
         ui.global::<App>().set_toast(crate::i18n::tr(&msg.into()).into());
+        ui.global::<App>().set_toast_link(SharedString::new());
         let t = Timer::default();
         let weak = self.ui.clone();
         t.start(TimerMode::SingleShot, Duration::from_secs(4), move || {
@@ -293,6 +325,16 @@ impl Ctx {
             }
         });
         self.st.borrow_mut().toast_timer = Some(t);
+    }
+
+    /// Тост со значком на месте обложки: `unset` приглушает значок (выключенный режим).
+    fn toast_icon(self: &Rc<Self>, msg: &str, icon: Image, unset: bool) {
+        self.toast(msg);
+        let ui = self.ui();
+        let app = ui.global::<App>();
+        app.set_toast_icon(icon);
+        app.set_toast_icon_unset(unset);
+        app.set_toast_has_cover(true);
     }
 
     fn sync_player(self: &Rc<Self>) {
@@ -346,6 +388,7 @@ impl Ctx {
         };
         app.set_source_title(source_title.into());
         app.set_wave_context(context);
+        self.sync_wave_menu(&s.source);
         self.sync_wheel(&s.source);
 
         app.set_can_prev(s.track.is_some());
@@ -445,6 +488,8 @@ impl Ctx {
             let pins = api.pins();
             let liked_albums = api.liked_album_ids(&uid);
             let liked_playlists = api.liked_playlist_keys(&uid);
+            let liked_waves = api.liked_waves();
+            let experiments = api.experiments_on();
             let less_ai = api.account_settings().ok().and_then(|v| v.get("aiContentReductionEnabled").and_then(|b| b.as_bool()));
             let _ = slint::invoke_from_event_loop(move || {
                 with_ctx(|c| {
@@ -475,6 +520,14 @@ impl Ctx {
                     match liked_playlists {
                         Ok(keys) => c.st.borrow_mut().liked_playlists = keys.into_iter().collect(),
                         Err(e) => log(format!("понравившиеся плейлисты: {e}")),
+                    }
+                    match liked_waves {
+                        Ok(keys) => c.st.borrow_mut().liked_waves = keys,
+                        Err(e) => log(format!("волны в Коллекции: {e}")),
+                    }
+                    match experiments {
+                        Ok(on) => c.st.borrow_mut().experiments = on,
+                        Err(e) => log(format!("эксперименты: {e}")),
                     }
                     if let Some(on) = less_ai {
                         crate::api::LESS_AI.store(on, std::sync::atomic::Ordering::Relaxed);
@@ -566,6 +619,7 @@ impl Ctx {
                         st.view.clear();
                         drop(st);
                         self.tracks.set_vec(Vec::new());
+                        app.set_list_disks(ModelRc::default());
                         app.set_list_filter(SharedString::new());
                         app.set_list_edit(0);
                         app.set_list_desc_raw(SharedString::new());
@@ -975,6 +1029,8 @@ impl Ctx {
             artist_names: ModelRc::from(Rc::new(VecModel::from(
                 t.artist_list.iter().map(|a| SharedString::from(a.name.as_str())).collect::<Vec<_>>(),
             ))),
+            shift: 0,
+            num: 0,
         }
     }
 
@@ -1165,10 +1221,31 @@ impl Ctx {
             .filter(|(_, t)| matches_track_filter(t, &q))
             .map(|(i, _)| i)
             .collect();
-        let items: Vec<TrackItem> = view
+        let mut items: Vec<TrackItem> = view
             .iter()
             .map(|&i| self.track_item(&l.tracks[i]))
             .collect();
+        // «Диск N» — строка той же высоты, что и трек, поэтому строка трека сдвигается на число
+        // заголовков над ней, а счёт треков после заголовка идёт снова с 1. Только когда видны
+        // все треки: поиска по альбому нет.
+        let mut heads: Vec<DiskRow> = Vec::new();
+        if l.kind == ListKind::Album && view.len() == l.tracks.len() {
+            // «Сезон N» у подкаста и книги (`isNonMusic` оригинала).
+            let season = l.album.as_ref().is_some_and(|a| matches!(a.kind.as_str(), "podcast" | "audiobook" | "fairy-tale"));
+            let word = crate::i18n::tr(if season { "Сезон {number}" } else { "Диск {number}" });
+            let mut start = 0;
+            for (row, (item, t)) in items.iter_mut().zip(&l.tracks).enumerate() {
+                if let Some(n) = t.disk {
+                    heads.push(DiskRow { slot: (row + heads.len()) as i32, text: word.replace("{number}", &n.to_string()).into() });
+                    start = row;
+                }
+                if !heads.is_empty() {
+                    item.shift = heads.len() as i32;
+                    item.num = (row - start + 1) as i32;
+                }
+            }
+        }
+        self.ui().global::<App>().set_list_disks(ModelRc::from(Rc::new(VecModel::from(heads))));
         self.st.borrow_mut().view = view;
         self.tracks.set_vec(items);
         self.update_list_current();
@@ -1461,7 +1538,6 @@ fn full_repaint(ui: &AppWindow) {
     });
 }
 
-#[cfg(target_os = "linux")]
 thread_local! {
     static LAST_CURSOR: std::cell::Cell<slint::LogicalPosition> = const { std::cell::Cell::new(slint::LogicalPosition::new(0.0, 0.0)) };
 }
@@ -1514,6 +1590,7 @@ fn window_maximized(w: &slint::Window) -> bool {
 
 thread_local! {
     static MOVED: Timer = Timer::default();
+    static VOLUME_SAVE: Timer = Timer::default();
 }
 
 /// Окно сдвинули: перерисовать целиком, когда его перестанут двигать.
@@ -1898,6 +1975,7 @@ fn set_icons(ui: &AppWindow, sprite: &Sprite) {
     icons.set_liked_m(get("liked_m"));
     icons.set_play_m(get("play_m"));
     icons.set_pause_m(get("pause_m"));
+    icons.set_shuffle_small(get("shuffle_xxs"));
     icons.set_repeat_small(get("repeat_xxs"));
     icons.set_repeat_one_small(get("repeat_one_xxs"));
     icons.set_users(get("users_xxxs"));
@@ -1937,7 +2015,15 @@ fn set_icons(ui: &AppWindow, sprite: &Sprite) {
 }
 
 pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
-    let cfg = Config::load();
+    // Настроек ещё нет — первый запуск: язык берём из языков системы, как оригинал. Дальше
+    // он сохраняется вместе с остальными настройками и уже не меняется сам.
+    let first_run = !crate::config::dir().join("config.json").exists();
+    let mut cfg = Config::load();
+    if first_run {
+        let preferred = sys::preferred_languages();
+        cfg.lang = crate::i18n::system_lang(&preferred, crate::i18n::available()).into();
+        log(format!("язык интерфейса по языкам системы {preferred:?}: {}", cfg.lang));
+    }
     crate::api::set_lang(&cfg.lang);
     crate::i18n::set_lang(&cfg.lang);
     let dark = match cfg.theme.as_str() {
@@ -2032,6 +2118,9 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             tune_seeds: Vec::new(),
             liked_albums: Default::default(),
             liked_playlists: Default::default(),
+            liked_waves: Default::default(),
+            experiments: Default::default(),
+            wave_busy: Default::default(),
             grid_key: None,
             landing_key: None,
             grid_titles: HashMap::new(),
@@ -2133,17 +2222,39 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             (Repeat::One, false) => Repeat::Off,
         };
         p.send(Cmd::Repeat(next));
+        // Тост со значком режима, как у оригинала (3684-…js, notifications-info.change-repeat-*).
+        with_ctx(|c| {
+            let ui = c.ui();
+            let icons = ui.global::<Icons>();
+            match next {
+                Repeat::All => c.toast_icon("Повтор списка воспроизведения включен", icons.get_repeat(), false),
+                Repeat::One => c.toast_icon("Повтор трека включен", icons.get_repeat_one(), false),
+                Repeat::Off => c.toast_icon("Повтор выключен", icons.get_repeat(), true),
+            }
+        });
     });
     let p = player.clone();
-    app.on_toggle_shuffle(move || p.send(Cmd::Shuffle(!p.state().shuffle)));
+    app.on_toggle_shuffle(move || {
+        let on = !p.state().shuffle;
+        p.send(Cmd::Shuffle(on));
+        // Как у оригинала (3684-…js, notifications-info.shuffle-enabled/-disabled).
+        with_ctx(|c| {
+            let text = if on { "Случайный порядок" } else { "Воспроизведение подряд" };
+            let icon = c.ui().global::<Icons>().get_shuffle();
+            c.toast_icon(text, icon, !on);
+        });
+    });
     let p = player.clone();
     app.on_set_volume(move |v| {
         p.send(Cmd::Volume(v));
         with_ctx(|c| {
-            let mut st = c.st.borrow_mut();
-            st.cfg.volume = v;
-            st.cfg.save();
+            // Сразу, а не со следующей сверкой с плеером: щелчок колёсика с плавной прокруткой
+            // приходит десятками мелких шагов, и каждый прибавляет к уже новой громкости.
+            c.ui().global::<App>().set_volume(v);
+            c.st.borrow_mut().cfg.volume = v;
         });
+        // На диск — когда громкость перестанет меняться, а не на каждый такой шаг.
+        VOLUME_SAVE.with(|t| t.start(TimerMode::SingleShot, Duration::from_millis(500), || with_ctx(|c| c.st.borrow().cfg.save())));
     });
     app.on_format_time(|s| mmss(s).into());
 
@@ -2318,7 +2429,11 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         } else {
             pl.mini.set(window_pos(w).or(pl.mini.get()));
             app.set_mini(false);
-            w.set_maximized(false);
+            // Только если плашку всё же развернули: лишний set_maximized(false) на мониторе
+            // со 125% возвращал обычное окно в 1,25 раза больше прежнего.
+            if window_maximized(w) {
+                w.set_maximized(false);
+            }
             #[cfg(windows)]
             sys::set_mini_mode(w, false);
             w.with_winit_window(|ww| ww.set_min_inner_size(Some(LogicalSize::new(960.0, 640.0))));
@@ -2429,13 +2544,28 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
                 let p = position.to_logical::<f32>(_w.scale_factor() as f64);
                 let p = slint::LogicalPosition::new(p.x, p.y);
                 keys::set_cursor(p);
-                #[cfg(target_os = "linux")]
                 LAST_CURSOR.set(p);
                 EventResult::Propagate
             }
             WindowEvent::ModifiersChanged(m) => {
                 keys::set_modifiers(m.state());
                 EventResult::Propagate
+            }
+            // Щелчок колёсика мыши: страница едет анимацией, как в официальном приложении. Шаг —
+            // по настройке Windows (sys::wheel_px), без анимации тоже: Slint даёт 60 px всегда.
+            WindowEvent::MouseWheel { delta: winit::event::MouseScrollDelta::LineDelta(lx, ly), .. } => {
+                if wheel::notch(*lx, *ly) {
+                    return EventResult::PreventDefault;
+                }
+                let Some(k) = sys::wheel_px(*lx != 0.0) else {
+                    return EventResult::Propagate;
+                };
+                _w.dispatch_event(slint::platform::WindowEvent::PointerScrolled {
+                    position: LAST_CURSOR.get(),
+                    delta_x: lx * k,
+                    delta_y: ly * k,
+                });
+                EventResult::PreventDefault
             }
             WindowEvent::KeyboardInput { event, is_synthetic: false, .. } => {
                 if let winit::keyboard::PhysicalKey::Code(code) = event.physical_key {
@@ -2784,11 +2914,33 @@ fn card_from_playlist(p: &Playlist) -> Card {
     }
 }
 
+/// Исполнители трека для меню: за составным идут его части, как в ArtistItem оригинала.
+fn menu_artists(t: &Track) -> Vec<&Named> {
+    fn push<'a>(list: &'a [Named], out: &mut Vec<&'a Named>) {
+        for a in list {
+            out.push(a);
+            push(&a.decomposed, out);
+        }
+    }
+    let mut out = Vec::new();
+    push(&t.artist_list, &mut out);
+    out
+}
+
 fn track_link(t: &Track) -> String {
     match &t.album_id {
         Some(a) => format!("https://music.yandex.ru/album/{a}/track/{}", t.id),
         None => format!("https://music.yandex.ru/track/{}", t.id),
     }
+}
+
+/// Подпись плеера плейлиста: ссылка на него и на владельца. Без имени или логина владельца
+/// оригинал оставляет подпись пустой.
+fn owner_link(link: &str, name: &str, login: &str) -> String {
+    if name.is_empty() || login.is_empty() {
+        return String::new();
+    }
+    format!("{link} — <a href=\"https://music.yandex.ru/users/{login}\">{name}</a>")
 }
 
 /// Код для вставки плеера на сайт, как в окне «HTML-код» оригинала.
@@ -3260,7 +3412,13 @@ impl Ctx {
         if t.album_id.is_some() {
             items.push(self.menu_entry("album", "Перейти к альбому", icons.get_m_album(), false));
         }
-        if !t.artist_list.is_empty() {
+        // Как у оригинала (818-…js, модуль 33139): если исполнителей вместе с частями составных
+        // больше одного, «Перейти к исполнителям» открывает подменю с ними.
+        let artists = menu_artists(&t);
+        if artists.len() > 1 {
+            self.set_menu_artists(&artists);
+            items.push(self.menu_entry("artists", "Перейти к исполнителям", icons.get_m_artist(), true));
+        } else if !artists.is_empty() {
             items.push(self.menu_entry("artist", "Перейти к исполнителю", icons.get_m_artist(), false));
         }
         // Заголовок по типу (`track-modal.*-title`): глава, выпуск или трек.
@@ -3270,6 +3428,23 @@ impl Ctx {
         self.st.borrow_mut().menu_track = Some(t);
         self.show_menu(items, x, y, below);
         self.load_menu_playlists();
+    }
+
+    /// Подменю «Перейти к исполнителям»: имена и круглые аватарки 24 px (ArtistItem оригинала).
+    fn set_menu_artists(self: &Rc<Self>, artists: &[&Named]) {
+        let ui = self.ui();
+        let app = ui.global::<App>();
+        let names: Vec<SharedString> = artists.iter().map(|a| a.name.as_str().into()).collect();
+        app.set_menu_artists(ModelRc::from(Rc::new(VecModel::from(names))));
+        let covers = Rc::new(VecModel::from(vec![Image::default(); artists.len()]));
+        app.set_menu_artist_covers(ModelRc::from(covers.clone()));
+        let size = self.size_for(24.0);
+        for (i, a) in artists.iter().enumerate() {
+            if let Some(cover) = &a.cover {
+                let covers = covers.clone();
+                self.images.get(&crate::api::pic(cover, size), size, move |img| covers.set_row_data(i, img.clone()));
+            }
+        }
     }
 
     fn account_action(self: &Rc<Self>, id: &str) {
@@ -3453,9 +3628,21 @@ impl Ctx {
             false,
         )];
         if !likes && !app.get_list_own() {
+            // У подкаста и книги вместо лайка подписка, как ContextMenu подписки оригинала
+            // (модули 44988 и 108).
+            let label = match (l.album.as_ref().map(|a| a.kind.as_str()), liked) {
+                (Some("podcast"), false) => "Подписаться на подкаст",
+                (Some("podcast"), true) => "Вы подписаны",
+                (Some("audiobook"), false) => "Добавить на полку",
+                (Some("audiobook"), true) => "Убрать с полки",
+                (Some("fairy-tale"), false) => "Нравится",
+                (Some("fairy-tale"), true) => "Не нравится",
+                (_, false) => "Нравится",
+                (_, true) => "Удалить из коллекции",
+            };
             items.push(self.menu_entry(
                 "list-like",
-                if liked { "Удалить из коллекции" } else { "Нравится" },
+                label,
                 if liked { icons.get_m_liked() } else { icons.get_m_like() },
                 false,
             ));
@@ -3499,6 +3686,155 @@ impl Ctx {
                     .or_else(|| k.strip_prefix("familiar:"))
                     .map_or_else(|| k.to_string(), |id| format!("artist:{id}")),
             ),
+        }
+    }
+
+    /// Эксперимент `WebNextWaveLikesAndShares`: без него у оригинала челка — только сброс
+    /// (`4362`: `checkExperiment(WebNextWaveLikesAndShares, "on") ? VibeContextButton : …`).
+    fn wave_likes(&self) -> bool {
+        self.st.borrow().experiments.contains("WebNextWaveLikesAndShares")
+    }
+
+    /// Меню челки волны (`VibeContextButton` оригинала) и кнопка настроек под плеером.
+    fn sync_wave_menu(&self, source: &Source) {
+        let ui = self.ui();
+        let app = ui.global::<App>();
+        let station = match source {
+            Source::Seed { station, .. } => Some(station.as_str()),
+            _ => None,
+        };
+        let menu = self.wave_likes() && station.is_some_and(wave_menu_enabled);
+        app.set_wave_tunable(station.is_some_and(is_activity));
+        app.set_wave_menu(menu);
+        if !menu || app.get_page() != Page::Wave {
+            app.set_wave_menu_open(false);
+        }
+        let Some(station) = station.filter(|_| menu) else { return };
+        app.set_wave_share(wave_share_enabled(station));
+        // Раз в 250 мс, поэтому без строк: закреп волны — `station:<станция>`.
+        let pinned = self.st.borrow().pins.iter().any(|p| p.target.strip_prefix("station:") == Some(station));
+        app.set_wave_pinned(pinned);
+        let liked = self.st.borrow().liked_waves.contains(station);
+        app.set_wave_liked(liked);
+    }
+
+    /// Пункт меню волны: закрепить, «Нравится», «Поделиться». Тексты тостов — из словаря
+    /// оригинала (`notifications-info.my-vibe-*`, `shared-vibe.link-successfully-copied`).
+    fn wave_menu_action(self: &Rc<Self>, action: &str) {
+        let ui = self.ui();
+        let app = ui.global::<App>();
+        app.set_wave_menu_open(false);
+        let key: &'static str = match action {
+            "pin" => "pin",
+            "like" => "like",
+            "share" => "share",
+            _ => return,
+        };
+        let s = self.player.state();
+        let Source::Seed { station, header, title } = &s.source else { return };
+        if !self.wave_likes() || !wave_menu_enabled(station) {
+            return;
+        }
+        let Some(net) = self.st.borrow().net.clone() else { return };
+        // У волны один сид — станция, её ключ в Коллекции — она сама.
+        let liked = self.st.borrow().liked_waves.contains(station);
+        // Без Плюса оригинал вместо лайка и ссылки открывает окно подписки, его здесь нет.
+        if !s.has_plus && (key == "share" || key == "like" && !liked) {
+            self.toast("У вас пока нет мультиподписки Плюс");
+            return;
+        }
+        if !self.st.borrow_mut().wave_busy.insert(key) {
+            return;
+        }
+        let seeds = vec![station.clone()];
+        let name = if title.is_empty() { header.clone() } else { title.clone() };
+        let header = header.clone();
+        match key {
+            "pin" => {
+                let target = format!("station:{station}");
+                let pin = !self.is_pinned(&target);
+                // Закреп снимается — название и подпись берутся из него, пока он ещё в списке.
+                let old = self.st.borrow().pins.iter().find(|p| p.target == target).cloned();
+                let described = self.st.borrow().experiments.contains("WebNextVibeDescription");
+                std::thread::spawn(move || {
+                    let r = net.api.pin(&target, pin);
+                    let pins = r.as_ref().ok().and_then(|_| net.api.pins().ok());
+                    let _ = slint::invoke_from_event_loop(move || {
+                        with_ctx(|c| {
+                            c.st.borrow_mut().wave_busy.remove("pin");
+                            if let Err(e) = r {
+                                log(format!("закреп волны: {e}"));
+                                c.toast("При выполнении действия произошла ошибка");
+                                return;
+                            }
+                            let entry = if pin { pins.as_ref().and_then(|p| p.iter().find(|p| p.target == target).cloned()) } else { old };
+                            if let Some(pins) = pins {
+                                c.set_pins(pins);
+                            }
+                            let title = entry.as_ref().map_or(name, |p| p.title.clone());
+                            let about = entry.map_or(header, |p| p.subtitle);
+                            c.toast(wave_pin_toast(pin, described, &title, &about));
+                        })
+                    });
+                });
+            }
+            "like" => {
+                // Как у оригинала: отметка ставится сразу, при ошибке возвращается, после
+                // успеха список волн в Коллекции перечитывается.
+                let wave = crate::api::wave_key(&seeds);
+                self.set_wave_liked(&wave, !liked);
+                std::thread::spawn(move || {
+                    let r = net.api.like_wave(&seeds, !liked);
+                    let fresh = r.as_ref().ok().and_then(|_| net.api.liked_waves().ok());
+                    let _ = slint::invoke_from_event_loop(move || {
+                        with_ctx(|c| {
+                            c.st.borrow_mut().wave_busy.remove("like");
+                            match r {
+                                Ok(()) => {
+                                    if let Some(keys) = fresh {
+                                        c.st.borrow_mut().liked_waves = keys;
+                                    }
+                                    c.toast(if liked { "Моя волна удалена из Коллекции" } else { "Моя волна добавлена в Коллекцию" });
+                                }
+                                Err(e) => {
+                                    log(format!("лайк волны: {e}"));
+                                    c.set_wave_liked(&wave, liked);
+                                    c.toast("При выполнении действия произошла ошибка");
+                                }
+                            }
+                        })
+                    });
+                });
+            }
+            _ => {
+                std::thread::spawn(move || {
+                    let r = net.api.share_wave(&seeds);
+                    let _ = slint::invoke_from_event_loop(move || {
+                        with_ctx(|c| {
+                            c.st.borrow_mut().wave_busy.remove("share");
+                            match r {
+                                Ok(url) => {
+                                    sys::copy_text(&url);
+                                    c.toast("Ссылка на Мою волну скопирована");
+                                }
+                                Err(e) => {
+                                    log(format!("ссылка на волну: {e}"));
+                                    c.toast("При выполнении действия произошла ошибка");
+                                }
+                            }
+                        })
+                    });
+                });
+            }
+        }
+    }
+
+    fn set_wave_liked(&self, wave: &str, liked: bool) {
+        let mut st = self.st.borrow_mut();
+        if liked {
+            st.liked_waves.insert(wave.to_string());
+        } else {
+            st.liked_waves.remove(wave);
         }
     }
 
@@ -3682,6 +4018,33 @@ impl Ctx {
             }
         }
         let title = l.title.clone();
+        // Подкаст, книга и сказка: тост с обложкой и ссылками (`notifications-info.*-collection`,
+        // модуль 96295), ошибка — `error-messages.error-during-action` (модуль 92966).
+        if let Some(a) = l.album.as_ref().filter(|a| matches!(a.kind.as_str(), "podcast" | "audiobook" | "fairy-tale")) {
+            let (kind_word, cover) = (a.kind.clone(), a.cover.clone());
+            std::thread::spawn(move || {
+                let saved = net.api.like_entity(&uid, kind, &id, !liked);
+                if saved.is_ok() {
+                    net.refresh("collection");
+                }
+                let _ = slint::invoke_from_event_loop(move || with_ctx(|c| match saved {
+                    Ok(()) => c.subscribe_toast(&kind_word, &title, &id, cover.as_deref(), liked),
+                    Err(e) => {
+                        log(format!("подписка на {id}: {e}"));
+                        // Не сохранилось — подписка остаётся прежней.
+                        {
+                            let mut st = c.st.borrow_mut();
+                            if liked { st.liked_albums.remove(&id) } else { st.liked_albums.insert(id.clone()) };
+                        }
+                        if c.st.borrow().list_key.as_deref() == Some(format!("album:{id}").as_str()) {
+                            c.ui().global::<App>().set_list_liked(!liked);
+                        }
+                        c.toast("При выполнении действия произошла ошибка");
+                    }
+                }));
+            });
+            return;
+        }
         std::thread::spawn(move || {
             let saved = net.api.like_entity(&uid, kind, &id, !liked);
             if saved.is_ok() && kind == "albums" {
@@ -3693,6 +4056,37 @@ impl Ctx {
                 Err(e) => format!("Не удалось сохранить: {e}"),
             });
         });
+    }
+
+    /// Тост подписки на подкаст, книгу или сказку, как BaseNotificationLike: «Подкаст {название}
+    /// добавлен в Коллекцию»; название ведёт на страницу, «Коллекцию» — в коллекцию.
+    fn subscribe_toast(self: &Rc<Self>, kind: &str, title: &str, id: &str, cover: Option<&str>, liked: bool) {
+        let (pre, mid) = match (kind, liked) {
+            ("audiobook", true) => ("Аудиокнига", "добавлена в"),
+            ("audiobook", false) => ("Аудиокнига", "удалена из"),
+            ("fairy-tale", true) => ("Сказка", "добавлена в"),
+            ("fairy-tale", false) => ("Сказка", "удалена из"),
+            (_, true) => ("Подкаст", "добавлен в"),
+            (_, false) => ("Подкаст", "удален из"),
+        };
+        self.toast(pre);
+        let ui = self.ui();
+        let app = ui.global::<App>();
+        app.set_toast_title(title.into());
+        app.set_toast_mid(crate::i18n::tr(mid).into());
+        app.set_toast_link(crate::i18n::tr(if liked { "Коллекцию" } else { "Коллекции" }).into());
+        app.set_toast_target(format!("album:{id}").into());
+        app.set_toast_cover(Image::default());
+        app.set_toast_has_cover(true);
+        let size = self.size_for(40.0);
+        if let Some(url) = cover.map(|c| crate::api::pic(c, size)) {
+            let w = self.ui.clone();
+            self.images.get(&url, size, move |img| {
+                if let Some(ui) = w.upgrade() {
+                    ui.global::<App>().set_toast_cover(img.clone());
+                }
+            });
+        }
     }
 
     /// Ссылка на открытый список или код для вставки на сайт.
@@ -3709,7 +4103,25 @@ impl Ctx {
             _ => (format!("users/{uid}/playlists/3"), format!("playlist/{uid}/3")),
         };
         let url = format!("https://music.yandex.ru/{page}");
-        Some(if html { iframe_code(&frame, 614, 450, &format!("<a href=\"{url}\">{}</a>", l.title)) } else { url })
+        if !html {
+            return Some(url);
+        }
+        // Подпись — `setListenMessage` оригинала: у альбома после названия ссылка на первого
+        // исполнителя (у сборника — ничего), у плейлиста — на владельца, а без имени или логина
+        // владельца подпись пустая. Размер 614 × 556 — `dm` оригинала.
+        let link = format!("<a href=\"{url}\">{}</a>", l.title);
+        let msg = match (&l.playlist, &l.album) {
+            (Some(p), _) => owner_link(&link, &p.owner, &p.login),
+            (_, Some(a)) => match a.artist_list.first().filter(|n| !n.various) {
+                Some(n) => format!("{link} — <a href=\"https://music.yandex.ru/artist/{}\">{}</a>", n.id, n.name),
+                None => link,
+            },
+            _ => {
+                let ui = self.ui();
+                owner_link(&link, &ui.global::<App>().get_login(), &self.player.state().login)
+            }
+        };
+        Some(iframe_code(&frame, 614, 556, &msg))
     }
 
     fn open_artist_menu(self: &Rc<Self>, x: f32, y: f32) {
@@ -3945,6 +4357,13 @@ impl Ctx {
             }
             "artist" => {
                 if let Some(a) = t.artist_list.first() {
+                    self.ui().global::<App>().set_fullscreen(false);
+                    self.navigate(Page::Artist, Some(format!("artist:{}", a.id)), true);
+                }
+            }
+            _ if id.starts_with("go-artist:") => {
+                let i: usize = id["go-artist:".len()..].parse().unwrap_or(usize::MAX);
+                if let Some(a) = menu_artists(&t).get(i) {
                     self.ui().global::<App>().set_fullscreen(false);
                     self.navigate(Page::Artist, Some(format!("artist:{}", a.id)), true);
                 }
@@ -4303,6 +4722,7 @@ impl Ctx {
                 st.view.clear();
                 drop(st);
                 self.tracks.set_vec(Vec::new());
+                app.set_list_disks(ModelRc::default());
                 app.set_list_cover(Image::default());
                 app.set_list_artist_cover(Image::default());
             }
@@ -4601,6 +5021,16 @@ fn register_extra(app: &App) {
     app.on_list_remove_track(|i| with_ctx(|c| c.list_remove_track(i.max(0) as usize)));
     app.on_account_action(|id| with_ctx(|c| c.account_action(&id)));
     app.on_setting(|id| with_ctx(|c| c.setting(&id)));
+    app.on_toast_open(|collection| {
+        with_ctx(|c| {
+            if collection {
+                c.navigate(Page::Collection, None, true);
+            } else {
+                let target = c.ui().global::<App>().get_toast_target().to_string();
+                c.navigate(Page::List, Some(target), true);
+            }
+        })
+    });
     app.on_open_grid(|block, title| {
         with_ctx(|c| {
             if matches!(block.as_str(), "label-releases" | "label-artists") {
@@ -4960,6 +5390,7 @@ fn register_extra(app: &App) {
             c.start();
         })
     });
+    app.on_wave_menu_action(|action| with_ctx(|c| c.wave_menu_action(&action)));
     app.on_reset_wave(|| {
         with_ctx(|c| {
             c.st.borrow_mut().trailer = None;
@@ -5018,6 +5449,23 @@ fn register_extra(app: &App) {
 
 #[cfg(test)]
 #[test]
+fn wave_menu_follows_like_and_share_rules_of_original() {
+    for station in ["genre:rock", "artist:1", "track:2", "activity:road-trip", "mood:calm"] {
+        assert!(wave_menu_enabled(station), "{station}");
+        assert!(wave_share_enabled(station), "{station}");
+    }
+    for station in [crate::api::WAVE, "diversity:reshuffle", "playlist:10_3"] {
+        assert!(!wave_menu_enabled(station), "{station}");
+        assert!(!wave_share_enabled(station), "{station}");
+    }
+    assert!(wave_menu_enabled("multivibe:abc") && !wave_share_enabled("multivibe:abc"));
+    assert!(wave_menu_enabled("user:other") && !wave_share_enabled("user:other"));
+    assert_eq!(wave_pin_toast(true, false, "Рок", "Моя волна по жанру"), "Моя волна Рок закреплена в боковом меню");
+    assert_eq!(wave_pin_toast(false, true, "Рок", "Моя волна по жанру"), "Моя волна по жанру Рок больше не в боковом меню");
+}
+
+#[cfg(test)]
+#[test]
 fn download_cancellation_belongs_to_the_selected_list() {
     let job = ListDownload { uid: "10".into(), list_key: "playlist:10:7".into(), stop: Arc::default() };
     // У плейлистов разных владельцев могут совпадать и название, и номер.
@@ -5032,6 +5480,19 @@ fn download_cancellation_belongs_to_the_selected_list() {
     assert!(likes.stop_for("10", Some("playlist:10:3")).is_some());
     assert!(likes.stop_for("20", Some("likes")).is_none());
     assert!(likes.stop_for("10", Some("likes")).is_some());
+}
+
+#[cfg(test)]
+#[test]
+fn playlist_embed_caption_needs_owner() {
+    let link = "<a href=\"https://music.yandex.ru/users/ya/playlists/7\">Лето</a>";
+    assert_eq!(
+        iframe_code("playlist/ya/7", 614, 556, &owner_link(link, "Яна", "ya")),
+        "<iframe frameborder=\"0\" allow=\"clipboard-write\" style=\"border:none;width:614px;height:556px;\" width=\"614\" height=\"556\" src=\"https://music.yandex.ru/iframe/playlist/ya/7\">Слушайте <a href=\"https://music.yandex.ru/users/ya/playlists/7\">Лето</a> — <a href=\"https://music.yandex.ru/users/ya\">Яна</a> на Яндекс Музыке</iframe>"
+    );
+    // Как у оригинала: без владельца подпись пустая, остаётся только «Слушайте  на Яндекс Музыке».
+    assert_eq!(owner_link(link, "", "ya"), "");
+    assert_eq!(owner_link(link, "Яна", ""), "");
 }
 
 #[cfg(test)]
