@@ -631,7 +631,7 @@ fn menu_action(n: i32) {
                 }
             });
         }
-        2 | 3 => player.send(Cmd::Enqueue { track: t, next: n == 2 }),
+        2 | 3 => player.send(Cmd::Enqueue { tracks: vec![t], next: n == 2 }),
         4 => sys::share(&crate::track_link(&t)),
         6 => {
             if let Some(a) = &t.album_id {

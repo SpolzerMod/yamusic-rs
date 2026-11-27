@@ -176,6 +176,10 @@ jobs:
         with:
           workspaces: android -> target
 
+      # Версия — как NDK_VERSION в tools/apk.sh.
+      - name: NDK r30
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;30.0.16248370" > /dev/null
+
       - name: APK
         env:
           ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
