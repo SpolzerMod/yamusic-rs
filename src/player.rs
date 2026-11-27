@@ -7,8 +7,9 @@ use crate::config::log;
 use crate::eq::{Eq, EqParams};
 use crate::fade::{Fade, FadeOut};
 use crate::output::Output;
-use crate::stream::{Buf, Reader};
-use rodio::{Decoder, Sink, Source as _};
+use crate::decode::Decoded;
+use crate::stream::Buf;
+use rodio::{Sink, Source as _};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -316,7 +317,7 @@ fn round3(x: f64) -> f64 {
 
 /// Трек, который качается, и декодер, уже прочитавший его начало.
 /// Скачиваемый трек, его декодер и формат («MP3 320»).
-type Audio = (Arc<Buf>, Decoder<Reader>, String);
+type Audio = (Arc<Buf>, Decoded, String);
 
 /// Имя выхода Windows по умолчанию. На Linux звук идёт в «default», и за сменой устройства
 /// там следит PipeWire или PulseAudio.
@@ -383,10 +384,25 @@ fn account_retry_delay(attempt: u32) -> Duration {
 
 fn load_track(api: &Api, t: &Track) -> Res<Audio> {
     let (url, format) = api.stream_url(&t.id)?;
-    let (again, id) = (api.clone(), t.id.clone());
-    // Ссылка подписана и живёт недолго, поэтому для докачки берётся новая.
-    let buf = Buf::download(api.open_from(&url, 0)?, move |from| again.open_from(&again.stream_url(&id)?.0, from))?;
-    let dec = Decoder::new(buf.reader()).map_err(|e| format!("не удалось декодировать: {e}"))?;
+    if format != "FLAC" {
+        return open_track(api, t, &url, format);
+    }
+    open_track(api, t, &url, format).or_else(|e| {
+        log(format!("трек {}: FLAC не открылся ({e}), играет mp3", t.id));
+        let (url, format) = api.mp3_url(&t.id)?;
+        open_track(api, t, &url, format)
+    })
+}
+
+fn open_track(api: &Api, t: &Track, url: &str, format: String) -> Res<Audio> {
+    let (again, id, lossless) = (api.clone(), t.id.clone(), format == "FLAC");
+    // Ссылка подписана и живёт недолго, поэтому для докачки берётся новая — на тот же файл:
+    // докачка с середины FLAC из mp3 испортила бы трек.
+    let buf = Buf::download(api.open_from(url, 0)?, move |from| {
+        let url = if lossless { again.flac_url(&id)?.ok_or("у трека больше нет FLAC")? } else { again.mp3_url(&id)?.0 };
+        again.open_from(&url, from)
+    })?;
+    let dec = Decoded::open(buf.reader()).map_err(|e| format!("не удалось декодировать: {e}"))?;
     Ok((buf, dec, format))
 }
 
@@ -699,10 +715,10 @@ impl Engine {
     }
 
     /// Источник для звука: эквалайзер, декодирование наперёд и затухание для кроссфейда.
-    fn source(&mut self, src: Decoder<Reader>, fade_in: Duration) -> impl rodio::Source<Item = f32> + Send + 'static {
+    fn source(&mut self, src: Decoded, fade_in: Duration) -> impl rodio::Source<Item = f32> + Send + 'static {
         self.fade_out = Arc::default();
         let rate = self.audio.as_ref().map_or_else(|| src.sample_rate(), |(out, _)| out.sample_rate());
-        let eq = Eq::new(src.convert_samples::<f32>(), self.eq.clone());
+        let eq = Eq::new(src, self.eq.clone());
         Fade::new(Ahead::new(eq, rate), fade_in, self.fade_out.clone())
     }
 
@@ -817,7 +833,7 @@ impl Engine {
         if !self.ensure_audio() {
             return false;
         }
-        let Ok(src) = Decoder::new(buf.reader()) else { return false };
+        let Ok(src) = Decoded::open(buf.reader()) else { return false };
         let src = self.source(src, Duration::ZERO);
         let (vol, paused) = (self.gain(), self.paused);
         let Some(sink) = self.sink() else { return false };
@@ -1170,7 +1186,7 @@ impl Engine {
 
     fn replay(&mut self) -> bool {
         let Some(buf) = self.current_buf.clone() else { return false };
-        let Ok(src) = Decoder::new(buf.reader()) else { return false };
+        let Ok(src) = Decoded::open(buf.reader()) else { return false };
         let src = self.source(src, Duration::ZERO);
         if let Some(sink) = self.sink() {
             sink.append(src);
@@ -2286,7 +2302,7 @@ mod tests {
         let (url, _) = api.stream_url("57703").expect("stream url");
         let bytes = api.fetch_bytes(&url).expect("download");
         assert!(bytes.len() > 50_000);
-        let dec = Decoder::new(Cursor::new(bytes)).expect("decode");
+        let dec = Decoded::open(Cursor::new(bytes)).expect("decode");
         let samples = dec.take(44100).count();
         assert!(samples > 1000);
     }

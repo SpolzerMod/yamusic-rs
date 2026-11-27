@@ -9,6 +9,7 @@ mod assets;
 mod auth;
 mod client;
 mod config;
+mod decode;
 mod discord;
 mod eq;
 mod fade;

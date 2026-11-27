@@ -18,6 +18,8 @@ mod client;
 #[path = "../../src/config.rs"]
 #[allow(dead_code)]
 mod config;
+#[path = "../../src/decode.rs"]
+mod decode;
 #[path = "../../src/eq.rs"]
 #[allow(dead_code)]
 mod eq;

@@ -2106,9 +2106,22 @@ impl Api {
 
     // ---------- аудио ----------
 
-    /// Прямая ссылка на аудио и его формат («MP3 320»): сначала download-info (mp3 до 320),
-    /// потом get-file-info.
+    /// Что играть и его формат («FLAC», «MP3 320»). При «Превосходном» качестве — lossless, как
+    /// у оригинала (`quality=lossless` в get-file-info); у трека без FLAC — mp3, как раньше.
     pub fn stream_url(&self, track_id: &str) -> Res<(String, String)> {
+        if QUALITY.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+            match self.flac_url(track_id) {
+                Ok(Some(url)) => return Ok((url, "FLAC".into())),
+                Ok(None) => {}
+                Err(e) => crate::config::log(format!("flac {track_id}: {e}")),
+            }
+        }
+        self.mp3_url(track_id)
+    }
+
+    /// Прямая ссылка на mp3 и его формат («MP3 320»): сначала download-info (mp3 до 320),
+    /// потом get-file-info.
+    pub fn mp3_url(&self, track_id: &str) -> Res<(String, String)> {
         match self.stream_url_legacy(track_id) {
             Ok(u) => Ok(u),
             Err(e1) => self
