@@ -448,6 +448,13 @@ export component SettingsPage inherits Rectangle {
                 on: App.wave-motion;
                 clicked => { App.setting("wave-motion"); }
             }
+            if App.wave-motion: SettingItem {
+                title: T.t("Высокое качество анимации волны");
+                desc: T.t("650 × 650 вместо 325 × 325, выше нагрузка на процессор");
+                toggle: true;
+                on: App.wave-high-quality;
+                clicked => { App.setting("wave-high-quality"); }
+            }
             SettingItem {
                 title: T.t("Логарифмическая громкость");
                 desc: T.t("Громкость меняется ровнее на слух, тихие уровни настраиваются точнее");

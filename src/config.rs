@@ -60,6 +60,8 @@ pub struct Config {
     pub add_to_end: bool,
     /// Пятно «Моей волны» движется. Выключено: анимация всё время тратит процессор.
     pub wave_motion: bool,
+    /// Рисовать живое пятно в полном разрешении.
+    pub wave_high_quality: bool,
     /// Сколько секунд треки перетекают друг в друга; ноль — без кроссфейда.
     pub crossfade_secs: u32,
     /// Обычное окно при выходе, в пикселях экрана. На Wayland места окна не узнать.
@@ -110,6 +112,7 @@ impl Default for Config {
             allow_explicit: true,
             add_to_end: false,
             wave_motion: false,
+            wave_high_quality: false,
             crossfade_secs: 0,
             window_pos: None,
             window_size: None,

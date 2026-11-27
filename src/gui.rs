@@ -146,10 +146,10 @@ struct VibeAnim {
     palette: Option<crate::vibe::Palette>,
     /// Трек и был ли он лайкнут: лайк того же трека — вспышка, как у оригинала.
     like: Option<(String, bool)>,
-    /// Кадры не успевали: до перезапуска остаётся неподвижная картинка.
+    /// Кадры не успевали: до смены качества или перезапуска остаётся неподвижная картинка.
     failed: bool,
-    /// Видимая часть холста в пикселях счёта; нули — страница её ещё не сообщила.
-    crop: [usize; 4],
+    /// Видимая часть холста в долях стороны; нули — страница её ещё не сообщила.
+    crop: [f32; 4],
 }
 
 /// Трейлер: треки звучат по 12,5 с с середины, потом следующий.
@@ -2136,6 +2136,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     keys::init(&app, &cfg.hotkeys);
     app.set_log_volume(cfg.log_volume);
     app.set_wave_motion(cfg.wave_motion);
+    app.set_wave_high_quality(cfg.wave_high_quality);
     app.set_crossfade(cfg.crossfade_secs > 0);
     app.set_hidden_blocks(landing_ui::hidden_titles(&cfg).into());
     let places = Rc::new(Places::default());
@@ -3643,6 +3644,17 @@ impl Ctx {
                 st.cfg.wave_motion = on;
                 st.cfg.save();
             }
+            "wave-high-quality" => {
+                let high = !app.get_wave_high_quality();
+                app.set_wave_high_quality(high);
+                let mut st = self.st.borrow_mut();
+                st.cfg.wave_high_quality = high;
+                st.vibe.failed = false;
+                if let Some(handle) = &st.vibe.handle {
+                    handle.send(crate::vibe::Msg::HighQuality(high));
+                }
+                st.cfg.save();
+            }
             "download-flac" => {
                 let on = !app.get_download_flac();
                 app.set_download_flac(on);
@@ -4801,6 +4813,7 @@ impl Ctx {
             let handle = crate::vibe::Vibe::spawn(move |event| {
                 let _ = weak.upgrade_in_event_loop(move |ui| with_ctx(|c| c.on_vibe_event(&ui, event)));
             });
+            handle.send(Msg::HighQuality(app.get_wave_high_quality()));
             let crop = self.st.borrow().vibe.crop;
             if crop[2] > crop[0] {
                 handle.send(Msg::Crop(crop));
@@ -4844,7 +4857,7 @@ impl Ctx {
             Event::Frame(_) if !v.mounted => {}
             Event::Frame(frame) => {
                 // Место кадра на холсте — долями его стороны.
-                let side = crate::vibe::RES as f32;
+                let side = frame.resolution as f32;
                 let [x, y, w, h] = frame.rect.map(|v| v as f32 / side);
                 app.set_vibe_x(x);
                 app.set_vibe_y(y);
@@ -4852,13 +4865,16 @@ impl Ctx {
                 app.set_vibe_h(h);
                 app.set_vibe_frame(Image::from_rgba8_premultiplied(frame.pixels));
             }
-            Event::Fallback => {
+            Event::Fallback { high_quality } if high_quality == app.get_wave_high_quality() => {
                 v.failed = true;
                 v.mounted = false;
+                if let Some(h) = &v.handle {
+                    h.send(crate::vibe::Msg::Mount(false));
+                }
                 app.set_vibe_anim(false);
                 app.set_vibe_frame(Image::default());
-                return;
             }
+            Event::Fallback { .. } => return,
         }
         if let Some(h) = &v.handle {
             h.frame_shown();
@@ -5589,10 +5605,7 @@ fn register_extra(app: &App) {
     });
     app.on_vibe_crop(|x0, y0, x1, y1| {
         with_ctx(|c| {
-            let side = crate::vibe::RES as f32;
-            let lo = |v: f32| (v * side - 2.0).clamp(0.0, side) as usize;
-            let hi = |v: f32| (v * side + 2.0).clamp(0.0, side).ceil() as usize;
-            let crop = [lo(x0), lo(y0), hi(x1), hi(y1)];
+            let crop = [x0, y0, x1, y1];
             let mut st = c.st.borrow_mut();
             st.vibe.crop = crop;
             if let Some(h) = &st.vibe.handle {

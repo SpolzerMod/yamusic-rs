@@ -577,9 +577,10 @@ struct Renderer {
     painted: [usize; 4],
 }
 
-/// Кадр: закрашенный прямоугольник холста (x, y, ширина, высота в пикселях [`RES`]) и его
+/// Кадр: закрашенный прямоугольник холста (x, y, ширина, высота в пикселях) и его
 /// пиксели с умноженной альфой.
 pub struct Frame {
+    pub resolution: usize,
     pub rect: [usize; 4],
     pub pixels: SharedPixelBuffer<Rgba8Pixel>,
 }
@@ -638,7 +639,7 @@ impl Renderer {
     fn frame(&mut self, u: &Uniforms, circles: usize, opacity: f32, crop: [usize; 4]) -> Frame {
         let [x0, y0, x1, y1] = self.render(u, circles, opacity, crop);
         if x1 <= x0 || y1 <= y0 {
-            return Frame { rect: [0, 0, 1, 1], pixels: SharedPixelBuffer::new(1, 1) };
+            return Frame { resolution: self.res, rect: [0, 0, 1, 1], pixels: SharedPixelBuffer::new(1, 1) };
         }
         let res = self.res;
         let (x0, y0) = (x0.saturating_sub(2), y0.saturating_sub(2));
@@ -649,7 +650,7 @@ impl Renderer {
             let at = (y0 + row) * res + x0;
             line.copy_from_slice(&self.canvas[at..at + w]);
         }
-        Frame { rect: [x0, y0, w, h], pixels }
+        Frame { resolution: self.res, rect: [x0, y0, w, h], pixels }
     }
 
     /// Шум круга `which` (0 — общий) в точке пикселя, билинейно по узлам сетки.
@@ -805,15 +806,16 @@ pub enum Msg {
     Playing(bool),
     Like,
     Palette(Palette),
-    /// Видимая часть холста в пикселях [`RES`]: x0, y0, x1, y1.
-    Crop([usize; 4]),
+    /// Видимая часть холста в долях его стороны: x0, y0, x1, y1.
+    Crop([f32; 4]),
+    HighQuality(bool),
 }
 
 /// Что поток анимации сообщает интерфейсу.
 pub enum Event {
     Frame(Frame),
     /// Кадры не успевают даже с двумя кругами: дальше показывать неподвижную картинку.
-    Fallback,
+    Fallback { high_quality: bool },
 }
 
 #[derive(Clone)]
@@ -842,13 +844,21 @@ impl Vibe {
     }
 }
 
+fn crop_pixels([x0, y0, x1, y1]: [f32; 4], resolution: usize) -> [usize; 4] {
+    let side = resolution as f32;
+    let lo = |v: f32| (v * side - 2.0).clamp(0.0, side) as usize;
+    let hi = |v: f32| (v * side + 2.0).clamp(0.0, side).ceil() as usize;
+    [lo(x0), lo(y0), hi(x1), hi(y1)]
+}
+
 fn run(rx: Receiver<Msg>, busy: Arc<AtomicBool>, emit: impl Fn(Event)) {
     let mut rng = Rng::new();
     let mut state = State::new(&mut rng);
     let mut renderer: Option<Renderer> = None;
     let (mut mounted, mut visible, mut playing) = (false, true, false);
     let mut palette: Option<Palette> = None;
-    let mut crop = [0, 0, RES, RES];
+    let mut crop = [0.0, 0.0, 1.0, 1.0];
+    let mut high_quality = false;
     let mut circles = 3;
     let mut fallback = false;
     // Пятно на паузе пришло к покою и последний кадр уже отдан: новых не нужно.
@@ -926,6 +936,15 @@ fn run(rx: Receiver<Msg>, busy: Arc<AtomicBool>, emit: impl Fn(Event)) {
                     state.colors.update(p);
                 }
                 Msg::Crop(c) => crop = c,
+                Msg::HighQuality(high) => {
+                    if high != high_quality {
+                        high_quality = high;
+                        renderer = None;
+                        fallback = false;
+                        circles = 3;
+                        (spent, frames, slow) = (Duration::ZERO, 0, 0);
+                    }
+                }
             }
             continue;
         }
@@ -948,7 +967,9 @@ fn run(rx: Receiver<Msg>, busy: Arc<AtomicBool>, emit: impl Fn(Event)) {
         }
         let fade = (now.duration_since(shown_at).as_secs_f32() * 1000.0 / FADE_MS).min(1.0);
         let opacity = OPACITY * cubic_bezier(0.42, 0.0, 0.58, 1.0, fade);
-        let frame = renderer.get_or_insert_with(|| Renderer::new(RES)).frame(&state.uniforms(), circles, opacity, crop);
+        let resolution = if high_quality { SIZE } else { RES };
+        let frame = renderer.get_or_insert_with(|| Renderer::new(resolution))
+            .frame(&state.uniforms(), circles, opacity, crop_pixels(crop, resolution));
         emit(Event::Frame(frame));
         // На паузе пятно доходит до покоя и замирает: у оригинала оно и дальше медленно
         // плывёт, но ради этого окно пришлось бы перерисовывать без конца.
@@ -972,7 +993,7 @@ fn run(rx: Receiver<Msg>, busy: Arc<AtomicBool>, emit: impl Fn(Event)) {
                 } else {
                     fallback = true;
                     renderer = None;
-                    emit(Event::Fallback);
+                    emit(Event::Fallback { high_quality });
                 }
             }
         }
