@@ -12,7 +12,8 @@ export component PlaybackProgress inherits Rectangle {
         duration: App.motion && App.progress-smooth ? 250ms : 0ms;
         easing: linear;
     }
-    out property <float> fraction: App.duration > 0 ? max(0, min(1, position / App.duration)) : 0;
+    property <float> shown: App.motion && App.progress-smooth ? position : App.position;
+    out property <float> fraction: App.duration > 0 ? max(0, min(1, shown / App.duration)) : 0;
 }
 
 // Картинки задаёт Rust при запуске из спрайта официального приложения.
