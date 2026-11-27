@@ -502,12 +502,13 @@ export component WavePage inherits Rectangle {
     property <length> blob: root.width * 0.6 * 1.107;
     property <bool> paused: App.has-track && !App.playing;
     property <length> title-y: App.wave-context ? 84px : 98px;
-    // Высота окна и сдвиги по замерам оригинала при 700–1100: плеер прижат к низу (H − 248),
-    // заголовок и пятно — к середине; ниже 800 отступы меньше.
     property <length> wh: root.height + 20px;
-    property <length> dp: max(wh - 248px, min(wh - 200px, 600px)) - 600px;
-    property <length> dt: max(wh / 2 - 225px, min(wh / 2 - 209px, 191px)) - 191px;
-    property <length> db: max(wh / 2 - 458px, min(wh / 2 - 442px, -42px)) + 42px;
+    // Один нижний отступ для всего блока, в том числе для настроек волны на паузе.
+    property <bool> show-tune: (!App.wave-context || App.wave-tunable) && (!App.has-track || paused);
+    property <length> controls-bottom: root.height - max(44px, root.height * 0.085)
+        - (show-tune ? 20px + tune.height : 0px);
+    property <length> dp: controls-bottom - 644px;
+    property <length> vibe-y: (title-y + 384px + dp) / 2 + 50px;
     property <float> progress: App.duration > 0 ? App.position / App.duration : 0;
     property <float> drag-progress: -1;
     property <float> shown: drag-progress >= 0 ? drag-progress : progress;
@@ -538,7 +539,7 @@ export component WavePage inherits Rectangle {
     // блока с названием, по его центру.
     property <length> canvas: text-w * 2.5;
     property <length> canvas-x: cx - canvas / 2;
-    property <length> canvas-y: 284px + db - canvas / 2;
+    property <length> canvas-y: vibe-y - canvas / 2;
     // Видимая часть холста в долях: за краем окна шейдер считать незачем. Слева край —
     // сама страница: там меню, пятно под него не заходит.
     property <{x0: float, y0: float, x1: float, y1: float}> crop: {
@@ -565,7 +566,7 @@ export component WavePage inherits Rectangle {
     // Без движения и в «Лёгком» режиме: картинка оригинала, перекрашенная под трек.
     if !App.vibe-anim: Image {
         x: cx - blob / 2;
-        y: 284px + db - blob / 2;
+        y: vibe-y - blob / 2;
         width: blob;
         height: blob;
         source: App.blob;
@@ -639,7 +640,7 @@ export component WavePage inherits Rectangle {
     // Сохраняем размер оригинала, пока заголовок помещается в одну строку.
     if !App.has-track || paused: Rectangle {
         x: text-x;
-        y: 171px + dt;
+        y: vibe-y - self.height / 2;
         width: text-w;
         height: title.preferred-height;
 
@@ -879,7 +880,7 @@ export component WavePage inherits Rectangle {
     tune := TunePill {
         x: cx - self.width / 2;
         y: 664px + dp;
-        visible: (!App.wave-context || App.wave-tunable) && (!App.has-track || paused);
+        visible: root.show-tune;
         clicked => { App.open-wave-settings(); }
     }
     if App.wave-settings-open: TouchArea {
