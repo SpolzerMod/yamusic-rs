@@ -287,3 +287,102 @@ pub fn on_wake(f: impl Fn() + Send + 'static) {
 pub fn cleanup() {
     let _ = std::fs::remove_file(socket_path());
 }
+
+/// Цветные шрифты COLRv1 для FreeType старше 2.11.
+///
+/// Готовая Skia из skia-binaries (её скачивает skia-bindings 0.157 вместе со Slint 1.19)
+/// собрана с заголовками FreeType 2.11+ и зовёт функции COLRv1. В RHEL 9 и его клонах
+/// FreeType 2.10, этих функций там нет, и сборка падает на компоновке (#198). Здесь эти
+/// функции объявлены в самом приложении: каждая ищет настоящую в системной libfreetype
+/// (`dlsym(RTLD_NEXT)`) и зовёт её, а без неё отвечает «у глифа нет COLRv1». Skia тогда
+/// рисует глиф обычным путём. Со встроенной FreeType (`embed-freetype`) этот модуль не нужен:
+/// символы повторятся.
+#[allow(non_snake_case)]
+mod freetype_colrv1 {
+    use std::ffi::{c_char, c_int, c_long, c_uchar, c_uint, c_void, CStr};
+    use std::sync::OnceLock;
+
+    extern "C" {
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    }
+
+    /// `RTLD_NEXT` из dlfcn.h (glibc и musl): искать в библиотеках, загруженных после нас.
+    const RTLD_NEXT: *mut c_void = std::ptr::without_provenance_mut(usize::MAX);
+
+    /// Адрес функции в системной FreeType, если она там есть. Ищется один раз.
+    fn system(slot: &'static OnceLock<usize>, name: &CStr) -> Option<usize> {
+        let addr = *slot.get_or_init(|| unsafe { dlsym(RTLD_NEXT, name.as_ptr()) } as usize);
+        (addr != 0).then_some(addr)
+    }
+
+    /// `FT_OpaquePaint` из ftcolor.h: передаётся по значению.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct OpaquePaint {
+        p: *mut c_uchar,
+        insert_root_transform: c_uchar,
+    }
+
+    #[no_mangle]
+    unsafe extern "C" fn FT_Get_Color_Glyph_Paint(face: *mut c_void, glyph: c_uint, root: c_int, paint: *mut c_void) -> c_uchar {
+        static F: OnceLock<usize> = OnceLock::new();
+        match system(&F, c"FT_Get_Color_Glyph_Paint") {
+            Some(f) => std::mem::transmute::<usize, unsafe extern "C" fn(*mut c_void, c_uint, c_int, *mut c_void) -> c_uchar>(f)(face, glyph, root, paint),
+            None => 0,
+        }
+    }
+
+    #[no_mangle]
+    unsafe extern "C" fn FT_Get_Color_Glyph_ClipBox(face: *mut c_void, glyph: c_uint, clip: *mut c_void) -> c_uchar {
+        static F: OnceLock<usize> = OnceLock::new();
+        match system(&F, c"FT_Get_Color_Glyph_ClipBox") {
+            Some(f) => std::mem::transmute::<usize, unsafe extern "C" fn(*mut c_void, c_uint, *mut c_void) -> c_uchar>(f)(face, glyph, clip),
+            None => 0,
+        }
+    }
+
+    #[no_mangle]
+    unsafe extern "C" fn FT_Get_Paint(face: *mut c_void, opaque: OpaquePaint, paint: *mut c_void) -> c_uchar {
+        static F: OnceLock<usize> = OnceLock::new();
+        match system(&F, c"FT_Get_Paint") {
+            Some(f) => std::mem::transmute::<usize, unsafe extern "C" fn(*mut c_void, OpaquePaint, *mut c_void) -> c_uchar>(f)(face, opaque, paint),
+            None => 0,
+        }
+    }
+
+    #[no_mangle]
+    unsafe extern "C" fn FT_Get_Paint_Layers(face: *mut c_void, iterator: *mut c_void, paint: *mut c_void) -> c_uchar {
+        static F: OnceLock<usize> = OnceLock::new();
+        match system(&F, c"FT_Get_Paint_Layers") {
+            Some(f) => std::mem::transmute::<usize, unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> c_uchar>(f)(face, iterator, paint),
+            None => 0,
+        }
+    }
+
+    #[no_mangle]
+    unsafe extern "C" fn FT_Get_Colorline_Stops(face: *mut c_void, stop: *mut c_void, iterator: *mut c_void) -> c_uchar {
+        static F: OnceLock<usize> = OnceLock::new();
+        match system(&F, c"FT_Get_Colorline_Stops") {
+            Some(f) => std::mem::transmute::<usize, unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> c_uchar>(f)(face, stop, iterator),
+            None => 0,
+        }
+    }
+
+    /// Без системной функции — единичная матрица и нулевой сдвиг, как у грани без
+    /// `FT_Set_Transform`. Skia зовёт её только после успешного `FT_Get_Color_Glyph_Paint`.
+    #[no_mangle]
+    unsafe extern "C" fn FT_Get_Transform(face: *mut c_void, matrix: *mut [c_long; 4], delta: *mut [c_long; 2]) {
+        static F: OnceLock<usize> = OnceLock::new();
+        match system(&F, c"FT_Get_Transform") {
+            Some(f) => std::mem::transmute::<usize, unsafe extern "C" fn(*mut c_void, *mut [c_long; 4], *mut [c_long; 2])>(f)(face, matrix, delta),
+            None => {
+                if !matrix.is_null() {
+                    *matrix = [0x10000, 0, 0, 0x10000];
+                }
+                if !delta.is_null() {
+                    *delta = [0, 0];
+                }
+            }
+        }
+    }
+}
