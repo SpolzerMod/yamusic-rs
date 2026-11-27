@@ -1,7 +1,7 @@
 // Нижний плеер.
 
 import { Theme } from "theme.slint";
-import { Icons, Icon, BarButton, Cover, ArtistLinks, ExplicitMark } from "widgets.slint";
+import { Icons, Icon, BarButton, Cover, ArtistLinks, ExplicitMark, FadeOnKey } from "widgets.slint";
 import { App, T } from "state.slint";
 import { VolumePopup } from "popups.slint";
 
@@ -175,7 +175,7 @@ export component PlayerBar inherits Rectangle {
             BarPlayButton { x: c - 32px; y: 20px; }
             TransportButton { x: c + 12px; y: 18px; width: 44px; height: 44px; icon: Icons.next-small; icon-size: 20px; tip: T.t("Следующая песня"); enabled: on; clicked => { App.next(); } }
             TransportButton { x: c + 72px; y: 24px; icon: App.repeat == 2 ? Icons.repeat-one : Icons.repeat; tip: App.repeat == 2 ? T.t("Повтор трека") : T.t("Повтор"); enabled: on; active: App.repeat > 0; ink-hover: self.ink; clicked => { App.cycle-repeat(); } }
-            BarButton { x: c + 120px; y: 18px; width: 44px; height: 44px; icon: App.liked ? Icons.liked : Icons.like; tip: T.t("Нравится"); enabled: on; clicked => { App.like(); } }
+            BarButton { x: c + 120px; y: 18px; width: 44px; height: 44px; icon: App.liked ? Icons.liked : Icons.like; tip: T.t("Нравится"); animate-like: true; enabled: on; clicked => { App.like(); } }
 
             // По высоте кнопок справа (y 24, 32 px), чтобы надпись стояла на их середине.
             if on && App.track-format != "": Text {
@@ -265,6 +265,8 @@ export component PlayerBar inherits Rectangle {
 // двойной клик возвращает обычное окно.
 export component MiniPlayer inherits Rectangle {
     property <bool> on: App.has-track;
+    meta-fade := FadeOnKey { width: 0px; height: 0px; key: App.title + "\n" + App.artists; }
+    cover-fade := FadeOnKey { width: 0px; height: 0px; key: meta-fade.key; duration: 1s; }
     background: on ? App.tint : Theme.background-color-primary-enabled-player;
     animate background { duration: App.motion ? Theme.duration-transition : 0ms; }
 
@@ -296,6 +298,7 @@ export component MiniPlayer inherits Rectangle {
             radius: Theme.radius-size-s;
             background: #ffffff14;
             source: App.cover;
+            alpha: cover-fade.k;
         }
         VerticalLayout {
             x: on ? 88px : 16px;
@@ -304,6 +307,7 @@ export component MiniPlayer inherits Rectangle {
             spacing: 2px;
             Text {
                 text: on ? App.title : App.app-name;
+                opacity: meta-fade.k;
                 overflow: elide;
                 font-size: Theme.font-size-label-m;
                 font-weight: 500;
@@ -311,13 +315,14 @@ export component MiniPlayer inherits Rectangle {
             }
             if on: Text {
                 text: App.artists;
+                opacity: meta-fade.k;
                 overflow: elide;
                 font-size: Theme.font-size-label-m;
                 color: #ffffff80;
             }
         }
 
-        BarButton { x: parent.width - 180px; y: 26px; width: 36px; height: 36px; icon: App.liked ? Icons.liked : Icons.like; tip: T.t("Нравится"); icon-size: 20px; enabled: on; clicked => { App.like(); } }
+        BarButton { x: parent.width - 180px; y: 26px; width: 36px; height: 36px; icon: App.liked ? Icons.liked : Icons.like; tip: T.t("Нравится"); animate-like: true; icon-size: 20px; enabled: on; clicked => { App.like(); } }
         TransportButton { x: parent.width - 136px; y: 28px; icon: Icons.prev-small; icon-size: 20px; enabled: on && App.can-prev; clicked => { App.prev(); } }
         BarPlayButton { x: parent.width - 96px; y: 24px; enabled: on; }
         TransportButton { x: parent.width - 48px; y: 28px; icon: Icons.next-small; icon-size: 20px; enabled: on; clicked => { App.next(); } }

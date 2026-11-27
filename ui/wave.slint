@@ -1,7 +1,7 @@
 // «Моя волна»: колесо вайбов, кнопка запуска и фоновое пятно в цветах трека.
 
 import { Theme } from "theme.slint";
-import { Icons, Icon, HoverIcon, BarButton, Cover, ScrollBar } from "widgets.slint";
+import { Icons, Icon, HoverIcon, BarButton, Cover, ScrollBar, FadeOnKey, LikePop } from "widgets.slint";
 import { T, App, WheelEntry, WaveOption } from "state.slint";
 import { VolumePopup } from "popups.slint";
 
@@ -13,6 +13,7 @@ component GlassButton inherits Rectangle {
     in property <bool> highlight-icon: hovered;
     /// Колёсико над кнопкой меняет громкость.
     in property <bool> scroll-volume;
+    in property <bool> animate-like;
     callback clicked;
     width: 48px;
     height: 48px;
@@ -33,7 +34,10 @@ component GlassButton inherits Rectangle {
         border-radius: self.width / 2;
         background: #ffffff.with-alpha(0.09 * (1 - root.spread));
     }
+    reaction := LikePop { width: 0px; height: 0px; liked: root.animate-like && App.liked; }
     Icon {
+        x: (parent.width - self.width) / 2 + (App.motion && root.animate-like ? reaction.shift : 0px);
+        transform-scale: App.motion && root.animate-like ? reaction.scale : 1;
         source: root.icon;
         size: root.icon-size;
         colorize: !root.enabled ? #ffffff14 : root.highlight-icon ? #e6e6e6 : #ffffffb3;
@@ -661,6 +665,14 @@ export component WavePage inherits Rectangle {
         }
     }
 
+    meta-fade := FadeOnKey { width: 0px; height: 0px; key: App.title + "\n" + App.artists; }
+    cover-fade := FadeOnKey { width: 0px; height: 0px; key: meta-fade.key; duration: 1s; }
+    artist-fade := FadeOnKey {
+        width: 0px;
+        height: 0px;
+        key: meta-fade.key + (App.cutout.width > 0 ? "\n+" : "");
+    }
+
     // Исполнитель крупно: клик открывает его страницу.
     if App.has-track && !paused: FitTitle {
         x: text-x;
@@ -670,6 +682,7 @@ export component WavePage inherits Rectangle {
         height: with-cutout ? 2 * 64px * 1.25 : 382px + dp - title-y;
         compact: with-cutout;
         text: App.artists;
+        opacity: meta-fade.k;
         longest: App.artists-longest;
         link: App.artist-list.length > 0;
         clicked => { App.open-current-artist(0); }
@@ -692,6 +705,7 @@ export component WavePage inherits Rectangle {
             width: root.art-w;
             height: root.art-box - 16px;
             source: App.cutout;
+            opacity: artist-fade.k;
             image-fit: contain;
         }
         art-ta := TouchArea {
@@ -708,7 +722,10 @@ export component WavePage inherits Rectangle {
         height: 96px;
         radius: Theme.radius-size-m;
         source: App.cover;
-        TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { App.open-current-album(); } }
+        alpha: cover-fade.k;
+        transform-scale: App.motion && cover-ta.has-hover ? 1.02 : 1;
+        animate transform-scale { duration: App.motion ? Theme.duration-transition : 0ms; }
+        cover-ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { App.open-current-album(); } }
     }
 
     if App.has-track: HorizontalLayout {
@@ -759,6 +776,7 @@ export component WavePage inherits Rectangle {
             Text {
                 width: parent.width - 52px;
                 text: App.title;
+                opacity: meta-fade.k;
                 horizontal-alignment: center;
                 overflow: elide;
                 font-family: "YS Music Headline";
@@ -800,7 +818,7 @@ export component WavePage inherits Rectangle {
                 }
             }
         }
-        GlassButton { y: 8px; icon: App.liked ? Icons.liked : Icons.like; clicked => { App.like(); } }
+        GlassButton { y: 8px; icon: App.liked ? Icons.liked : Icons.like; animate-like: true; clicked => { App.like(); } }
         more := GlassButton {
             y: 8px;
             icon: Icons.more;
@@ -824,6 +842,8 @@ export component WavePage inherits Rectangle {
             height: 64px;
             border-radius: 32px;
             background: App.playing ? #ffffff40 : Theme.logo-color-primary-player;
+            transform-scale: App.motion && play-ta.has-hover ? 1.05 : 1;
+            animate transform-scale { duration: App.motion ? Theme.duration-transition : 0ms; }
             animate background { duration: App.motion ? Theme.duration-transition : 0ms; easing: ease; }
             Icon {
                 source: App.playing ? Icons.pause-big : Icons.play-big;
