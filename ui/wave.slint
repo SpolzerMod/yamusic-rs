@@ -1,7 +1,7 @@
 // «Моя волна»: колесо вайбов, кнопка запуска и фоновое пятно в цветах трека.
 
 import { Theme } from "theme.slint";
-import { Icons, Icon, HoverIcon, BarButton, Cover, ScrollBar } from "widgets.slint";
+import { Icons, Icon, HoverIcon, BarButton, Cover, ScrollBar, PlaybackProgress } from "widgets.slint";
 import { T, App, WheelEntry, WaveOption } from "state.slint";
 import { VolumePopup } from "popups.slint";
 
@@ -508,7 +508,8 @@ export component WavePage inherits Rectangle {
     property <length> dp: max(wh - 248px, min(wh - 200px, 600px)) - 600px;
     property <length> dt: max(wh / 2 - 225px, min(wh / 2 - 209px, 191px)) - 191px;
     property <length> db: max(wh / 2 - 458px, min(wh / 2 - 442px, -42px)) + 42px;
-    property <float> progress: App.duration > 0 ? App.position / App.duration : 0;
+    playback := PlaybackProgress {}
+    property <float> progress: playback.fraction;
     property <float> drag-progress: -1;
     property <float> shown: drag-progress >= 0 ? drag-progress : progress;
 

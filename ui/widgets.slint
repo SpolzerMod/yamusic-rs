@@ -3,6 +3,18 @@
 import { Theme } from "theme.slint";
 import { App } from "state.slint";
 
+// Сглаживаем показания между тиками плеера, сохраняя мгновенную перемотку.
+export component PlaybackProgress inherits Rectangle {
+    width: 0px;
+    height: 0px;
+    property <float> position: App.position;
+    animate position {
+        duration: App.motion && App.progress-smooth ? 250ms : 0ms;
+        easing: linear;
+    }
+    out property <float> fraction: App.duration > 0 ? max(0, min(1, position / App.duration)) : 0;
+}
+
 // Картинки задаёт Rust при запуске из спрайта официального приложения.
 export global Icons {
     in property <image> logo;

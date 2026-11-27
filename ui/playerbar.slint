@@ -1,7 +1,7 @@
 // Нижний плеер.
 
 import { Theme } from "theme.slint";
-import { Icons, Icon, BarButton, Cover, ArtistLinks, ExplicitMark } from "widgets.slint";
+import { Icons, Icon, BarButton, Cover, ArtistLinks, ExplicitMark, PlaybackProgress } from "widgets.slint";
 import { App, T } from "state.slint";
 import { VolumePopup } from "popups.slint";
 
@@ -23,7 +23,8 @@ component BarPlayButton inherits TransportButton {
 
 // Нижний плеер. Фон — цвет обложки (hsl с яркостью 20%), прогресс закрашивает фон слева направо.
 export component PlayerBar inherits Rectangle {
-    property <float> progress: App.duration > 0 ? App.position / App.duration : 0;
+    playback := PlaybackProgress {}
+    property <float> progress: playback.fraction;
     property <float> drag-progress: -1;
     property <float> shown: drag-progress >= 0 ? drag-progress : progress;
     property <brush> ink: #ffffff80;
@@ -265,6 +266,9 @@ export component PlayerBar inherits Rectangle {
 // двойной клик возвращает обычное окно.
 export component MiniPlayer inherits Rectangle {
     property <bool> on: App.has-track;
+    property <float> seek-fraction: max(0, min(1, seek.mouse-x / seek.width));
+    property <float> shown: seek.pressed ? seek-fraction : playback.fraction;
+    playback := PlaybackProgress {}
     background: on ? App.tint : Theme.background-color-primary-enabled-player;
     animate background { duration: App.motion ? Theme.duration-transition : 0ms; }
 
@@ -283,9 +287,9 @@ export component MiniPlayer inherits Rectangle {
 
         if on: Rectangle {
             x: 0;
-            y: parent.height - 2px;
-            width: App.duration > 0 ? parent.width * App.position / App.duration : 0;
-            height: 2px;
+            y: parent.height - self.height;
+            width: parent.width * root.shown;
+            height: seek.has-hover || seek.pressed ? 4px : 2px;
             background: Theme.controls-color-primary-default-enabled;
         }
         if on: Cover {
@@ -366,5 +370,19 @@ export component MiniPlayer inherits Rectangle {
         }
         if ta.has-hover: BarButton { x: parent.width - 52px; y: 2px; width: 24px; height: 24px; icon: Icons.fullscreen; icon-size: 16px; clicked => { App.toggle-mini(); } }
         if ta.has-hover: BarButton { x: parent.width - 28px; y: 2px; width: 24px; height: 24px; icon: Icons.close-xs; icon-size: 16px; clicked => { App.close(); } }
+
+        seek := TouchArea {
+            x: 0;
+            y: parent.height - self.height;
+            width: parent.width;
+            height: 10px;
+            enabled: root.on && !App.loading && App.duration > 0;
+            mouse-cursor: MouseCursor.pointer;
+            pointer-event(e) => {
+                if e.button == PointerEventButton.left && e.kind == PointerEventKind.up {
+                    App.seek(root.seek-fraction * App.duration);
+                }
+            }
+        }
     }
 }
