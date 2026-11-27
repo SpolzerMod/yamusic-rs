@@ -12,7 +12,11 @@ export component PlaybackProgress inherits Rectangle {
         duration: App.motion && App.progress-smooth ? 250ms : 0ms;
         easing: linear;
     }
-    property <float> shown: App.motion && App.progress-smooth ? position : App.position;
+    property <float> shown: {
+        // Следим за исходной точкой анимации и на паузе.
+        let interpolated = position;
+        return App.motion && App.progress-smooth ? interpolated : App.position;
+    }
     out property <float> fraction: App.duration > 0 ? max(0, min(1, shown / App.duration)) : 0;
 }
 
