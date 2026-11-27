@@ -1,7 +1,7 @@
 // Полноэкранный плеер: обложка, очередь и синхронный текст песни.
 
 import { Theme } from "theme.slint";
-import { Icons, Icon, Cover, ArtistLinks, ExplicitMark } from "widgets.slint";
+import { Icons, Icon, Cover, ArtistLinks, ExplicitMark, PlaybackProgress } from "widgets.slint";
 import { T, App, TrackItem } from "state.slint";
 
 component RoundButton inherits Rectangle {
@@ -106,7 +106,8 @@ component QueueRow inherits Rectangle {
 component Poster inherits Rectangle {
     width: 400px;
     height: 508px;
-    property <float> progress: App.duration > 0 ? App.position / App.duration : 0;
+    playback := PlaybackProgress {}
+    property <float> progress: playback.fraction;
     property <float> drag: -1;
     property <float> shown: drag >= 0 ? drag : progress;
 

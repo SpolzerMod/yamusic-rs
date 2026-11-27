@@ -385,6 +385,12 @@ impl Ctx {
             self.st.borrow_mut().started = true;
         }
         let started = self.st.borrow().started;
+        let delta = s.position - app.get_position();
+        let same_track = self.st.borrow().track_id.as_deref() == s.track.as_ref().map(|t| t.id.as_str());
+        app.set_progress_smooth(
+            started && same_track && app.get_playing() && s.playing && !s.loading
+                && (0.0..=1.0).contains(&delta) && app.get_duration() == s.duration,
+        );
         app.set_has_track(started && s.track.is_some());
         app.set_playing(s.playing);
         app.set_likes_revision(s.likes_revision);
@@ -2253,7 +2259,10 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     app.on_prev(move || p.send(Cmd::Prev));
     app.on_seek(|seconds| with_ctx(|c| {
         if let Some(position) = c.player.seek(seconds) {
-            c.ui().global::<App>().set_position(position);
+            let ui = c.ui();
+            let app = ui.global::<App>();
+            app.set_progress_smooth(false);
+            app.set_position(position);
         }
     }));
     let p = player.clone();
@@ -2745,8 +2754,8 @@ fn install_mpris(ui: &AppWindow, player: &Player) {
                 Event::Play | Event::Pause => {}
                 Event::Next => p.send(Cmd::Next),
                 Event::Prev => p.send(Cmd::Prev),
-                Event::Seek(sec) => p.send(Cmd::Seek(sec)),
-                Event::SeekBy(sec) => p.send(Cmd::Seek((s.position + sec).max(0.0))),
+                Event::Seek(sec) => app.invoke_seek(sec),
+                Event::SeekBy(sec) => app.invoke_seek((s.position + sec).max(0.0)),
                 Event::Volume(v) => app.invoke_set_volume(v),
                 Event::Raise => reveal(&ui),
                 Event::Quit => quit(),
@@ -2772,7 +2781,7 @@ fn install_smtc(ui: &AppWindow, player: &Player) {
                 Event::Play | Event::Pause => {}
                 Event::Next => p.send(Cmd::Next),
                 Event::Prev => p.send(Cmd::Prev),
-                Event::Seek(sec) => p.send(Cmd::Seek(sec)),
+                Event::Seek(sec) => app.invoke_seek(sec),
             }
         });
     });
@@ -5404,7 +5413,7 @@ fn register_extra(app: &App) {
         with_ctx(|c| {
             let t = c.st.borrow().lyrics.get(i.max(0) as usize).map(|l| l.from);
             if let Some(t) = t.filter(|t| *t >= 0.0) {
-                c.player.send(Cmd::Seek(t + 0.01));
+                c.ui().global::<App>().invoke_seek(t + 0.01);
                 c.st.borrow_mut().lyrics_wheel_timer = None;
                 c.ui().global::<App>().set_lyrics_scrolled(false);
                 c.update_lyric_current(t + 0.01);
