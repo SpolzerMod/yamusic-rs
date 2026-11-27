@@ -136,6 +136,96 @@ export global Icons {
     in property <image> upload;
 }
 
+// Отклик значка на лайк, как `LikeButton_scale` и `LikeButton_unscale` оригинала:
+// лайк — масштаб 1 → 1,1 → 1 за 0,4 с, снятие — качание на пиксель влево-вправо за 0,5 с.
+export component LikePop inherits Rectangle {
+    in property <bool> liked;
+    in property <string> track-key: App.title + "\n" + App.artists;
+    property <{ key: string, liked: bool }> track: { key: track-key, liked: liked };
+    property <string> last-key;
+    init => { last-key = track-key; }
+    out property <float> scale: 1;
+    out property <length> shift: phase == 1 ? -1px + 2px * a : phase == 2 ? 1px - 1px * b : 0px;
+    property <int> phase;
+    property <float> a;
+    property <float> b;
+    animate scale { duration: 200ms; easing: ease; }
+    animate a { duration: 250ms; easing: ease; }
+    animate b { duration: 250ms; easing: ease; }
+    changed track => {
+        if self.track.key != self.last-key {
+            self.last-key = self.track.key;
+            back.running = false;
+            half.running = false;
+            self.scale = 1;
+            self.phase = 0;
+            self.a = 0;
+            self.b = 0;
+        } else if App.motion && App.has-track {
+            if self.liked {
+                self.scale = 1.1;
+                back.running = true;
+            } else {
+                self.phase = 1;
+                self.a = 1;
+                half.running = true;
+            }
+        }
+    }
+    back := Timer {
+        interval: 200ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            root.scale = 1;
+        }
+    }
+    half := Timer {
+        interval: 250ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            if root.phase == 1 {
+                root.phase = 2;
+                root.b = 1;
+                self.running = true;
+            } else {
+                root.phase = 0;
+                root.a = 0;
+                root.b = 0;
+            }
+        }
+    }
+}
+
+// Блок, который проявляется заново при каждой смене `key` (например, трека):
+// `animation: fade-in .5s ease-in-out` на элементе с React-ключом.
+export component FadeOnKey inherits Rectangle {
+    in property <string> key;
+    in property <duration> duration: 500ms;
+    out property <float> k: App.motion ? shown : 1;
+    property <float> shown: 1;
+    property <bool> snap;
+    // Сначала мгновенно в ноль, со следующего кадра — плавно к единице.
+    animate shown { duration: root.snap ? 0ms : root.duration; easing: ease-in-out; }
+    changed key => {
+        if App.motion {
+            self.snap = true;
+            self.shown = 0;
+            go.running = true;
+        }
+    }
+    go := Timer {
+        interval: 16ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            root.snap = false;
+            root.shown = 1;
+        }
+    }
+}
+
 export component Icon inherits Image {
     in property <length> size: 24px;
     width: size;
@@ -146,6 +236,8 @@ export component Icon inherits Image {
 export component HoverIcon inherits Rectangle {
     in property <image> source <=> glyph.source;
     in property <brush> colorize <=> glyph.colorize;
+    in property <float> pop-scale: 1;
+    in property <length> pop-shift: 0px;
     in property <float> alpha: 1;
     in property <length> size: 24px;
     in property <bool> zoomed;
@@ -156,11 +248,11 @@ export component HoverIcon inherits Rectangle {
     // Округляем, как Skia при масштабе 1, чтобы значок не дёргался при наведении.
     pure function pixel-offset(pos: length) -> length { return round(pos / 1phx) * 1phx - pos; }
     glyph := Icon {
-        x: root.pixel-offset(root.absolute-position.x);
+        x: root.pixel-offset(root.absolute-position.x) + root.pop-shift;
         y: root.pixel-offset(root.absolute-position.y);
         size: root.size;
         opacity: root.alpha;
-        transform-scale: root.zoom;
+        transform-scale: root.zoom * root.pop-scale;
     }
 }
 
@@ -195,6 +287,7 @@ export component BarButton inherits Rectangle {
     in property <brush> ink-hover: Theme.controls-color-secondary-text-hovered;
     in property <brush> ink-active: Theme.controls-color-primary-default-enabled;
     in property <bool> grow-on-hover;
+    in property <bool> animate-like;
     in property <bool> smooth-color: grow-on-hover;
     in property <brush> ink-off: #ffffff14;
     /// Колёсико над кнопкой меняет громкость.
@@ -216,9 +309,12 @@ export component BarButton inherits Rectangle {
             App.tip = "";
         }
     }
+    reaction := LikePop { width: 0px; height: 0px; liked: root.animate-like && App.liked; }
     HoverIcon {
         source: icon;
         size: root.icon-size;
+        pop-scale: App.motion && root.animate-like ? reaction.scale : 1;
+        pop-shift: App.motion && root.animate-like ? reaction.shift : 0px;
         zoomed: root.grow-on-hover && ta.has-hover && root.enabled;
         colorize: !enabled ? ink-off : active ? ink-active : ta.has-hover ? ink-hover : ink;
         animate colorize { duration: App.motion && root.smooth-color ? Theme.duration-transition : 0ms; easing: ease; }
