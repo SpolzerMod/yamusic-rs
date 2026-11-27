@@ -69,13 +69,14 @@ pub fn is_maximized(w: &slint::Window) -> bool {
 /// Мини-плееру не нужны Snap, разворачивание и системные края изменения размера.
 /// Меняем и флаги winit, и уже созданное окно, чтобы следующая смена свойств их не вернула.
 pub fn set_mini_mode(w: &slint::Window, mini: bool) {
-    use slint::winit_030::{winit::window::WindowButtons, WinitWindowAccessor};
+    use slint::winit_030::{winit::{platform::windows::WindowExtWindows, window::WindowButtons}, WinitWindowAccessor};
     w.with_winit_window(|ww| {
         if mini {
             ww.set_maximized(false);
         }
         ww.set_resizable(!mini);
         ww.set_enabled_buttons(if mini { WindowButtons::CLOSE | WindowButtons::MINIMIZE } else { WindowButtons::all() });
+        ww.set_skip_taskbar(mini);
     });
     let hwnd = handle(w);
     if hwnd == 0 {
