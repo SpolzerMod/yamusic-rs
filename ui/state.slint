@@ -592,7 +592,10 @@ export global App {
     in property <string> download-dir;
     in property <bool> download-flac;
     in property <bool> log-volume;
-    in property <bool> wave-motion;
+    in property <int> wave-resolution;
+    in property <int> wave-min-resolution;
+    in property <int> wave-max-resolution;
+    callback set-wave-resolution(int);
     in property <bool> crossfade;
     // Режим работы: «Плавный» — анимации и кэш слоёв, «Лёгкий» — без них.
     in property <bool> motion: true;
