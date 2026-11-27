@@ -836,7 +836,7 @@ fn parse_pin(v: &Value) -> Option<Pin> {
         "wave_item" => Pin {
             title: str_of(d, "title"),
             subtitle: str_of(d, "header"),
-            cover: cover("/backgroundImageUrl").or_else(|| cover("/agent/cover/uri")),
+            cover: cover("/agent/cover/uri").or_else(|| cover("/backgroundImageUrl")),
             round: true,
             target: format!("station:{}", str_of(d, "stationId")),
         },
