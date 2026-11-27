@@ -332,11 +332,15 @@ export component AppWindow inherits Window {
         y: 0;
         width: parent.width - self.x - 4 * 46px;
         height: new-vibe && !App.fullscreen ? 20px : top;
-        pointer-event(e) => {
-            if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+        // Start native dragging only after movement so Windows does not consume plain clicks.
+        property <bool> dragging;
+        moved => {
+            if self.pressed && !dragging && (abs(self.mouse-x - self.pressed-x) >= 4px || abs(self.mouse-y - self.pressed-y) >= 4px) {
+                dragging = true;
                 App.drag-window();
             }
         }
+        changed pressed => { if !self.pressed { dragging = false; } }
         double-clicked => { App.toggle-maximize(); }
     }
 
