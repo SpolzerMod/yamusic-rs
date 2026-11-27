@@ -413,6 +413,18 @@ export component SettingsPage inherits Rectangle {
             }
             SettingItem { title: T.t("Очистить память"); clicked => { App.setting("clear"); } }
             SettingItem { title: T.t("Горячие клавиши"); clicked => { App.shortcuts-open = true; } }
+            VerticalLayout {
+                spacing: 16px;
+                Text {
+                    text: T.t("Разделы боковой панели");
+                    font-size: 16px;
+                    font-weight: 700;
+                    color: Theme.controls-color-primary-text-enabled-variant;
+                }
+                SettingItem { title: T.t("Для вас и Тренды"); toggle: true; on: !App.hide-nav-trends; clicked => { App.setting("nav-trends"); } }
+                SettingItem { title: T.t("Концерты"); toggle: true; on: !App.hide-nav-concerts; clicked => { App.setting("nav-concerts"); } }
+                SettingItem { title: T.t("Книги и подкасты"); toggle: true; on: !App.hide-nav-nonmusic; clicked => { App.setting("nav-nonmusic"); } }
+            }
             SettingItem {
                 title: T.t("Эквалайзер");
                 desc: App.eq-on ? T.t("Включен") : T.t("Выключен");

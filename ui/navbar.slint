@@ -84,22 +84,23 @@ export component Navbar inherits TouchArea {
         }
     }
 
-    VerticalLayout {
+    nav-links := VerticalLayout {
         x: 12px;
         y: 76px;
         width: c ? 48px : parent.width - self.x;
+        height: self.preferred-height;
         spacing: 4px;
         NavLink { icon: Icons.nav-search; icon-selected: Icons.nav-search; text: T.t("Поиск"); page: Page.search; }
         NavLink { icon: Icons.nav-wave; icon-selected: Icons.nav-wave; text: T.t("Моя волна"); page: Page.wave; }
-        NavLink { icon: Icons.nav-trends; icon-selected: Icons.nav-trends-selected; text: T.t("Для вас и Тренды"); page: Page.trends; }
-        NavLink { icon: Icons.nav-concerts; icon-selected: Icons.nav-concerts-selected; text: T.t("Концерты"); page: Page.concerts; }
-        NavLink { icon: Icons.nav-nonmusic; icon-selected: Icons.nav-nonmusic-selected; text: T.t("Книги и подкасты"); page: Page.nonmusic; }
+        if !App.hide-nav-trends: NavLink { icon: Icons.nav-trends; icon-selected: Icons.nav-trends-selected; text: T.t("Для вас и Тренды"); page: Page.trends; }
+        if !App.hide-nav-concerts: NavLink { icon: Icons.nav-concerts; icon-selected: Icons.nav-concerts-selected; text: T.t("Концерты"); page: Page.concerts; }
+        if !App.hide-nav-nonmusic: NavLink { icon: Icons.nav-nonmusic; icon-selected: Icons.nav-nonmusic-selected; text: T.t("Книги и подкасты"); page: Page.nonmusic; }
         NavLink { icon: Icons.nav-collection; icon-selected: Icons.nav-collection-selected; text: T.t("Коллекция"); page: Page.collection; }
     }
 
     pins := Flickable {
         x: 0;
-        y: 76px + 6 * 48px + 5 * 4px + 24px;
+        y: nav-links.y + nav-links.height + 24px;
         width: parent.width;
         height: max(0px, parent.height - self.y - 92px);
         content-height: App.pins.length * 56px;

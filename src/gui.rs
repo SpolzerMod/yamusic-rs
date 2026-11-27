@@ -2120,6 +2120,9 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     ui.global::<T>().set_lang(cfg.lang.clone().into());
     ui.global::<T>().on_tr(|s: SharedString| SharedString::from(crate::i18n::tr(s.as_str())));
     app.set_nav_collapsed(cfg.navbar_collapsed);
+    app.set_hide_nav_trends(cfg.hide_nav_trends);
+    app.set_hide_nav_concerts(cfg.hide_nav_concerts);
+    app.set_hide_nav_nonmusic(cfg.hide_nav_nonmusic);
 
     let discord = crate::discord::Discord::spawn(
         player.clone(),
@@ -3642,6 +3645,25 @@ impl Ctx {
                 let mut st = self.st.borrow_mut();
                 st.cfg.wave_motion = on;
                 st.cfg.save();
+            }
+            "nav-trends" | "nav-concerts" | "nav-nonmusic" => {
+                let mut st = self.st.borrow_mut();
+                let cfg = &mut st.cfg;
+                match id {
+                    "nav-trends" => {
+                        cfg.hide_nav_trends = !cfg.hide_nav_trends;
+                        app.set_hide_nav_trends(cfg.hide_nav_trends);
+                    }
+                    "nav-concerts" => {
+                        cfg.hide_nav_concerts = !cfg.hide_nav_concerts;
+                        app.set_hide_nav_concerts(cfg.hide_nav_concerts);
+                    }
+                    _ => {
+                        cfg.hide_nav_nonmusic = !cfg.hide_nav_nonmusic;
+                        app.set_hide_nav_nonmusic(cfg.hide_nav_nonmusic);
+                    }
+                }
+                cfg.save();
             }
             "download-flac" => {
                 let on = !app.get_download_flac();
