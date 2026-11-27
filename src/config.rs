@@ -54,6 +54,8 @@ pub struct Config {
     pub hidden_blocks: Vec<HiddenBlock>,
     /// Раз в полчаса спрашивать GitHub о новой версии.
     pub check_updates: bool,
+    /// Открывать страницу релиза вместо установки обновления из приложения.
+    pub update_notify_only: bool,
     /// «Треки 18+» в меню профиля.
     pub allow_explicit: bool,
     /// Добавлять треки в конец плейлиста, а не в начало.
@@ -107,6 +109,7 @@ impl Default for Config {
             log_volume: false,
             hidden_blocks: Vec::new(),
             check_updates: true,
+            update_notify_only: false,
             allow_explicit: true,
             add_to_end: false,
             wave_motion: false,

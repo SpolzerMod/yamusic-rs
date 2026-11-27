@@ -521,7 +521,8 @@ export component AppWindow inherits Window {
                 : Theme.controls-color-secondary-default-enabled;
             opacity: App.update-busy ? 0.6 : 1;
             update-label := Text {
-                text: App.update-busy ? T.t("Загрузка…") : T.t("Обновить");
+                text: App.update-busy ? T.t("Загрузка…") : App.update-can-install && !App.update-notify-only
+                    ? T.t("Обновить") : T.t("Открыть страницу релизов");
                 color: Theme.controls-color-secondary-on-default-enabled;
                 font-size: Theme.font-size-label-m;
                 font-weight: 500;

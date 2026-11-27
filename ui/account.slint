@@ -519,6 +519,13 @@ export component SettingsPage inherits Rectangle {
                 on: App.check-updates;
                 clicked => { App.setting("check-updates"); }
             }
+            if App.update-install-supported: SettingItem {
+                title: T.t("Только уведомлять об обновлениях");
+                desc: T.t("Открывать страницу релиза для ручной установки");
+                toggle: true;
+                on: App.update-notify-only;
+                clicked => { App.setting("update-notify-only"); }
+            }
             // Пункт трея оригинала (`desktop.check-for-updates`) с итогом проверки: иначе ошибку
             // GitHub видно только в журнале (#128).
             SettingItem {
