@@ -30,6 +30,11 @@ pub fn pic(uri: &str, size: u32) -> String {
     // get-music-misc отдаёт только эти размеры, на остальные — 404.
     let size = if uri.contains("/get-music-misc/") {
         [30, 40, 50, 75, 80, 100, 150, 160, 200, 300, 400, 460, 600, 700, 800, 1000].into_iter().find(|&s| s >= size).unwrap_or(1000)
+    } else if uri.contains("/get-music-feed-promotion/") {
+        // У промо-картинок («Актуальное» в «Книгах и подкастах») нет 600x600 — 404, карточки
+        // оставались пустыми. Оригинал просит их в 400 и 800 для экрана с масштабом
+        // (`PromotionsCard`: size 400, srcset 2x).
+        if size <= 400 { 400 } else { 800 }
     } else {
         [50, 100, 200, 300, 400, 600, 1000].into_iter().find(|&s| s >= size).unwrap_or(1000)
     };
@@ -44,6 +49,9 @@ pub struct Named {
     /// Фото без фона: телефон ставит его над названием трека в «Моей волне».
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub cutout: Option<String>,
+    /// «Сборник» вместо исполнителя.
+    #[cfg_attr(target_os = "android", allow(dead_code))]
+    pub various: bool,
     /// Составной исполнитель («A & B») по частям: меню трека открывает их по отдельности.
     #[cfg_attr(target_os = "android", allow(dead_code))]
     pub decomposed: Vec<Named>,
@@ -83,6 +91,8 @@ pub struct Track {
     pub mood: Option<Mood>,
     /// `type` трека: music, podcast-episode, audiobook, fairy-tale… Пусто — music.
     pub kind: String,
+    /// Первый трек тома в альбоме из нескольких томов: номер диска для заголовка «Диск N».
+    pub disk: Option<u32>,
 }
 
 /// `trackParameters` из ответа API.
@@ -391,6 +401,7 @@ fn named(x: &Value) -> Option<Named> {
         name: x.get("name")?.as_str()?.to_string(),
         cover: x.pointer("/cover/uri").and_then(|u| u.as_str()).map(String::from),
         cutout: x.pointer("/cutoutCover/uri").and_then(|u| u.as_str()).map(String::from),
+        various: x.get("various").and_then(|v| v.as_bool()).unwrap_or(false),
         decomposed: decomposed.unwrap_or_default(),
     })
 }
@@ -468,7 +479,27 @@ pub(crate) fn parse_track(v: &Value) -> Option<Track> {
         batch_id: String::new(),
         mood: mood_of(v),
         kind: str_of(v, "type"),
+        disk: None,
     })
+}
+
+/// Треки всех томов альбома одним списком. Как `makeFlatVolumeItems` оригинала: заголовок
+/// «Диск N» стоит перед каждым томом, только если томов больше одного; номер —
+/// `albums[0].trackPosition.volume` первого трека тома.
+fn album_tracks(v: &Value) -> Vec<Track> {
+    let vols: Vec<&Vec<Value>> = v.get("volumes").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_array).collect();
+    let mut tracks: Vec<Track> = Vec::new();
+    for (k, vol) in vols.iter().enumerate() {
+        let start = tracks.len();
+        tracks.extend(vol.iter().filter_map(parse_track));
+        if vols.len() > 1 {
+            if let Some(first) = tracks.get_mut(start) {
+                let number = vol.first().and_then(|t| t.pointer("/albums/0/trackPosition/volume")).and_then(Value::as_u64);
+                first.disk = Some(number.map_or(k as u32 + 1, |n| n as u32));
+            }
+        }
+    }
+    tracks
 }
 
 fn mood_of(v: &Value) -> Option<Mood> {
@@ -1025,6 +1056,34 @@ fn short(s: &str) -> String {
     s.chars().take(200).collect()
 }
 
+/// Ключ волны в Коллекции, как у карты `library.vibes` оригинала: сиды без повторов, по
+/// порядку, через запятую.
+pub fn wave_key(seeds: &[String]) -> String {
+    let mut seeds: Vec<&str> = seeds.iter().map(String::as_str).collect();
+    seeds.sort_unstable();
+    seeds.dedup();
+    seeds.join(",")
+}
+
+/// Ответ `account/experiments/details` → имена экспериментов с группой `on`.
+fn experiments_on(v: &Value) -> std::collections::HashSet<String> {
+    v.as_object()
+        .map(|m| m.iter().filter(|(_, e)| e.get("group").and_then(|g| g.as_str()) == Some("on")).map(|(k, _)| k.clone()).collect())
+        .unwrap_or_default()
+}
+
+/// Ответ `collection/sync` → ключи волн из `likedWaves`.
+fn parse_liked_waves(v: &Value) -> Option<std::collections::HashSet<String>> {
+    let liked = v.pointer("/values/likedWaves/values/liked")?.as_array()?;
+    Some(
+        liked
+            .iter()
+            .filter_map(|w| w.get("seeds")?.as_array())
+            .map(|seeds| wave_key(&seeds.iter().filter_map(|s| s.as_str().map(String::from)).collect::<Vec<_>>()))
+            .collect(),
+    )
+}
+
 impl Api {
     pub fn new(token: &str) -> Self {
         let http = Client::builder()
@@ -1287,6 +1346,37 @@ impl Api {
         } else {
             Err(format!("HTTP {status}: {}", short(&text)))
         }
+    }
+
+    /// Включённые серверные эксперименты оригинала (`account/experiments/details`): имена с
+    /// группой `on`, как у `checkExperiment(имя, "on")`.
+    pub fn experiments_on(&self) -> Res<std::collections::HashSet<String>> {
+        let v = self.get_raw("/account/experiments/details")?;
+        Ok(experiments_on(&v))
+    }
+
+    /// Волны в Коллекции (ключи — `wave_key`): `collection/sync` только с `likedWaves`, как
+    /// `library.getData([LIKED_VIBES])` оригинала.
+    pub fn liked_waves(&self) -> Res<std::collections::HashSet<String>> {
+        let v = self.post_raw("/collection/sync", &json!({ "likedWaves": { "allValuesRequired": true } }))?;
+        parse_liked_waves(&v).ok_or_else(|| "в ответе нет likedWaves".into())
+    }
+
+    /// «Нравится» у волны: `collection/v1/waves/like` или `unlike`, сиды — без повторов и по
+    /// порядку, как в `library.toggleVibeLike` оригинала.
+    pub fn like_wave(&self, seeds: &[String], like: bool) -> Res<()> {
+        let path = if like { "/collection/v1/waves/like" } else { "/collection/v1/waves/unlike" };
+        let key = wave_key(seeds);
+        let seeds: Vec<&str> = key.split(',').collect();
+        self.post_raw(path, &json!({ "waves": [{ "seeds": seeds }] })).map(|_| ())
+    }
+
+    /// «Поделиться» волной: `PUT wave/v1/shares` с сидами отдаёт `shareId`, ссылка —
+    /// `/myvibe/<shareId>` на сайте Музыки, как у `ShareVibeMenuItem` оригинала.
+    pub fn share_wave(&self, seeds: &[String]) -> Res<String> {
+        let v = self.send_raw(self.desktop_req(Method::PUT, "/wave/v1/shares").json(&json!({ "seeds": seeds })))?;
+        let id = s(v.get("shareId")).ok_or("в ответе нет shareId")?;
+        Ok(format!("https://music.yandex.ru/myvibe/{id}"))
     }
 
     /// Лайк альбома или исполнителя: `kind` — albums или artists.
@@ -1763,12 +1853,7 @@ impl Api {
     pub fn album(&self, id: &str) -> Res<(Album, Vec<Track>)> {
         let v = self.get(&format!("/albums/{id}/with-tracks"), &[])?;
         let album = parse_album(&v).ok_or("нет данных об альбоме")?;
-        let tracks = v
-            .get("volumes")
-            .and_then(|x| x.as_array())
-            .map(|vols| vols.iter().filter_map(|d| d.as_array()).flatten().filter_map(parse_track).collect())
-            .unwrap_or_default();
-        Ok((album, tracks))
+        Ok((album, album_tracks(&v)))
     }
 
     pub fn playlist(&self, uid: &str, kind: &str) -> Res<(Playlist, Vec<Track>)> {
@@ -2096,6 +2181,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn liked_waves_are_keyed_by_sorted_unique_seeds() {
+        let v = serde_json::json!({ "values": { "likedWaves": { "info": { "revision": 7 }, "values": { "liked": [
+            { "seeds": ["genre:rock"], "timestamp": "2026-11-01T00:00:00Z" },
+            { "seeds": ["mood:calm", "activity:road-trip", "mood:calm"], "timestamp": "2026-11-02T00:00:00Z" },
+            { "timestamp": "2026-11-03T00:00:00Z" }
+        ] } } } });
+        let keys = parse_liked_waves(&v).unwrap();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains("genre:rock"));
+        assert!(keys.contains("activity:road-trip,mood:calm"));
+        assert_eq!(wave_key(&["mood:calm".into(), "activity:road-trip".into()]), "activity:road-trip,mood:calm");
+        assert!(parse_liked_waves(&serde_json::json!({ "values": {} })).is_none());
+    }
+
+    #[test]
+    fn experiments_on_are_those_in_group_on() {
+        let v = serde_json::json!({
+            "WebNextWaveLikesAndShares": { "group": "on", "value": { "title": "on" } },
+            "WebNextVibeDescription": { "group": "default", "value": { "title": "default" } },
+            "WebNextOther": { "value": { "title": "on" } }
+        });
+        let on = experiments_on(&v);
+        assert!(on.contains("WebNextWaveLikesAndShares"));
+        assert_eq!(on.len(), 1);
+        assert!(experiments_on(&serde_json::json!([])).is_empty());
+    }
+
+    #[test]
     fn album_label_link_requires_a_numeric_id() {
         let mut data = serde_json::json!({
             "id": 1, "title": "Album", "labels": [{"id": 12, "name": "Label"}]
@@ -2139,6 +2252,9 @@ mod tests {
     #[test]
     fn pic_size() {
         assert_eq!(pic("avatars.yandex.net/a/%%", 200), "https://avatars.yandex.net/a/200x200");
+        let promo = "avatars.yandex.net/get-music-feed-promotion/1/a-landing.image/%%";
+        assert_eq!(pic(promo, 356), "https://avatars.yandex.net/get-music-feed-promotion/1/a-landing.image/400x400");
+        assert_eq!(pic(promo, 445), "https://avatars.yandex.net/get-music-feed-promotion/1/a-landing.image/800x800");
     }
 
     #[test]
@@ -2154,6 +2270,20 @@ mod tests {
         assert!(parse_credits(&json!({})).is_empty());
         assert_eq!(plain_text("<p>Гость &laquo;А&raquo;</p><p>Ведущие: <b>Б</b> &amp; В<br/>Слушайте</p>"), "Гость «А»\nВедущие: Б & В\nСлушайте");
         assert_eq!(plain_text("просто текст"), "просто текст");
+    }
+
+    #[test]
+    fn album_disks() {
+        let disks = |v: Value| album_tracks(&v).iter().map(|t| t.disk).collect::<Vec<_>>();
+        let t = |id: u32, vol: u32| json!({"id": id, "title": "t", "albums": [{"id": 1, "trackPosition": {"volume": vol, "index": 1}}]});
+        // Один том — без заголовков.
+        assert_eq!(disks(json!({"volumes": [[t(1, 1), t(2, 1)]]})), vec![None, None]);
+        assert_eq!(disks(json!({"volumes": [[t(1, 1), t(2, 1)], [t(3, 2)], [t(4, 3), t(5, 3)]]})), vec![Some(1), None, Some(2), Some(3), None]);
+        // Сезоны подкаста идут с последнего: номер берётся из `trackPosition.volume`.
+        assert_eq!(disks(json!({"volumes": [[t(1, 3)], [t(2, 2), t(3, 2)], [t(4, 1)]]})), vec![Some(3), Some(2), None, Some(1)]);
+        // Без `trackPosition` — номер тома по порядку; пустой том заголовка не получает.
+        let bare = |id: u32| json!({"id": id, "title": "t"});
+        assert_eq!(disks(json!({"volumes": [[bare(1)], [], [bare(2)]]})), vec![Some(1), Some(3)]);
     }
 
     #[test]

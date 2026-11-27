@@ -65,7 +65,7 @@ export component VolumePopup inherits Rectangle {
             }
         }
         scroll-event(e) => {
-            App.set-volume(max(0, min(1, App.volume + (e.delta-y > 0 ? 0.02 : -0.02))));
+            App.set-volume(App.wheel-volume(e.delta-y));
             accept
         }
     }
@@ -377,6 +377,8 @@ component SoundSettingsContent inherits Rectangle {
     width: 430px;
     height: 353px + eq-block.height;
     property <bool> presets-open;
+    in property <length> visible-top;
+    in property <length> visible-height;
 
     Text {
         x: 21px;
@@ -509,7 +511,7 @@ component SoundSettingsContent inherits Rectangle {
             }
         }
 
-        Rectangle {
+        preset-button := Rectangle {
             x: 25px;
             y: 211px;
             width: 380px;
@@ -540,10 +542,12 @@ component SoundSettingsContent inherits Rectangle {
     }
 
     if presets-open: Rectangle {
+        property <length> bottom: min(eq-block.y + preset-button.y - 4px, root.visible-top + root.visible-height - 8px);
         x: 25px;
-        y: 536px - self.height - 4px;
+        y: bottom - self.height;
         width: 380px;
-        height: min(App.eq-presets.length * 36px + 16px, 420px);
+        height: max(0px, min(App.eq-presets.length * 36px + 16px, 420px, bottom - root.visible-top - 8px));
+        visible: self.height > 16px;
         border-radius: 16px;
         background: Theme.background-color-primary-enabled-popover;
         border-width: 1px;
@@ -555,7 +559,7 @@ component SoundSettingsContent inherits Rectangle {
             x: 8px;
             y: 8px;
             width: parent.width - 16px;
-            height: parent.height - 16px;
+            height: max(0px, parent.height - 16px);
             content-height: App.eq-presets.length * 36px;
             for p[i] in App.eq-presets: MenuRow {
                 y: i * 36px;
@@ -586,11 +590,16 @@ export component SoundSettings inherits Rectangle {
     drop-shadow-color: Theme.dark ? #0000007a : #0000003d;
     TouchArea { }
 
-    Flickable {
+    viewport := Flickable {
         content-width: self.width;
         content-height: settings.height;
         interactive: self.content-height > self.height;
         mouse-drag-pan-enabled: false;
-        settings := SoundSettingsContent { x: 0; y: 0; }
+        settings := SoundSettingsContent {
+            x: 0;
+            y: 0;
+            visible-top: -viewport.content-y;
+            visible-height: viewport.height;
+        }
     }
 }
