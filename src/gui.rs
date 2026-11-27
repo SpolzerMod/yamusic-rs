@@ -4062,7 +4062,7 @@ impl Ctx {
         if let Some(a) = l.album.as_ref().filter(|a| matches!(a.kind.as_str(), "podcast" | "audiobook" | "fairy-tale")) {
             let (kind_word, cover) = (a.kind.clone(), a.cover.clone());
             std::thread::spawn(move || {
-                let saved = net.api.like_entity(&uid, kind, &id, !liked);
+                let saved = net.api.like_entity(&uid, "albums", &id, !liked);
                 if saved.is_ok() {
                     net.refresh("collection");
                 }
