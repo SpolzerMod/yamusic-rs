@@ -27,6 +27,9 @@ export component TrackRow inherits TouchArea {
     property <length> text-end: like.x - (item.best ? 40px : 0px);
     // Свой плейлист: при наведении корзина левее лайка.
     in property <bool> removable;
+    // Выпуск на странице своего подкаста: название открывает карточку выпуска, как ссылка
+    // `/album/{id}/track/{id}` у `PodcastMeta` оригинала, а не ту же страницу.
+    in property <bool> open-card;
     callback play();
     callback like();
     callback remove();
@@ -100,7 +103,13 @@ export component TrackRow inherits TouchArea {
             title-ta := TouchArea {
                 enabled: root.block != "";
                 mouse-cursor: MouseCursor.pointer;
-                clicked => { App.row-open-album(root.block, root.index); }
+                clicked => {
+                    if root.open-card {
+                        App.row-open-track(root.block, root.index);
+                    } else {
+                        App.row-open-album(root.block, root.index);
+                    }
+                }
             }
         }
         if item.version != "": Text {
@@ -114,7 +123,18 @@ export component TrackRow inherits TouchArea {
         if item.explicit: ExplicitMark { y: -1px; }
         Rectangle { horizontal-stretch: 1; }
     }
-    if item.artist-names.length == 0 || root.block == "": Text {
+    // Дата выпуска (`PodcastMeta`): «Сегодня» и «Вчера» цветом `primary-default` (`soonDate`).
+    if item.date != "": Text {
+        x: 60px;
+        y: 30px;
+        width: text-end - self.x - 8px;
+        text: item.date;
+        overflow: elide;
+        font-size: Theme.font-size-label-m;
+        font-weight: 500;
+        color: item.soon ? Theme.controls-color-primary-default-enabled : Theme.controls-color-primary-text-enabled;
+    }
+    if item.date == "" && (item.artist-names.length == 0 || root.block == ""): Text {
         x: 60px;
         y: 30px;
         width: text-end - self.x - 8px;
@@ -124,7 +144,7 @@ export component TrackRow inherits TouchArea {
         font-weight: 500;
         color: Theme.controls-color-primary-text-enabled;
     }
-    if item.artist-names.length > 0 && root.block != "": ArtistLinks {
+    if item.date == "" && item.artist-names.length > 0 && root.block != "": ArtistLinks {
         x: 60px;
         y: 29px;
         height: 18px;

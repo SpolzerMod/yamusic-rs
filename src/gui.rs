@@ -2,6 +2,7 @@
 
 slint::include_modules!();
 
+mod album_about;
 mod history_ui;
 mod keys;
 mod landing_ui;
@@ -656,6 +657,10 @@ impl Ctx {
                         app.set_list_cover(Image::default());
                         app.set_list_label(SharedString::new());
                         app.set_list_label_id(SharedString::new());
+                        // Другой подкаст открывается на вкладке «О подкасте», как у оригинала.
+                        app.set_list_tab(0);
+                        app.set_list_tabs(ModelRc::default());
+                        app.set_list_about(ModelRc::default());
                     }
                 }
                 self.refresh_list();
@@ -1068,6 +1073,8 @@ impl Ctx {
             ))),
             shift: 0,
             num: 0,
+            date: SharedString::new(),
+            soon: false,
         }
     }
 
@@ -1200,6 +1207,7 @@ impl Ctx {
             Some("new-episodes") => app.set_list_kind("plain".into()),
             _ => {}
         }
+        self.show_album_about(l);
         app.set_list_title(l.title.clone().into());
         if l.playlist.is_some() && self.st.borrow().rename_key.is_some() && self.st.borrow().rename_key == self.st.borrow().list_key {
             self.st.borrow_mut().rename_key = None;
@@ -1288,6 +1296,7 @@ impl Ctx {
                 }
             }
         }
+        album_about::set_episode_dates(l, &view, &mut items);
         self.ui().global::<App>().set_list_disks(ModelRc::from(Rc::new(VecModel::from(heads))));
         self.st.borrow_mut().view = view;
         self.tracks.set_vec(items);

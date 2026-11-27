@@ -97,6 +97,10 @@ pub struct Track {
     pub kind: String,
     /// Первый трек тома в альбоме из нескольких томов: номер диска для заголовка «Диск N».
     pub disk: Option<u32>,
+    /// День выхода выпуска (`pubDate`) по местному времени, как `new Date(pubDate)` в
+    /// `PodcastMeta` оригинала: дата под названием на странице подкаста.
+    #[cfg_attr(target_os = "android", allow(dead_code))]
+    pub pub_date: Option<chrono::NaiveDate>,
 }
 
 /// `trackParameters` из ответа API.
@@ -161,7 +165,8 @@ pub struct Album {
     pub id: String,
     pub title: String,
     pub artists: String,
-    pub year: Option<u64>,
+    /// `u32`, как у трека: место под `about` без роста `net::Data` (clippy `large_enum_variant`).
+    pub year: Option<u32>,
     pub kind: String,
     pub cover: Option<String>,
     pub likes: u64,
@@ -169,6 +174,25 @@ pub struct Album {
     pub label_id: Option<NonZeroU64>,
     pub artist_cover: Option<String>,
     pub artist_list: Vec<Named>,
+    /// Вкладка «О подкасте» / «О книге»; у музыки `None`. В коробке, чтобы альбомы в поиске и
+    /// коллекции не росли из-за полей немногих альбомов.
+    #[cfg_attr(target_os = "android", allow(dead_code))]
+    pub about: Option<Box<AlbumAbout>>,
+}
+
+/// Что показывает вкладка «О …» подкаста, книги и сказки (`NonMusicContent` оригинала,
+/// `8390-…js`, модуль 98390): описание и строки сведений.
+#[derive(Clone, Debug, Default, PartialEq)]
+#[cfg_attr(target_os = "android", allow(dead_code))]
+pub struct AlbumAbout {
+    /// `description` текстом: в ответе бывают сущности и `<br>`.
+    pub description: String,
+    /// `contentWarning: explicit` — «Возрастное ограничение: 18+».
+    pub explicit: bool,
+    /// `durationSec` (у книг) — «Продолжительность».
+    pub duration_sec: u64,
+    /// Все `labels`: id (у кого есть — ссылка на страницу лейбла) и название.
+    pub labels: Vec<(Option<NonZeroU64>, String)>,
 }
 
 #[derive(Clone, Debug)]
@@ -497,7 +521,16 @@ pub(crate) fn parse_track(v: &Value) -> Option<Track> {
         mood: mood_of(v),
         kind: str_of(v, "type"),
         disk: None,
+        pub_date: v.get("pubDate").and_then(Value::as_str).and_then(local_day),
     })
+}
+
+/// День по местному времени из даты ISO 8601 с поясом; без времени — как есть.
+fn local_day(iso: &str) -> Option<chrono::NaiveDate> {
+    match chrono::DateTime::parse_from_rfc3339(iso) {
+        Ok(t) => Some(t.with_timezone(&chrono::Local).date_naive()),
+        Err(_) => chrono::NaiveDate::parse_from_str(iso.get(..10)?, "%Y-%m-%d").ok(),
+    }
 }
 
 /// Треки всех томов альбома одним списком. Как `makeFlatVolumeItems` оригинала: заголовок
@@ -552,6 +585,7 @@ pub(crate) fn parse_album(v: &Value) -> Option<Album> {
         year: v
             .get("year")
             .and_then(|y| y.as_u64())
+            .and_then(|y| u32::try_from(y).ok())
             .or_else(|| v.get("releaseDate").and_then(|d| d.as_str()).and_then(|d| d.get(..4)).and_then(|y| y.parse().ok())),
         kind: s(v.get("type")).or_else(|| s(v.get("albumType"))).unwrap_or_default(),
         cover: v
@@ -561,15 +595,33 @@ pub(crate) fn parse_album(v: &Value) -> Option<Album> {
             .map(String::from),
         likes: v.get("likesCount").and_then(|c| c.as_u64()).unwrap_or(0),
         label: v.pointer("/labels/0/name").and_then(|l| l.as_str()).unwrap_or("").to_string(),
-        label_id: v.pointer("/labels/0/id").and_then(|id| {
-            if let Some(id) = id.as_str() {
-                id.parse().ok()
-            } else {
-                id.as_u64().and_then(NonZeroU64::new)
-            }
-        }),
+        label_id: v.pointer("/labels/0/id").and_then(label_id),
         artist_cover: v.pointer("/artists/0/cover/uri").and_then(|u| u.as_str()).map(String::from),
+        about: matches!(str_of(v, "type").as_str(), "podcast" | "audiobook" | "fairy-tale").then(|| {
+            Box::new(AlbumAbout {
+                description: plain_text(&str_of(v, "description")),
+                explicit: str_of(v, "contentWarning") == "explicit",
+                duration_sec: v.get("durationSec").and_then(Value::as_u64).unwrap_or(0),
+                labels: v
+                    .get("labels")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|l| match l.as_str() {
+                        Some(name) => Some((None, name.to_string())),
+                        None => Some((l.get("id").and_then(label_id), l.get("name")?.as_str()?.to_string())),
+                    })
+                    .collect(),
+            })
+        }),
     })
+}
+
+fn label_id(id: &Value) -> Option<NonZeroU64> {
+    match id.as_str() {
+        Some(id) => id.parse().ok(),
+        None => id.as_u64().and_then(NonZeroU64::new),
+    }
 }
 
 pub(crate) fn parse_playlist(v: &Value) -> Option<Playlist> {
@@ -2370,6 +2422,23 @@ mod tests {
         assert!(!t("music").is_episode() && !t("music").is_chapter());
         let plain = parse_track(&json!({"id": 1, "title": "A"})).unwrap();
         assert!(!plain.is_episode() && !plain.is_chapter());
+    }
+
+    #[test]
+    fn podcast_about_and_dates() {
+        let a = parse_album(&json!({"id": 1, "title": "P", "type": "podcast", "description": "Раз&laquo;два&raquo;<br>три",
+            "contentWarning": "explicit", "labels": [{"id": 7, "name": "L"}, "Без id"]})).unwrap();
+        let about = a.about.unwrap();
+        assert_eq!(about.description, "Раз«два»\nтри");
+        assert!(about.explicit);
+        assert_eq!(about.labels, vec![(NonZeroU64::new(7), "L".to_string()), (None, "Без id".to_string())]);
+        assert!(parse_album(&json!({"id": 1, "title": "A", "type": "album"})).unwrap().about.is_none());
+        let day = |d: &str| parse_track(&json!({"id": 1, "title": "A", "pubDate": d})).unwrap().pub_date;
+        assert_eq!(day("2026-11-24"), chrono::NaiveDate::from_ymd_opt(2026, 11, 24));
+        // С поясом — день по местному времени, как `new Date(pubDate)` у оригинала.
+        let local = chrono::DateTime::parse_from_rfc3339("2026-11-24T12:00:00+00:00").unwrap().with_timezone(&chrono::Local).date_naive();
+        assert_eq!(day("2026-11-24T12:00:00+00:00"), Some(local));
+        assert_eq!(day("вчера"), None);
     }
 
     #[test]

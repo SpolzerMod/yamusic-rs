@@ -63,7 +63,23 @@ component ListContent inherits TouchArea {
     property <length> edit-shift: App.list-edit == 1 ? 8px : 0px;
     property <length> buttons-y: album ? 219px : short-head ? 214px : App.list-edit == 2 ? 426px : 242px + desc-extra + edit-shift;
     property <length> search-y: buttons-y + (short-head ? 90px : 79px);
-    property <length> rows-y: dislikes ? 132px : plain ? 84px : album ? buttons-y + 94px : search-y + 57px;
+    // Подкаст, книга, сказка (`NonMusicContent` оригинала): под шапкой вкладки «О …» и списка.
+    // Шапка кончается на 32 ниже обложки (`CommonAlbumPage_header`), у вкладки сверху 4, высота
+    // 40 (по 10 сверху и снизу, `NonMusicContent_tab`), под полосой вкладок 16.
+    property <bool> nonmusic: album && App.list-tabs.length > 0;
+    property <bool> about: nonmusic && App.list-tab == 0;
+    property <length> tabs-y: buttons-y + 98px;
+    property <length> rows-y: dislikes ? 132px : plain ? 84px : nonmusic ? tabs-y + 40px + 16px : album ? buttons-y + 94px : search-y + 57px;
+    // «Последние выпуски» (`LastEpisodes`): первые 5 выпусков подкаста под сведениями. Отступ
+    // сверху 8 + 12, заголовок 26, под ним 16, внизу блока 16.
+    property <int> last-count: about && App.list-podcast ? min(5, App.tracks.length) : 0;
+    property <length> last-rows-y: rows-y + about-box.height + 8px + 12px + 26px + 16px;
+    // Вкладка «О …» обычно короче списка выпусков: прокрутка не должна остаться за её концом.
+    changed about => {
+        flick.content-y = max(flick.content-y, min(0px, flick.height - flick.content-height));
+    }
+    property <int> hovered-last: about && self.has-hover && self.mouse-x >= row-x && self.mouse-x < self.width - 33px
+        ? floor((self.mouse-y - flick.content-y - last-rows-y) / row-h) : -1;
     property <length> row-x: playlist && App.list-own ? pad + 12px : pad;
     property <length> row-h: 56px;
     // Заголовки «Диск N» — строки той же высоты между треками.
@@ -74,11 +90,13 @@ component ListContent inherits TouchArea {
         ? floor((self.mouse-y - flick.content-y - rows-y) / row-h) : -1;
 
     flick := Flickable {
-        content-height: rows-y + (App.tracks.length + disk-rows) * row-h + (album && App.list-label != "" ? 80px : 32px);
+        content-height: about
+            ? (last-count > 0 ? last-rows-y + last-count * row-h + 16px : rows-y + about-box.height) + 32px
+            : rows-y + (App.tracks.length + disk-rows) * row-h + (album && App.list-label != "" ? 80px : 32px);
         // Заголовки дисков выше первого видимого трека сдвигают его вниз: берём с запасом на их
         // число и рисуем на столько же строк больше.
         property <int> first: max(0, floor((-self.content-y - rows-y) / row-h) - disk-rows);
-        property <int> shown-rows: min(App.tracks.length - first, ceil(self.height / row-h) + 2 + disk-rows);
+        property <int> shown-rows: about ? 0 : min(App.tracks.length - first, ceil(self.height / row-h) + 2 + disk-rows);
 
         Rectangle {
             y: 0;
@@ -421,6 +439,106 @@ component ListContent inherits TouchArea {
             }
         }
 
+        if nonmusic: HorizontalLayout {
+            x: pad;
+            y: tabs-y;
+            height: 40px;
+            spacing: 4px;
+            alignment: start;
+            for t[i] in App.list-tabs: Tab {
+                height: 40px;
+                text: t;
+                selected: App.list-tab == i;
+                clicked => { App.list-tab = i; }
+            }
+        }
+
+        // Вкладка «О …»: описание (`CommonAlbumPage_text`: 14/500, `primary-text-enabled_variant`,
+        // не шире 60 % страницы, в окне уже 1060 — 70 %; 824 — та же граница по ширине страницы
+        // при развёрнутом меню) и сведения (`NonMusicContent_infoBlock`: отступ сверху 8, подпись
+        // цветом `primary-text-enabled` и 4 до значения). Снизу 16, если есть что показать.
+        about-box := VerticalLayout {
+            x: pad;
+            y: rows-y;
+            width: (parent.width - 2 * pad) * (root.width >= 824px ? 0.6 : 0.7);
+            height: about ? self.preferred-height : 0px;
+            visible: about;
+            padding-bottom: App.list-desc != "" || App.list-about.length > 0 ? 16px : 0px;
+            if App.list-desc != "": Text {
+                text: App.list-desc;
+                wrap: word-wrap;
+                font-size: Theme.font-size-label-m;
+                font-weight: 500;
+                color: Theme.controls-color-primary-text-enabled-variant;
+            }
+            for line in App.list-about: HorizontalLayout {
+                padding-top: 8px;
+                spacing: 4px;
+                alignment: start;
+                Text {
+                    text: line.title;
+                    font-size: Theme.font-size-label-m;
+                    font-weight: 500;
+                    color: Theme.controls-color-primary-text-enabled;
+                }
+                // Издатели через запятую, с id — ссылки на страницу лейбла
+                // (`CommonAlbumPage_labelLink`: подчёркнуты при наведении).
+                for name[k] in line.items: Text {
+                    text: name + (k < line.items.length - 1 ? "," : "");
+                    overflow: elide;
+                    font-size: Theme.font-size-label-m;
+                    font-weight: 500;
+                    color: Theme.controls-color-primary-text-enabled-variant;
+                    if line.ids[k] != "" && link-ta.has-hover: Rectangle {
+                        x: 0;
+                        y: (parent.height + parent.font-size) / 2 + 1px;
+                        width: parent.width - (k < line.items.length - 1 ? 4px : 0px);
+                        height: 1px;
+                        background: parent.color;
+                    }
+                    link-ta := TouchArea {
+                        enabled: line.ids[k] != "";
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => { App.open-grid("label:" + line.ids[k], name); }
+                    }
+                }
+            }
+        }
+
+        // «Последние выпуски» (`entity-names.podcast-last-episodes`): заголовок h2 с отступом 16 + 10
+        // слева (у описания 24), строки — как во вкладке выпусков.
+        if last-count > 0: Text {
+            x: pad + 2px;
+            y: last-rows-y - 16px - 26px;
+            height: 26px;
+            text: T.t("Последние выпуски");
+            vertical-alignment: center;
+            font-family: "YS Music Headline";
+            font-size: Theme.font-size-headline-m;
+            font-weight: 700;
+            color: Theme.controls-color-primary-text-enabled-variant;
+        }
+        for i in last-count: Rectangle {
+            property <string> track-id: App.tracks[i].id;
+            x: row-x;
+            y: last-rows-y + i * row-h;
+            width: parent.width - row-x - 33px;
+            height: row-h;
+            init => { App.request-cover(i); }
+            changed track-id => { App.request-cover(i); }
+            TrackRow {
+                width: parent.width;
+                hot: i == root.hovered-last;
+                item: App.tracks[i];
+                block: "list";
+                index: i;
+                open-card: true;
+                current: i == App.list-current;
+                play => { App.play-list(i); }
+                like => { App.like-track(i); }
+            }
+        }
+
         if App.list-loading: Rectangle {
             x: row-x;
             y: rows-y;
@@ -439,6 +557,7 @@ component ListContent inherits TouchArea {
         // (`--album-page-track-height`), текст прижат к низу с отступом 16 и сдвинут на 8 слева;
         // шрифт `CommonAlbumPage_text` — label-m, 500, цвет `primary-text-enabled_variant`.
         for d in App.list-disks: Text {
+            visible: !about;
             x: row-x + 8px;
             y: rows-y + d.slot * row-h + row-h - 16px - Theme.font-line-height-label-m;
             width: parent.width - row-x - 33px - 8px;
@@ -462,19 +581,22 @@ component ListContent inherits TouchArea {
             init => { App.request-cover(idx); }
             changed idx => { App.request-cover(idx); }
             changed track-id => { App.request-cover(idx); }
-            if !album: TrackRow {
+            // Выпуски подкаста — с обложкой и датой, как `PodcastTrack` оригинала (модуль 76843); у
+            // книги и сказки номер вместо обложки, как у музыкального альбома.
+            if !album || App.list-podcast: TrackRow {
                 width: parent.width;
                 hot: parent.slot == root.hovered-row;
                 item: App.tracks[idx];
                 block: "list";
                 index: idx;
+                open-card: App.list-podcast;
                 current: idx == App.list-current;
                 removable: own;
                 play => { App.play-list(idx); }
                 like => { App.like-track(idx); }
                 remove => { App.list-remove-track(idx); }
             }
-            if album: AlbumTrackRow {
+            if album && !App.list-podcast: AlbumTrackRow {
                 width: parent.width;
                 hot: parent.slot == root.hovered-row;
                 item: App.tracks[idx];

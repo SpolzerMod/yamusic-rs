@@ -31,12 +31,23 @@ export struct TrackItem {
     // она ниже) и номер трека внутри диска; 0 — номер по порядку списка.
     shift: int,
     num: int,
+    // Дата выпуска на странице подкаста — вместо исполнителей; «Сегодня» и «Вчера» подсвечены.
+    date: string,
+    soon: bool,
 }
 
 // Заголовок «Диск N» («Сезон N» у подкаста) в списке альбома: место среди строк и текст.
 export struct DiskRow {
     slot: int,
     text: string,
+}
+
+// Строка сведений на вкладке «О подкасте» / «О книге»: подпись и значения; значение с id —
+// ссылка на страницу лейбла.
+export struct AboutLine {
+    title: string,
+    items: [string],
+    ids: [string],
 }
 
 export struct PinItem {
@@ -362,6 +373,13 @@ export global App {
     in property <bool> list-loading;
     in property <int> list-current: -1;
     in-out property <string> list-filter;
+    // Подкаст, книга, сказка: подписи вкладок «О …» и списка (у музыки пусто), открытая вкладка
+    // (0 — «О …», по умолчанию, как у оригинала), сведения и «Последние выпуски» у подкаста.
+    // Описание — в list-desc.
+    in property <[string]> list-tabs;
+    in-out property <int> list-tab;
+    in property <[AboutLine]> list-about;
+    in property <bool> list-podcast;
 
     // Коллекция
     in property <bool> coll-loading: true;
