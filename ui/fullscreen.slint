@@ -136,6 +136,17 @@ component Poster inherits Rectangle {
                 ink: App.fs-mode == 1 ? #ffffff : #ffffff80;
                 clicked => { App.fs-mode = App.fs-mode == 1 ? 0 : 1; }
             }
+            // «Перемешать» слева, зеркально к повтору, как в SonataFullscreenControlsDesktop
+            // оригинала; в волне её нет (canShuffle).
+            if !App.is-wave: RoundButton {
+                x: 60px;
+                y: 180px;
+                size: 40px;
+                icon: Icons.shuffle-small;
+                icon-size: 20px;
+                ink: App.shuffle ? Theme.controls-color-primary-default-enabled : #ffffff80;
+                clicked => { App.toggle-shuffle(); }
+            }
             RoundButton { x: 116px; y: 178px; size: 44px; icon: Icons.prev-small; icon-size: 20px; enabled: App.can-prev; clicked => { App.prev(); } }
             Rectangle {
                 x: 166px;
