@@ -382,10 +382,12 @@ fn account_retry_delay(attempt: u32) -> Duration {
 }
 
 fn load_track(api: &Api, t: &Track) -> Res<Audio> {
-    let (url, format) = api.stream_url(&t.id)?;
+    let link = api.stream_url(&t.id)?;
+    let (url, format) = (link.url.clone(), link.format.clone());
     let (again, id) = (api.clone(), t.id.clone());
-    // Ссылка подписана и живёт недолго, поэтому для докачки берётся новая.
-    let buf = Buf::download(api.open_from(&url, 0)?, move |from| again.open_from(&again.stream_url(&id)?.0, from))?;
+    // Прямая ссылка подписана и живёт недолго. Заново подписывается тот же вариант:
+    // повторный выбор взял бы качество, которое успели сменить, и другой файл.
+    let buf = Buf::download(api.open_from(&url, 0)?, move |from| again.open_from(&again.stream_again(&id, &link)?, from))?;
     let dec = Decoder::new(buf.reader()).map_err(|e| format!("не удалось декодировать: {e}"))?;
     Ok((buf, dec, format))
 }
@@ -2283,8 +2285,8 @@ mod tests {
     #[ignore]
     fn stream_and_decode() {
         let api = Api::new("");
-        let (url, _) = api.stream_url("57703").expect("stream url");
-        let bytes = api.fetch_bytes(&url).expect("download");
+        let link = api.stream_url("57703").expect("stream url");
+        let bytes = api.fetch_bytes(&link.url).expect("download");
         assert!(bytes.len() > 50_000);
         let dec = Decoder::new(Cursor::new(bytes)).expect("decode");
         let samples = dec.take(44100).count();
