@@ -470,6 +470,7 @@ component ListContent inherits TouchArea {
                 index: idx;
                 current: idx == App.list-current;
                 removable: own;
+                show-best: root.playlist;
                 play => { App.play-list(idx); }
                 like => { App.like-track(idx); }
                 remove => { App.list-remove-track(idx); }
@@ -478,6 +479,7 @@ component ListContent inherits TouchArea {
                 width: parent.width;
                 hot: parent.slot == root.hovered-row;
                 item: App.tracks[idx];
+                show-best: true;
                 current: idx == App.list-current;
                 // После заголовка «Диск N» счёт снова с 1.
                 pos: App.tracks[idx].num > 0 ? App.tracks[idx].num : idx + 1;

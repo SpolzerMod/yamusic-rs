@@ -23,8 +23,10 @@ export component TrackRow inherits TouchArea {
     // Откуда строка и её номер: по ним Rust находит трек для ссылок на альбом и исполнителя.
     in property <string> block;
     in property <int> index;
-    // Молния популярного трека встаёт перед сердцем и укорачивает название.
-    property <length> text-end: like.x - (item.best ? 40px : 0px);
+    // Показываем молнию только там, где её разрешила страница списка.
+    in property <bool> show-best;
+    property <bool> has-best-mark: root.show-best && item.best;
+    property <length> text-end: like.x - (root.has-best-mark ? 40px : 0px);
     // Свой плейлист: при наведении корзина левее лайка.
     in property <bool> removable;
     callback play();
@@ -132,7 +134,7 @@ export component TrackRow inherits TouchArea {
         names: item.artist-names;
         clicked(i) => { App.row-open-artist(root.block, root.index, i); }
     }
-    if item.best: Best { x: like.x - 40px; y: 8px; }
+    if root.has-best-mark: Best { x: like.x - 40px; y: 8px; }
     like := Rectangle {
         x: parent.width - 111px;
         y: 8px;
@@ -283,6 +285,8 @@ export component ChartLine inherits Rectangle {
 // Строка трека альбома: номер вместо обложки, при наведении на его месте Play.
 export component AlbumTrackRow inherits Rectangle {
     in property <TrackItem> item;
+    in property <bool> show-best;
+    property <bool> has-best-mark: root.show-best && item.best;
     in property <bool> current;
     in property <string> pos;
     in property <string> block;
@@ -310,7 +314,7 @@ export component AlbumTrackRow inherits Rectangle {
     }
     HorizontalLayout {
         x: 44px;
-        width: parent.width - 44px - 136px - (item.best ? 40px : 0px);
+        width: parent.width - 44px - 136px - (root.has-best-mark ? 40px : 0px);
         height: 20px;
         spacing: 4px;
         Text {
@@ -345,7 +349,7 @@ export component AlbumTrackRow inherits Rectangle {
         if item.explicit: ExplicitMark { y: 1px; }
         Rectangle { horizontal-stretch: 1; }
     }
-    if item.best: Best { x: parent.width - 151px; }
+    if root.has-best-mark: Best { x: parent.width - 151px; }
     Rectangle {
         x: parent.width - 111px;
         width: 40px;
