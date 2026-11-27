@@ -42,6 +42,9 @@ pub struct Config {
     /// Язык интерфейса Яндекса: ru, en, uz, kk — уходит в Accept-Language.
     pub lang: String,
     pub navbar_collapsed: bool,
+    pub hide_nav_trends: bool,
+    pub hide_nav_concerts: bool,
+    pub hide_nav_nonmusic: bool,
     /// smooth — все анимации, lite — без анимаций и с урезанными кэшами.
     pub mode: String,
     /// Куда скачивать треки. Пусто — Музыка\Яндекс Музыка.
@@ -101,6 +104,9 @@ impl Default for Config {
             eq_gains: [0.0; 10],
             lang: "ru".into(),
             navbar_collapsed: false,
+            hide_nav_trends: false,
+            hide_nav_concerts: false,
+            hide_nav_nonmusic: false,
             mode: "smooth".into(),
             download_dir: String::new(),
             download_flac: false,
