@@ -2481,9 +2481,16 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
                 LAST_CURSOR.set(p);
                 EventResult::Propagate
             }
-            // Slint даёт 60 px на щелчок колёсика при любой настройке системы, а Chromium
-            // оригинала — столько, сколько задано в Windows (sys::wheel_px).
+            WindowEvent::ModifiersChanged(m) => {
+                keys::set_modifiers(m.state());
+                EventResult::Propagate
+            }
+            // Щелчок колёсика мыши: страница едет анимацией, как в официальном приложении. Шаг —
+            // по настройке Windows (sys::wheel_px), без анимации тоже: Slint даёт 60 px всегда.
             WindowEvent::MouseWheel { delta: winit::event::MouseScrollDelta::LineDelta(lx, ly), .. } => {
+                if wheel::notch(*lx, *ly) {
+                    return EventResult::PreventDefault;
+                }
                 let Some(k) = sys::wheel_px(*lx != 0.0) else {
                     return EventResult::Propagate;
                 };
@@ -2493,18 +2500,6 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
                     delta_y: ly * k,
                 });
                 EventResult::PreventDefault
-            }
-            WindowEvent::ModifiersChanged(m) => {
-                keys::set_modifiers(m.state());
-                EventResult::Propagate
-            }
-            // Щелчок колёсика мыши: страница едет анимацией, как в официальном приложении.
-            WindowEvent::MouseWheel { delta: winit::event::MouseScrollDelta::LineDelta(lx, ly), .. } => {
-                if wheel::notch(*lx, *ly) {
-                    EventResult::PreventDefault
-                } else {
-                    EventResult::Propagate
-                }
             }
             WindowEvent::KeyboardInput { event, is_synthetic: false, .. } => {
                 if let winit::keyboard::PhysicalKey::Code(code) = event.physical_key {

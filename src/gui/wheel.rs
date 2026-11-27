@@ -9,7 +9,7 @@
 //!
 //! Страница едет за счёт мелких `PointerScrolled` в той точке, где начался жест: так
 //! прокручивается тот же `Flickable`, что и без анимации, и знать о нём здесь ничего не нужно.
-//! Шаг щелчка прежний, как у Slint (`LINE_PX`). Без анимации, как раньше, идут: «Лёгкий» режим,
+//! Шаг щелчка — по настройке Windows (`sys::wheel_px`), иначе как у Slint. Без анимации, как раньше, идут: «Лёгкий» режим,
 //! тачпад на Linux (пиксели, `PixelDelta`) и дробные доли щелчка, которые на Windows присылают
 //! тачпад и колёсики с плавным ходом, — Chromium их тоже не анимирует (crbug.com/545234).
 
@@ -246,9 +246,13 @@ thread_local! {
     static SMOOTH: RefCell<Smooth> = RefCell::default();
 }
 
-/// Сколько логических пикселей даёт строка колёсика: как у Slint (`LineDelta` × 60),
-/// чтобы щелчок сдвигал страницу на то же расстояние, что и без анимации.
+/// Шаг строки колёсика у Slint (`LineDelta` × 60): когда настройки системы нет.
 const LINE_PX: f32 = 60.0;
+
+/// Пикселей в щелчке: по настройке Windows, как у Chromium, иначе как у Slint.
+fn line_px(horizontal: bool) -> f32 {
+    crate::sys::wheel_px(horizontal).unwrap_or(LINE_PX)
+}
 
 /// Колёсико мыши (`LineDelta` от winit): `lx`, `ly` — щелчки, у обычного колёсика ±1.
 /// `false` — анимировать не нужно, событие обработает Slint, как раньше.
@@ -260,11 +264,11 @@ pub(super) fn notch(lx: f32, ly: f32) -> bool {
     with_ctx(|c| {
         animate = !c.lite.get();
         if animate {
-            c.ui().global::<App>().set_wheel_notch(LINE_PX);
+            c.ui().global::<App>().set_wheel_notch(line_px(false));
         }
     });
     if animate {
-        scroll(keys::cursor(), lx * LINE_PX, ly * LINE_PX);
+        scroll(keys::cursor(), lx * line_px(true), ly * line_px(false));
     }
     animate
 }
