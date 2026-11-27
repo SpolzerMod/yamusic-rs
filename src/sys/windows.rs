@@ -322,6 +322,32 @@ pub fn work_area(w: &slint::Window) -> (i32, i32, i32, i32) {
     }
 }
 
+pub fn cursor_position() -> Option<(i32, i32)> {
+    let mut p = POINT { x: 0, y: 0 };
+    (unsafe { GetCursorPos(&mut p) } != 0).then_some((p.x, p.y))
+}
+
+pub fn left_button_down() -> bool {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+    unsafe { GetAsyncKeyState(VK_LBUTTON as i32) < 0 }
+}
+
+pub fn work_area_at((x, y): (i32, i32)) -> Option<(i32, i32, i32, i32)> {
+    use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+    unsafe {
+        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..std::mem::zeroed() };
+        (GetMonitorInfoW(MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST), &mut info) != 0)
+            .then_some((info.rcWork.left, info.rcWork.top, info.rcWork.right, info.rcWork.bottom))
+    }
+}
+
+pub fn move_mini(w: &slint::Window, bounds: (i32, i32, i32, i32)) {
+    let (x, y, width, height) = bounds;
+    unsafe {
+        SetWindowPos(h(handle(w)), null_mut(), x, y, width, height, SWP_NOACTIVATE | SWP_NOZORDER);
+    }
+}
+
 pub fn open_url(url: &str) {
     let op = wide("open");
     let u = wide(url);

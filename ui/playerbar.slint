@@ -261,110 +261,291 @@ export component PlayerBar inherits Rectangle {
     }
 }
 
-// Мини-плеер: окно ужато до плашки поверх всех окон. Тянется за любое место,
-// двойной клик возвращает обычное окно.
+// Кнопка мини-плеера: значок без подложки, под курсором — светлый круг и белый значок.
+component MiniButton inherits Rectangle {
+    in property <image> icon;
+    in property <length> icon-size: 20px;
+    in property <bool> enabled: true;
+    callback clicked;
+    width: 32px;
+    height: 32px;
+    border-radius: 16px;
+    background: ta.has-hover && enabled ? #ffffff1a : #ffffff00;
+    animate background { duration: (App.motion ? Theme.duration-transition : 0ms); easing: ease; }
+    Icon {
+        source: root.icon;
+        size: root.icon-size;
+        colorize: !enabled ? #ffffff29 : ta.has-hover ? #ffffff : #ffffffb3;
+        animate colorize { duration: (App.motion ? Theme.duration-transition : 0ms); easing: ease; }
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Мини-плеер: окно ужато до карточки поверх всех окон. Детали — из полноэкранного плеера:
+// фон в цвете обложки (`App.tint`), обложка с тенью, жёлтая круглая «играть», полоса
+// прогресса, которая под курсором желтеет. Тянется за любое место, двойной клик или
+// клик по обложке возвращает обычное окно, колёсико меняет громкость.
+component MiniVolumeSlider inherits Rectangle {
+    property <float> level: max(0, min(1, App.volume));
+    property <length> inset: 5px;
+    property <length> rail-width: self.width - 2 * inset;
+    height: 32px;
+
+    Rectangle {
+        x: root.inset;
+        y: (parent.height - self.height) / 2;
+        width: root.rail-width;
+        height: 4px;
+        border-radius: 2px;
+        background: #ffffff33;
+        Rectangle {
+            x: 0px;
+            y: 0px;
+            width: parent.width * root.level;
+            height: parent.height;
+            border-radius: 2px;
+            background: Theme.controls-color-primary-default-enabled;
+        }
+    }
+    Rectangle {
+        x: root.inset + root.rail-width * root.level - self.width / 2;
+        y: (parent.height - self.height) / 2;
+        width: 10px;
+        height: 10px;
+        border-radius: 5px;
+        background: volume-ta.has-hover || volume-ta.pressed ? Theme.controls-color-primary-default-enabled : #ffffff;
+    }
+    if volume-ta.has-hover || volume-ta.pressed: Text {
+        y: -16px;
+        height: 16px;
+        text: round(root.level * 100) + "%";
+        font-size: Theme.font-size-label-xs;
+        color: #ffffff;
+        horizontal-alignment: center;
+    }
+    volume-ta := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        pointer-event(e) => {
+            if e.button == PointerEventButton.left && e.kind == PointerEventKind.down {
+                App.set-volume(max(0, min(1, (self.mouse-x - root.inset) / root.rail-width)));
+            }
+        }
+        moved => {
+            if self.pressed {
+                App.set-volume(max(0, min(1, (self.mouse-x - root.inset) / root.rail-width)));
+            }
+        }
+        scroll-event(e) => {
+            App.set-volume(App.wheel-volume(e.delta-y));
+            accept
+        }
+    }
+}
+
 export component MiniPlayer inherits Rectangle {
     property <bool> on: App.has-track;
+    property <float> progress: App.duration > 0 ? App.position / App.duration : 0;
+    property <float> drag: -1;
+    property <float> shown: drag >= 0 ? drag : progress;
     background: on ? App.tint : Theme.background-color-primary-enabled-player;
-    animate background { duration: App.motion ? Theme.duration-transition : 0ms; }
+    animate background { duration: (App.motion ? Theme.duration-transition : 0ms); easing: ease; }
 
     ta := TouchArea {
-        pointer-event(e) => {
-            if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+        property <bool> dragging;
+        moved => {
+            if self.pressed && !dragging && (abs(self.mouse-x - self.pressed-x) >= 4px || abs(self.mouse-y - self.pressed-y) >= 4px) {
+                dragging = true;
                 App.drag-window();
             }
         }
+        changed pressed => { if !self.pressed { dragging = false; } }
         double-clicked => { App.toggle-mini(); }
-        // Колёсико над плашкой меняет громкость, как над ползунком в большом плеере.
         scroll-event(e) => {
             App.set-volume(App.wheel-volume(e.delta-y));
             accept
         }
 
-        if on: Rectangle {
-            x: 0;
-            y: parent.height - 2px;
-            width: App.duration > 0 ? parent.width * App.position / App.duration : 0;
-            height: 2px;
-            background: Theme.controls-color-primary-default-enabled;
-        }
-        if on: Cover {
+        // Обложка с тенью, как постер полноэкранного плеера; под курсором — «развернуть».
+        Rectangle {
             x: 12px;
             y: 12px;
-            width: 64px;
-            height: 64px;
-            radius: Theme.radius-size-s;
-            background: #ffffff14;
-            source: App.cover;
-        }
-        VerticalLayout {
-            x: on ? 88px : 16px;
-            width: parent.width - self.x - 184px;
-            alignment: center;
-            spacing: 2px;
-            Text {
-                text: on ? App.title : App.app-name;
-                overflow: elide;
-                font-size: Theme.font-size-label-m;
-                font-weight: 500;
-                color: #ffffff;
+            width: 88px;
+            height: 88px;
+            border-radius: Theme.radius-size-m;
+            background: on ? #ffffff14 : transparent;
+            drop-shadow-blur: 16px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: on ? #00000052 : #00000000;
+            if on: Cover {
+                radius: Theme.radius-size-m;
+                source: App.cover;
             }
-            if on: Text {
-                text: App.artists;
-                overflow: elide;
-                font-size: Theme.font-size-label-m;
-                color: #ffffff80;
+            // Без трека — значок приложения.
+            if !on: Image {
+                width: parent.width;
+                height: parent.height;
+                source: @image-url("../packaging/icons/128.png");
+                image-fit: contain;
+            }
+            property <float> reveal: cover-ta.has-hover ? 1 : 0;
+            animate reveal { duration: (App.motion ? Theme.duration-transition : 0ms); easing: ease; }
+            Rectangle {
+                visible: parent.reveal > 0;
+                opacity: parent.reveal;
+                border-radius: Theme.radius-size-m;
+                background: #00000066;
+                Rectangle {
+                    width: 36px;
+                    height: 36px;
+                    border-radius: 18px;
+                    background: #1a1a1ae6;
+                    Icon { source: Icons.fullscreen; size: 20px; colorize: #ffffff; }
+                }
+            }
+            cover-ta := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => { App.toggle-mini(); }
             }
         }
 
-        BarButton { x: parent.width - 180px; y: 26px; width: 36px; height: 36px; icon: App.liked ? Icons.liked : Icons.like; tip: T.t("Нравится"); icon-size: 20px; enabled: on; clicked => { App.like(); } }
-        TransportButton { x: parent.width - 136px; y: 28px; icon: Icons.prev-small; icon-size: 20px; enabled: on && App.can-prev; clicked => { App.prev(); } }
-        BarPlayButton { x: parent.width - 96px; y: 24px; enabled: on; }
-        TransportButton { x: parent.width - 48px; y: 28px; icon: Icons.next-small; icon-size: 20px; enabled: on; clicked => { App.next(); } }
+        // Название и исполнители; справа оставляем место под кнопки окна.
+        Text {
+            x: 116px;
+            y: 15px;
+            width: parent.width - self.x - 80px;
+            height: 22px;
+            text: on ? App.title : App.app-name;
+            color: #ffffff;
+            overflow: elide;
+            vertical-alignment: center;
+            font-size: Theme.font-size-label-l;
+            font-weight: 500;
+        }
+        Text {
+            x: 116px;
+            y: 37px;
+            width: parent.width - self.x - 16px;
+            height: 18px;
+            // При перемотке вместо исполнителей — время под курсором.
+            text: !on ? T.t("Моя волна") : root.seeking ? App.format-time(root.seek-at * App.duration) + " / " + App.format-time(App.duration) : App.artists;
+            color: #ffffff80;
+            overflow: elide;
+            vertical-alignment: center;
+            font-size: Theme.font-size-label-m;
+        }
 
-        // Громкость при наведении: значок выключает звук, полоску можно тянуть.
-        if ta.has-hover || vol-ta.pressed: BarButton {
-            x: parent.width - 172px;
-            y: 2px;
-            width: 24px;
-            height: 24px;
+        // Кнопки: лайк, назад, «играть», вперёд; громкость — у правого края.
+        MiniButton {
+            x: 110px;
+            y: 66px;
+            icon: App.liked ? Icons.liked : Icons.like;
+            enabled: on;
+            clicked => { App.like(); }
+        }
+        MiniButton {
+            x: 150px;
+            y: 66px;
+            icon: Icons.prev-small;
+            enabled: on && App.can-prev;
+            clicked => { App.prev(); }
+        }
+        // Жёлтая круглая, как в полноэкранном плеере. Без трека запускает «Мою волну».
+        Rectangle {
+            x: 190px;
+            y: 62px;
+            width: 40px;
+            height: 40px;
+            border-radius: 20px;
+            background: play-ta.has-hover ? Theme.controls-color-primary-default-hovered : Theme.logo-color-primary-player;
+            animate background { duration: (App.motion ? Theme.duration-transition : 0ms); easing: ease; }
+            transform-scale: play-ta.has-hover ? 1.05 : 1;
+            animate transform-scale { duration: (App.motion ? Theme.duration-transition : 0ms); easing: ease; }
+            Icon { source: App.playing ? Icons.pause-m : Icons.play-m; size: 22px; colorize: #1a1a1ae6; }
+            play-ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { App.play-pause(); } }
+        }
+        MiniButton {
+            x: 238px;
+            y: 66px;
+            icon: Icons.next-small;
+            enabled: on;
+            clicked => { App.next(); }
+        }
+        MiniVolumeSlider {
+            x: parent.width - 120px;
+            y: 66px;
+            width: 68px;
+        }
+        MiniButton {
+            x: parent.width - 44px;
+            y: 66px;
             icon: App.volume <= 0 ? Icons.volume-off : Icons.volume;
-            scroll-volume: true;
-            icon-size: 16px;
             clicked => { App.toggle-mute(); }
         }
+
+        // Возврат в большое окно доступен без наведения и клика по обложке.
+        MiniButton {
+            x: parent.width - 68px;
+            y: 8px;
+            icon: Icons.fullscreen;
+            icon-size: 16px;
+            clicked => { App.toggle-mini(); }
+        }
+
+        // Крестик закрытия: виден, пока курсор над окном.
+        property <float> chrome: self.has-hover ? 1 : 0;
+        animate chrome { duration: (App.motion ? Theme.duration-transition : 0ms); easing: ease; }
         Rectangle {
-            x: parent.width - 144px;
-            y: 2px;
-            width: 80px;
+            x: parent.width - 36px;
+            y: 12px;
+            width: 24px;
             height: 24px;
-            visible: ta.has-hover || vol-ta.pressed;
-            property <float> v: max(0, min(1, App.volume));
-            Rectangle { y: 10px; height: 4px; border-radius: 2px; background: #ffffff33; }
-            Rectangle { x: 0; y: 10px; width: parent.width * v; height: 4px; border-radius: 2px; background: #ffffffcc; }
-            Rectangle {
-                x: parent.width * v - 5px;
-                y: 7px;
-                width: 10px;
-                height: 10px;
-                border-radius: 5px;
-                background: vol-ta.has-hover || vol-ta.pressed ? Theme.controls-color-primary-default-enabled : #ffffff;
+            border-radius: 12px;
+            visible: parent.chrome > 0;
+            opacity: parent.chrome;
+            background: close-ta.has-hover ? #ffffff29 : #ffffff14;
+            animate background { duration: (App.motion ? Theme.duration-transition : 0ms); easing: ease; }
+            Icon { source: Icons.close-xs; size: 16px; colorize: close-ta.has-hover ? #ffffff : #ffffffb3; }
+            close-ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { App.close(); } }
+        }
+    }
+
+    // Прогресс по нижнему краю: тянуть можно по всей ширине, время — на месте исполнителей.
+    property <bool> seeking: seek.has-hover || drag >= 0;
+    property <float> seek-at: drag >= 0 ? drag : max(0, min(1, seek.mouse-x / seek.width));
+    if on: Rectangle {
+        y: parent.height - self.height;
+        height: root.seeking ? 4px : 3px;
+        background: #ffffff1f;
+        Rectangle {
+            x: 0;
+            width: parent.width * root.shown;
+            background: root.seeking ? Theme.controls-color-primary-default-enabled : #ffffffcc;
+            animate background { duration: (App.motion ? Theme.duration-transition : 0ms); easing: ease; }
+        }
+    }
+    seek := TouchArea {
+        y: parent.height - 10px;
+        height: 10px;
+        enabled: on && !App.loading && App.duration > 0;
+        mouse-cursor: MouseCursor.pointer;
+        pointer-event(e) => {
+            if e.button == PointerEventButton.left && e.kind == PointerEventKind.down {
+                root.drag = max(0, min(1, self.mouse-x / self.width));
             }
-            vol-ta := TouchArea {
-                mouse-cursor: MouseCursor.pointer;
-                pointer-event(e) => {
-                    if e.kind == PointerEventKind.down {
-                        App.set-volume(max(0, min(1, self.mouse-x / self.width)));
-                    }
-                }
-                moved => {
-                    if self.pressed {
-                        App.set-volume(max(0, min(1, self.mouse-x / self.width)));
-                    }
-                }
+            if e.button == PointerEventButton.left && e.kind == PointerEventKind.up && root.drag >= 0 {
+                App.seek(root.drag * App.duration);
+                root.drag = -1;
+            }
+            if e.kind == PointerEventKind.cancel { root.drag = -1; }
+        }
+        moved => {
+            if self.pressed {
+                root.drag = max(0, min(1, self.mouse-x / self.width));
             }
         }
-        if ta.has-hover: BarButton { x: parent.width - 52px; y: 2px; width: 24px; height: 24px; icon: Icons.fullscreen; icon-size: 16px; clicked => { App.toggle-mini(); } }
-        if ta.has-hover: BarButton { x: parent.width - 28px; y: 2px; width: 24px; height: 24px; icon: Icons.close-xs; icon-size: 16px; clicked => { App.close(); } }
     }
 }

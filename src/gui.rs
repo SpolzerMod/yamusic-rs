@@ -2,6 +2,12 @@
 
 slint::include_modules!();
 
+#[cfg(windows)]
+mod mini_dock;
+
+const MINI_W: f32 = 400.0;
+const MINI_H: f32 = 112.0;
+
 mod history_ui;
 mod keys;
 mod landing_ui;
@@ -441,6 +447,7 @@ impl Ctx {
         let changed = self.st.borrow().track_id.as_deref() != Some(t.id.as_str());
         if changed {
             self.st.borrow_mut().track_id = Some(t.id.clone());
+            app.set_mini_track_revision(app.get_mini_track_revision().wrapping_add(1));
             app.set_title(t.title.clone().into());
             app.set_artists(t.artists.clone().into());
             let names: Vec<SharedString> = t.artist_list.iter().map(|a| SharedString::from(a.name.as_str())).collect();
@@ -1686,7 +1693,7 @@ fn save_places(ui: &AppWindow, places: &Places) {
         return;
     }
     let mini = ui.global::<App>().get_mini();
-    if mini {
+    if mini && ui.global::<App>().get_mini_edge() == 0 {
         places.mini.set(window_pos(w).or(places.mini.get()));
     }
     let normal = if mini { places.normal.get() } else { Some((window_pos(w), w.size(), window_maximized(w))) };
@@ -2427,11 +2434,25 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     track_about::register(&app);
     landing_ui::load_concert_assets(&app);
 
+    #[cfg(windows)]
+    let dock = Rc::new(mini_dock::Dock::default());
+    #[cfg(windows)]
+    {
+        let dock = dock.clone();
+        app.on_show_mini_tab(move || dock.preview());
+    }
     let weak = ui.as_weak();
+    #[cfg(windows)]
+    let drag_dock = dock.clone();
     app.on_drag_window(move || {
         if let Some(ui) = weak.upgrade() {
             #[cfg(windows)]
-            sys::start_move(ui.window());
+            {
+                if ui.global::<App>().get_mini() {
+                    drag_dock.start_drag(&ui);
+                }
+                sys::start_move(ui.window());
+            }
             #[cfg(not(windows))]
             {
                 ui.window().with_winit_window(|w| {
@@ -2462,9 +2483,9 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
                 if was_max {
                     ww.set_maximized(false);
                 }
-                ww.set_min_inner_size(Some(LogicalSize::new(320.0, 88.0)));
+                ww.set_min_inner_size(Some(LogicalSize::new(MINI_W, MINI_H)));
             });
-            w.set_size(slint::LogicalSize::new(400.0, 88.0));
+            w.set_size(slint::LogicalSize::new(MINI_W, MINI_H));
             // Композитор на Linux возвращает размер развёрнутого окна уже после нашего запроса.
             #[cfg(target_os = "linux")]
             {
@@ -2472,18 +2493,22 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
                 Timer::single_shot(Duration::from_millis(150), move || {
                     let Some(ui) = weak.upgrade() else { return };
                     let w = ui.window();
-                    if ui.global::<App>().get_mini() && w.size().height as f32 > 120.0 * w.scale_factor() {
-                        w.set_size(slint::LogicalSize::new(400.0, 88.0));
+                    if ui.global::<App>().get_mini() && w.size().height as f32 > (MINI_H + 32.0) * w.scale_factor() {
+                        w.set_size(slint::LogicalSize::new(MINI_W, MINI_H));
                     }
                 });
             }
             let k = w.scale_factor();
-            let (mw, mh, gap) = ((400.0 * k) as i32, (88.0 * k) as i32, (16.0 * k) as i32);
+            let (mw, mh, gap) = ((MINI_W * k) as i32, (MINI_H * k) as i32, (16.0 * k) as i32);
             let (l, t, r, b) = sys::work_area(w);
             let p = pl.mini.get().unwrap_or(slint::PhysicalPosition::new(r - mw - gap, b - mh - gap));
             w.set_position(slint::PhysicalPosition::new(p.x.min(r - mw).max(l), p.y.min(b - mh).max(t)));
         } else {
-            pl.mini.set(window_pos(w).or(pl.mini.get()));
+            if app.get_mini_edge() == 0 {
+                pl.mini.set(window_pos(w).or(pl.mini.get()));
+            }
+            #[cfg(windows)]
+            dock.clear(&ui);
             app.set_mini(false);
             // Только если плашку всё же развернули: лишний set_maximized(false) на мониторе
             // со 125% возвращал обычное окно в 1,25 раза больше прежнего.
