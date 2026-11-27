@@ -78,8 +78,8 @@ export component AppWindow inherits Window {
     always-on-top: App.mini;
     preferred-width: 1280px;
     preferred-height: 800px;
-    min-width: App.mini ? 320px : 960px;
-    min-height: App.mini ? 88px : 640px;
+    min-width: !App.mini ? 960px : App.mini-edge == 0 ? 400px : 24px;
+    min-height: !App.mini ? 640px : App.mini-edge == 0 ? 112px : 24px;
     default-font-family: "YS Text";
     default-font-size: 16px;
     background: Theme.background-color-primary-enabled-basic;
@@ -552,11 +552,30 @@ export component AppWindow inherits Window {
         }
     }
 
-    if App.mini: MiniPlayer {
+    if App.mini: Rectangle {
         x: 0;
         y: 0;
         width: parent.width;
         height: parent.height;
+        clip: true;
+        background: App.has-track ? App.tint : Theme.background-color-primary-enabled-player;
+        if !App.mini-tab: MiniPlayer {
+            x: App.mini-edge == 1 ? parent.width - self.width : App.mini-edge == 2 ? 0px : (parent.width - self.width) / 2;
+            y: App.mini-edge == 3 ? parent.height - self.height : App.mini-edge == 4 ? 0px : (parent.height - self.height) / 2;
+            width: 400px;
+            height: 112px;
+        }
+        if App.mini-tab: Icon {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            size: 16px;
+            source: App.playing ? Icons.pause-m : Icons.play-m;
+            colorize: Theme.logo-color-primary-player;
+        }
+        if App.mini-tab: TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { App.show-mini-tab(); }
+        }
     }
 
     TipLayer {

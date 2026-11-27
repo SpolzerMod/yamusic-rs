@@ -721,6 +721,10 @@ export global App {
     callback minimize();
     // Мини-плеер поверх всех окон.
     in-out property <bool> mini;
+    in property <int> mini-edge;
+    in property <bool> mini-tab;
+    in property <int> mini-track-revision;
+    callback show-mini-tab();
     // Всплывающая подсказка: текст и точка привязки в окне. Сверху — над точкой, иначе справа от неё.
     in-out property <string> tip;
     in-out property <length> tip-x;
