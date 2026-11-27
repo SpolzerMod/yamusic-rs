@@ -228,6 +228,9 @@ export global App {
     in property <string> update-version;
     // Установщик скачивается.
     in property <bool> update-busy;
+    in property <bool> update-install-supported;
+    in property <bool> update-can-install;
+    in property <bool> update-notify-only;
     callback update-install();
     // «Что изменилось»: сравнение запущенной и новой версии на GitHub.
     callback update-changes();

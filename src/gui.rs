@@ -1829,6 +1829,7 @@ fn check_updates(weak: &slint::Weak<AppWindow>) {
         app.set_update_failed(res.is_err());
         let status = match res {
             Ok(Some(r)) => {
+                app.set_update_can_install(cfg!(windows) && r.exe.is_some());
                 app.set_update_version(r.version.clone().into());
                 let status = format!("Проверено в {time}: доступна версия {}", r.version);
                 UPDATE.with(|u| *u.borrow_mut() = Some(r));
@@ -1878,8 +1879,10 @@ fn start_updates(ui: &AppWindow) {
     });
     ui.global::<App>().on_update_install(|| {
         let Some(r) = UPDATE.with(|u| u.borrow().clone()) else { return };
-        // В релизе нет exe — обновить можно только руками, ведём на страницу.
-        if r.exe.is_none() {
+        let notify_only = CTX.with(|c| {
+            c.borrow().as_ref().is_some_and(|c| c.st.borrow().cfg.update_notify_only)
+        });
+        if notify_only || !cfg!(windows) || r.exe.is_none() {
             sys::open_url(&r.page);
             return;
         }
@@ -2128,6 +2131,8 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     app.set_discord_on(cfg.discord_enabled);
     app.set_autostart(sys::autostart_enabled());
     app.set_check_updates(cfg.check_updates);
+    app.set_update_install_supported(cfg!(windows));
+    app.set_update_notify_only(cfg.update_notify_only);
     app.set_allow_explicit(cfg.allow_explicit);
     app.set_linux(cfg!(target_os = "linux"));
     app.set_translations(crate::i18n::available());
@@ -3683,6 +3688,13 @@ impl Ctx {
                 } else {
                     self.toast("Не удалось изменить автозапуск");
                 }
+            }
+            "update-notify-only" => {
+                let on = !app.get_update_notify_only();
+                app.set_update_notify_only(on);
+                let mut st = self.st.borrow_mut();
+                st.cfg.update_notify_only = on;
+                st.cfg.save();
             }
             "check-updates" => {
                 let on = !app.get_check_updates();
