@@ -19,6 +19,16 @@ export struct TrackItem {
     explicit: bool,
     available: bool,
     artist-names: [string],
+    // Альбом из нескольких дисков: сколько заголовков «Диск N» выше строки (на столько строк
+    // она ниже) и номер трека внутри диска; 0 — номер по порядку списка.
+    shift: int,
+    num: int,
+}
+
+// Заголовок «Диск N» («Сезон N» у подкаста) в списке альбома: место среди строк и текст.
+export struct DiskRow {
+    slot: int,
+    text: string,
 }
 
 export struct PinItem {
@@ -192,8 +202,18 @@ export global App {
     // так окно рисуется целиком после переноса на другой монитор.
     in property <bool> repaint;
     in property <string> toast;
+    // Тост подписки (BaseNotificationLike): `toast` — начало, дальше название (ссылка на
+    // `toast-target`), середина и ссылка на коллекцию. Пустая `toast-link` — обычный тост.
+    in property <string> toast-title;
+    in property <string> toast-mid;
+    in property <string> toast-link;
+    in property <string> toast-target;
+    callback toast-open(bool);
     in property <image> toast-cover;
     in property <bool> toast-has-cover;
+    // Значок на месте обложки (тосты повтора и перемешивания); приглушён, когда режим выключен.
+    in property <image> toast-icon;
+    in property <bool> toast-icon-unset;
     // Новая версия на GitHub (src/update.rs): пусто — обновлений нет.
     in property <string> update-version;
     // Установщик скачивается.
@@ -271,6 +291,17 @@ export global App {
     in property <string> track-format;
     in property <[WaveSettingGroup]> wave-settings;
     in-out property <bool> wave-settings-open;
+    // Играет волна «Под занятие»: кнопка настроек остаётся, хотя над пятном челка.
+    in property <bool> wave-tunable;
+    // Меню челки волны (`VibeContextButton`): есть, если волну можно лайкать (`isLikeEnabled`
+    // оригинала); «Поделиться» — если ещё и `isShareEnabled`.
+    in property <bool> wave-menu;
+    in-out property <bool> wave-menu-open;
+    in property <bool> wave-share;
+    in property <bool> wave-pinned;
+    in property <bool> wave-liked;
+    // «pin», «like» или «share».
+    callback wave-menu-action(string);
     in property <[string]> artist-list;
     in property <string> artists-longest;
     // Фаза анимации пятна, секунды; идёт только во время игры на странице волны.
@@ -305,6 +336,7 @@ export global App {
     in property <image> list-artist-cover;
     in property <color> list-tint: #00000000;
     in property <[TrackItem]> tracks;
+    in property <[DiskRow]> list-disks;
     in property <bool> list-loading;
     in property <int> list-current: -1;
     in-out property <string> list-filter;
