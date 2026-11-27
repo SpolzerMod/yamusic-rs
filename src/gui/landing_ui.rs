@@ -55,6 +55,11 @@ pub(super) fn hidden_titles(cfg: &crate::config::Config) -> String {
     cfg.hidden_blocks.iter().map(|h| h.title.as_str()).collect::<Vec<_>>().join(", ")
 }
 
+/// Обложка карточки на открытом лендинге — для тоста подписки с карточки.
+pub(super) fn card_cover(target: &str) -> Option<String> {
+    LS.with(|l| l.borrow().cards.iter().flatten().find(|c| c.target == target).and_then(|c| c.covers.first().cloned()))
+}
+
 /// У afisha другие размеры картинок: только 100, 200 и 400.
 fn afisha_size(px: u32) -> u32 {
     [100, 200, 400].into_iter().find(|&s| s >= px).unwrap_or(400)
@@ -315,7 +320,7 @@ impl Ctx {
                 let (month, day, weekday) = c.date.clone().unwrap_or_default();
                 LCard {
                     title: c.title.clone().into(),
-                    playlist_target: playlist_cards::card_target(&c.target),
+                    playlist_target: playlist_cards::card_target(&c.target, &c.kind),
                     subtitle: c.subtitle.clone().into(),
                     sub2: c.sub2.clone().into(),
                     extra: c.extra.clone().into(),
@@ -620,7 +625,7 @@ impl Ctx {
         // «Смотреть всё»: карточки блока сеткой.
         let cards: Vec<Card> = LS.with(|l| l.borrow().cards.get(b).cloned()).unwrap_or_default()
             .into_iter()
-            .map(|c| Card { title: c.title, subtitle: c.subtitle, year: c.sub2, likes: c.likes, covers: c.covers, round: c.round, explicit: c.explicit, target: c.target })
+            .map(|c| Card { title: c.title, subtitle: c.subtitle, year: c.sub2, likes: c.likes, covers: c.covers, round: c.round, explicit: c.explicit, target: c.target, kind: c.kind })
             .collect();
         let key = format!("landing-{}", def.id);
         self.st.borrow_mut().cards.insert(key.clone(), cards);

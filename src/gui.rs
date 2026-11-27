@@ -855,6 +855,7 @@ impl Ctx {
                                 round: true,
                                 explicit: false,
                                 target: format!("artist:{}", a.id),
+                                kind: String::new(),
                             })
                             .collect();
                         let model = c.card_model("my-artists", &cards, 178.0);
@@ -2940,6 +2941,7 @@ fn card_from_artist(a: &crate::api::Artist) -> Card {
         round: true,
         explicit: false,
         target: format!("artist:{}", a.id),
+        kind: String::new(),
     }
 }
 
@@ -2953,6 +2955,7 @@ fn card_from_album(a: &Album) -> Card {
         round: false,
         explicit: false,
         target: format!("album:{}", a.id),
+        kind: a.kind.clone(),
     }
 }
 
@@ -2966,6 +2969,7 @@ fn card_from_playlist(p: &Playlist) -> Card {
         round: false,
         explicit: false,
         target: format!("playlist:{}:{}", p.uid, p.kind),
+        kind: String::new(),
     }
 }
 
@@ -3162,7 +3166,7 @@ impl Ctx {
             .iter()
             .map(|c| CardItem {
                 title: c.title.clone().into(),
-                playlist_target: playlist_cards::card_target(&c.target),
+                playlist_target: playlist_cards::card_target(&c.target, &c.kind),
                 subtitle: c.subtitle.clone().into(),
                 round: c.round,
                 year: c.year.clone().into(),
@@ -3718,21 +3722,9 @@ impl Ctx {
             false,
         )];
         if !likes && !app.get_list_own() {
-            // У подкаста и книги вместо лайка подписка, как ContextMenu подписки оригинала
-            // (модули 44988 и 108).
-            let label = match (l.album.as_ref().map(|a| a.kind.as_str()), liked) {
-                (Some("podcast"), false) => "Подписаться на подкаст",
-                (Some("podcast"), true) => "Вы подписаны",
-                (Some("audiobook"), false) => "Добавить на полку",
-                (Some("audiobook"), true) => "Убрать с полки",
-                (Some("fairy-tale"), false) => "Нравится",
-                (Some("fairy-tale"), true) => "Не нравится",
-                (_, false) => "Нравится",
-                (_, true) => "Удалить из коллекции",
-            };
             items.push(self.menu_entry(
                 "list-like",
-                label,
+                playlist_cards::like_label(l.album.as_ref().map(|a| a.kind.as_str()), liked),
                 if liked { icons.get_m_liked() } else { icons.get_m_like() },
                 false,
             ));
@@ -4100,6 +4092,10 @@ impl Ctx {
             return;
         }
         let Some(a) = &l.album else { return };
+        if playlist_cards::is_nonmusic(&a.kind) {
+            self.toggle_subscription(&a.id, &a.kind, &l.title, a.cover.as_deref());
+            return;
+        }
         let Some(net) = self.st.borrow().net.clone() else { return };
         let uid = self.st.borrow().uid.clone();
         let ui = self.ui();
@@ -4117,33 +4113,6 @@ impl Ctx {
             }
         }
         let title = l.title.clone();
-        // Подкаст, книга и сказка: тост с обложкой и ссылками (`notifications-info.*-collection`,
-        // модуль 96295), ошибка — `error-messages.error-during-action` (модуль 92966).
-        if let Some(a) = l.album.as_ref().filter(|a| matches!(a.kind.as_str(), "podcast" | "audiobook" | "fairy-tale")) {
-            let (kind_word, cover) = (a.kind.clone(), a.cover.clone());
-            std::thread::spawn(move || {
-                let saved = net.api.like_entity(&uid, "albums", &id, !liked);
-                if saved.is_ok() {
-                    net.refresh("collection");
-                }
-                let _ = slint::invoke_from_event_loop(move || with_ctx(|c| match saved {
-                    Ok(()) => c.subscribe_toast(&kind_word, &title, &id, cover.as_deref(), liked),
-                    Err(e) => {
-                        log(format!("подписка на {id}: {e}"));
-                        // Не сохранилось — подписка остаётся прежней.
-                        {
-                            let mut st = c.st.borrow_mut();
-                            if liked { st.liked_albums.remove(&id) } else { st.liked_albums.insert(id.clone()) };
-                        }
-                        if c.st.borrow().list_key.as_deref() == Some(format!("album:{id}").as_str()) {
-                            c.ui().global::<App>().set_list_liked(!liked);
-                        }
-                        c.toast("При выполнении действия произошла ошибка");
-                    }
-                }));
-            });
-            return;
-        }
         std::thread::spawn(move || {
             let saved = net.api.like_entity(&uid, "albums", &id, !liked);
             if saved.is_ok() {

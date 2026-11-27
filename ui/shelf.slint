@@ -27,7 +27,7 @@ export component PlaylistCardActions inherits Rectangle {
         icon: root.state.pinned ? Icons.pin-filled-small : Icons.pin-small;
         clicked => { App.playlist-card-action(PlaylistCardAction.pin, root.target, root.title, 0px, 0px); }
     }
-    CircleButton {
+    if root.state.trailer: CircleButton {
         x: 12px;
         y: parent.height - self.height - 68px;
         diameter: 36px;

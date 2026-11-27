@@ -748,6 +748,7 @@ pub fn album_card(a: &Album) -> Card {
         round: false,
         explicit: false,
         target: format!("album:{}", a.id),
+        kind: a.kind.clone(),
     }
 }
 
@@ -761,6 +762,7 @@ pub fn playlist_card(p: &Playlist) -> Card {
         round: false,
         explicit: false,
         target: format!("playlist:{}:{}", p.uid, p.kind),
+        kind: String::new(),
     }
 }
 
@@ -774,6 +776,7 @@ pub fn artist_card(a: &Artist) -> Card {
         round: true,
         explicit: false,
         target: format!("artist:{}", a.id),
+        kind: String::new(),
     }
 }
 
@@ -795,6 +798,7 @@ fn release_card(v: &Value) -> Option<Card> {
         round: false,
         explicit: false,
         target: format!("album:{}", a.id),
+        kind: a.kind.clone(),
     })
 }
 
@@ -874,6 +878,8 @@ pub struct Card {
     pub explicit: bool,
     /// album:ID, playlist:UID:KIND, artist:ID, tag:ID
     pub target: String,
+    /// Тип альбома (`podcast`, `audiobook`, …), у остальных карточек пусто.
+    pub kind: String,
 }
 
 pub fn parse_card(it: &Value) -> Option<Card> {
@@ -892,6 +898,7 @@ pub fn parse_card(it: &Value) -> Option<Card> {
                 round: false,
                 explicit: explicit(&v),
                 target: format!("album:{}", a.id),
+                kind: a.kind.clone(),
             }
         }
         "liked_playlist_item" | "playlist_item" => {
@@ -906,6 +913,7 @@ pub fn parse_card(it: &Value) -> Option<Card> {
                 round: false,
                 explicit: false,
                 target: format!("playlist:{}:{}", p.uid, p.kind),
+                kind: String::new(),
             }
         }
         "artist_item" => {
@@ -919,6 +927,7 @@ pub fn parse_card(it: &Value) -> Option<Card> {
                 round: true,
                 explicit: false,
                 target: format!("artist:{}", a.id),
+                kind: String::new(),
             }
         }
         "track_item" => {
@@ -935,6 +944,7 @@ pub fn parse_card(it: &Value) -> Option<Card> {
                     Some(a) => format!("album:{a}"),
                     None => format!("track:{}", t.id),
                 },
+                kind: String::new(),
             }
         }
         "mix_card_item" => Card {
@@ -950,6 +960,7 @@ pub fn parse_card(it: &Value) -> Option<Card> {
             round: false,
             explicit: false,
             target: d.pointer("/action/weblink").and_then(|w| w.as_str()).map(crate::landing::web_target).unwrap_or_default(),
+            kind: String::new(),
         },
         _ => return None,
     })

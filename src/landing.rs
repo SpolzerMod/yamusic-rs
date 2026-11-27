@@ -62,6 +62,8 @@ pub struct LCard {
     pub trend: i32,
     /// album:ID, playlist:UID:KIND, artist:ID, tag:ID, station:ID, url:…, likes, history
     pub target: String,
+    /// Тип альбома (`podcast`, `audiobook`, …), у остальных карточек пусто.
+    pub kind: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -204,6 +206,7 @@ fn album_lcard(v: &Value) -> Option<LCard> {
         covers: a.cover.iter().cloned().collect(),
         explicit,
         target: format!("album:{}", a.id),
+        kind: a.kind.clone(),
         ..Default::default()
     })
 }

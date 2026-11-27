@@ -8,6 +8,7 @@ export struct PlaylistCardState {
     pinned: bool,
     liked: bool,
     can-like: bool,
+    trailer: bool,
 }
 
 // Строка окна «Горячие клавиши»: подпись и клавиши по ячейкам («—» — пусто).
@@ -48,6 +49,7 @@ export struct PinItem {
 
 export struct CardItem {
     title: string,
+    // Действия при наведении: playlist:UID:KIND или album:ID:тип подкаста и книги.
     playlist-target: string,
     subtitle: string,
     cover: image,
@@ -99,6 +101,7 @@ export struct LTab {
 // Карточка блока лендинга; блоку нужны только свои поля.
 export struct LCard {
     title: string,
+    // Действия при наведении: playlist:UID:KIND или album:ID:тип подкаста и книги.
     playlist-target: string,
     subtitle: string,
     sub2: string,
