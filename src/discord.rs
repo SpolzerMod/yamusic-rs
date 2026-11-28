@@ -26,6 +26,9 @@ const TEXT_MAX: usize = 128;
 const LABEL_MAX: usize = 32;
 /// «Слушать в Яндекс Музыке» — 43 байта, и статус перестаёт уходить другим.
 const LISTEN_LABEL: &str = "Слушать в Музыке"; // 30 байт
+/// Страница сайта: пробует открыть трек в приложении Яндекс Музыки, иначе — в вебе.
+/// Discord принимает в кнопках только http(s), поэтому deeplink идёт через неё.
+const OPEN_URL: &str = "https://spolzermod.github.io/yamusic-rs/open";
 
 #[derive(Clone, Default)]
 pub struct DiscordCfg {
@@ -185,9 +188,10 @@ fn fit(s: &str, max: usize, fallback: &str) -> String {
 
 fn activity(t: &Track, start: i64, end: Option<i64>, playing: bool, listening: bool, with_display_type: bool) -> Value {
     let kind = if listening { 2 } else { 0 };
+    // Кнопка ведёт на страницу сайта: она пробует приложение, а потом веб-плеер.
     let url = match &t.album_id {
-        Some(a) => format!("https://music.yandex.ru/album/{a}/track/{}", t.id),
-        None => format!("https://music.yandex.ru/track/{}", t.id),
+        Some(a) => format!("{OPEN_URL}?track={}&album={a}", t.id),
+        None => format!("{OPEN_URL}?track={}", t.id),
     };
     let mut a = json!({
         // 2 — «Слушает», 0 — «Играет»: так показываем, если клиент не принял «Слушает».
