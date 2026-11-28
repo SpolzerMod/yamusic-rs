@@ -1005,10 +1005,12 @@ fn run(rx: Receiver<Msg>, busy: Arc<AtomicBool>, emit: impl Fn(Event)) {
                 None => None,
             }
         };
+        let mut render_cpu = || renderer.get_or_insert_with(|| Renderer::new(resolution))
+            .frame(&uniforms, circles, opacity, crop);
+        #[cfg(windows)]
+        let frame = accelerated.unwrap_or_else(&mut render_cpu);
         #[cfg(not(windows))]
-        let accelerated: Option<Frame> = None;
-        let frame = accelerated.unwrap_or_else(|| renderer.get_or_insert_with(|| Renderer::new(resolution))
-            .frame(&uniforms, circles, opacity, crop));
+        let frame = render_cpu();
         emit(Event::Frame(frame));
         // На паузе пятно доходит до покоя и замирает: у оригинала оно и дальше медленно
         // плывёт, но ради этого окно пришлось бы перерисовывать без конца.
