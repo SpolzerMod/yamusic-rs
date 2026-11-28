@@ -6,6 +6,10 @@ use std::path::PathBuf;
 
 /// Длина кроссфейда, когда его включают в настройках.
 pub const CROSSFADE_SECS: u32 = 6;
+#[cfg(not(target_os = "android"))]
+pub const WAVE_MIN_RESOLUTION: u32 = 325;
+#[cfg(not(target_os = "android"))]
+pub const WAVE_MAX_RESOLUTION: u32 = 2048;
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
@@ -60,6 +64,9 @@ pub struct Config {
     pub add_to_end: bool,
     /// Пятно «Моей волны» движется. Выключено: анимация всё время тратит процессор.
     pub wave_motion: bool,
+    /// Разрешение живого пятна на компьютере. Ноль означает статичное изображение.
+    #[cfg(not(target_os = "android"))]
+    pub wave_resolution: Option<u32>,
     /// Сколько секунд треки перетекают друг в друга; ноль — без кроссфейда.
     pub crossfade_secs: u32,
     /// Обычное окно при выходе, в пикселях экрана. На Wayland места окна не узнать.
@@ -110,6 +117,8 @@ impl Default for Config {
             allow_explicit: true,
             add_to_end: false,
             wave_motion: false,
+            #[cfg(not(target_os = "android"))]
+            wave_resolution: None,
             crossfade_secs: 0,
             window_pos: None,
             window_size: None,
@@ -149,6 +158,12 @@ pub fn cache_dir() -> PathBuf {
 }
 
 impl Config {
+    #[cfg(not(target_os = "android"))]
+    pub fn wave_resolution(&self) -> u32 {
+        let resolution = self.wave_resolution.unwrap_or(if self.wave_motion { WAVE_MIN_RESOLUTION } else { 0 });
+        if resolution == 0 { 0 } else { resolution.clamp(WAVE_MIN_RESOLUTION, WAVE_MAX_RESOLUTION) }
+    }
+
     /// Длина кроссфейда.
     pub fn crossfade(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.crossfade_secs.into())
@@ -166,6 +181,8 @@ impl Config {
             }),
             Err(_) => Config::default(),
         };
+        #[cfg(not(target_os = "android"))]
+        { c.wave_resolution = Some(c.wave_resolution()); }
         c.token = c.token_sealed.as_deref().and_then(crate::secret::open);
         c.refresh_token = c.refresh_sealed.as_deref().and_then(crate::secret::open);
         if c.token.is_none() && c.token_sealed.is_some() {

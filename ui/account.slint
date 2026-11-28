@@ -3,6 +3,7 @@
 import { Theme } from "theme.slint";
 import { Icons, Icon, Cover, NavCircle, PillButton, ScrollBar } from "widgets.slint";
 import { T, App } from "state.slint";
+import { Slider } from "std-widgets.slint";
 
 // Меню профиля — окно Яндекс ID оригинала (iframe yandex.ru/user-id): 320 в ширину,
 // пункты 44, подменю языка и темы всплывают поверх. Иконки сняты с самого окна, цвета — из его
@@ -441,12 +442,38 @@ export component SettingsPage inherits Rectangle {
                     clicked => { App.setting("mode:lite"); }
                 }
             }
-            SettingItem {
-                title: T.t("Движение волны");
-                desc: T.t("Пятно «Моей волны» откликается на музыку. Нагружает процессор");
-                toggle: true;
-                on: App.wave-motion;
-                clicked => { App.setting("wave-motion"); }
+            VerticalLayout {
+                spacing: 6px;
+                Text {
+                    text: T.t("Анимация «Моей волны»");
+                    font-size: 16px;
+                    font-weight: 700;
+                    color: Theme.controls-color-primary-text-enabled-variant;
+                }
+                quality := Slider {
+                    minimum: 0;
+                    maximum: App.wave-max-resolution - App.wave-min-resolution + 1;
+                    step: 1;
+                    value: App.wave-resolution == 0 ? 0 : App.wave-resolution - App.wave-min-resolution + 1;
+                    accessible-label: T.t("Разрешение анимации «Моей волны»");
+                    released(value) => {
+                        App.set-wave-resolution(round(value) < 1 ? 0 : round(value) + App.wave-min-resolution - 1);
+                    }
+                }
+                HorizontalLayout {
+                    Text { text: T.t("Выключено"); color: Theme.controls-color-primary-text-enabled; }
+                    Text {
+                        property <int> side: round(quality.value) + App.wave-min-resolution - 1;
+                        text: round(quality.value) < 1 ? "" : side + " × " + side;
+                        horizontal-alignment: center;
+                        color: Theme.controls-color-primary-text-enabled-variant;
+                    }
+                    Text {
+                        text: T.t("Высокое качество");
+                        horizontal-alignment: right;
+                        color: Theme.controls-color-primary-text-enabled;
+                    }
+                }
             }
             SettingItem {
                 title: T.t("Логарифмическая громкость");

@@ -146,10 +146,10 @@ struct VibeAnim {
     palette: Option<crate::vibe::Palette>,
     /// Трек и был ли он лайкнут: лайк того же трека — вспышка, как у оригинала.
     like: Option<(String, bool)>,
-    /// Кадры не успевали: до перезапуска остаётся неподвижная картинка.
+    /// Кадры не успевали: до смены качества или перезапуска остаётся неподвижная картинка.
     failed: bool,
-    /// Видимая часть холста в пикселях счёта; нули — страница её ещё не сообщила.
-    crop: [usize; 4],
+    /// Видимая часть холста в долях стороны; нули — страница её ещё не сообщила.
+    crop: [f32; 4],
 }
 
 /// Трейлер: треки звучат по 12,5 с с середины, потом следующий.
@@ -2135,7 +2135,9 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     app.set_download_flac(cfg.download_flac);
     keys::init(&app, &cfg.hotkeys);
     app.set_log_volume(cfg.log_volume);
-    app.set_wave_motion(cfg.wave_motion);
+    app.set_wave_resolution(cfg.wave_resolution() as i32);
+    app.set_wave_min_resolution(crate::config::WAVE_MIN_RESOLUTION as i32);
+    app.set_wave_max_resolution(crate::config::WAVE_MAX_RESOLUTION as i32);
     app.set_crossfade(cfg.crossfade_secs > 0);
     app.set_hidden_blocks(landing_ui::hidden_titles(&cfg).into());
     let places = Rc::new(Places::default());
@@ -3636,13 +3638,6 @@ impl Ctx {
                 self.player.send(Cmd::Crossfade(st.cfg.crossfade()));
                 st.cfg.save();
             }
-            "wave-motion" => {
-                let on = !app.get_wave_motion();
-                app.set_wave_motion(on);
-                let mut st = self.st.borrow_mut();
-                st.cfg.wave_motion = on;
-                st.cfg.save();
-            }
             "download-flac" => {
                 let on = !app.get_download_flac();
                 app.set_download_flac(on);
@@ -4774,14 +4769,15 @@ impl Ctx {
     }
 
     /// Живое пятно — шейдер оригинала в своём потоке (`src/vibe.rs`), включается настройкой
-    /// «Движение волны». Здесь решается, считать ли его сейчас, и передаётся то же, что
+    /// Анимация волны. Здесь решается, считать ли её сейчас, и передаётся то же, что
     /// оригинал шлёт воркеру. В «Лёгком» режиме остаётся неподвижная картинка.
     fn sync_vibe_anim(self: &Rc<Self>, playing: bool, color: Option<[u8; 3]>) {
         use crate::vibe::{Msg, Palette};
         let ui = self.ui();
         let app = ui.global::<App>();
         let w = ui.window();
-        let on = app.get_wave_motion() && !self.lite.get() && !self.st.borrow().vibe.failed;
+        let resolution = app.get_wave_resolution() as usize;
+        let on = resolution != 0 && !self.lite.get() && !self.st.borrow().vibe.failed;
         let mounted = on && app.get_page() == Page::Wave && !app.get_logged_out();
         // За полноэкранным плеером, в мини-плеере, в трее и в свёрнутом окне пятна не видно.
         // Под Wayland Slint может считать окно свёрнутым и после разворачивания из панели
@@ -4801,6 +4797,7 @@ impl Ctx {
             let handle = crate::vibe::Vibe::spawn(move |event| {
                 let _ = weak.upgrade_in_event_loop(move |ui| with_ctx(|c| c.on_vibe_event(&ui, event)));
             });
+            handle.send(Msg::Resolution(resolution));
             let crop = self.st.borrow().vibe.crop;
             if crop[2] > crop[0] {
                 handle.send(Msg::Crop(crop));
@@ -4844,7 +4841,7 @@ impl Ctx {
             Event::Frame(_) if !v.mounted => {}
             Event::Frame(frame) => {
                 // Место кадра на холсте — долями его стороны.
-                let side = crate::vibe::RES as f32;
+                let side = frame.resolution as f32;
                 let [x, y, w, h] = frame.rect.map(|v| v as f32 / side);
                 app.set_vibe_x(x);
                 app.set_vibe_y(y);
@@ -4852,13 +4849,16 @@ impl Ctx {
                 app.set_vibe_h(h);
                 app.set_vibe_frame(Image::from_rgba8_premultiplied(frame.pixels));
             }
-            Event::Fallback => {
+            Event::Fallback { resolution } if resolution == app.get_wave_resolution() as usize => {
                 v.failed = true;
                 v.mounted = false;
+                if let Some(h) = &v.handle {
+                    h.send(crate::vibe::Msg::Mount(false));
+                }
                 app.set_vibe_anim(false);
                 app.set_vibe_frame(Image::default());
-                return;
             }
+            Event::Fallback { .. } => return,
         }
         if let Some(h) = &v.handle {
             h.frame_shown();
@@ -5227,6 +5227,27 @@ fn music_dir(cfg: &Config) -> std::path::PathBuf {
 
 /// Колбэки новых экранов: поиск, исполнитель, полноэкранный плеер, меню, настройки звука.
 fn register_extra(app: &App) {
+    app.on_set_wave_resolution(|resolution| with_ctx(|c| {
+        let resolution = if resolution <= 0 { 0 } else {
+            (resolution as u32).clamp(crate::config::WAVE_MIN_RESOLUTION, crate::config::WAVE_MAX_RESOLUTION)
+        };
+        let ui = c.ui();
+        let app = ui.global::<App>();
+        if app.get_wave_resolution() == resolution as i32 { return; }
+        app.set_wave_resolution(resolution as i32);
+        {
+            let mut st = c.st.borrow_mut();
+            st.cfg.wave_resolution = Some(resolution);
+            st.vibe.failed = false;
+            if resolution > 0 {
+                if let Some(handle) = &st.vibe.handle {
+                    handle.send(crate::vibe::Msg::Resolution(resolution as usize));
+                }
+            }
+            st.cfg.save();
+        }
+        c.sync_player();
+    }));
     app.on_open_fullscreen(|m| with_ctx(|c| c.open_fullscreen(m)));
     app.on_open_track_menu(|x, y| with_ctx(|c| c.open_track_menu(x, y)));
     app.on_open_list_menu(|x, y| with_ctx(|c| c.open_list_menu(x, y)));
@@ -5589,10 +5610,7 @@ fn register_extra(app: &App) {
     });
     app.on_vibe_crop(|x0, y0, x1, y1| {
         with_ctx(|c| {
-            let side = crate::vibe::RES as f32;
-            let lo = |v: f32| (v * side - 2.0).clamp(0.0, side) as usize;
-            let hi = |v: f32| (v * side + 2.0).clamp(0.0, side).ceil() as usize;
-            let crop = [lo(x0), lo(y0), hi(x1), hi(y1)];
+            let crop = [x0, y0, x1, y1];
             let mut st = c.st.borrow_mut();
             st.vibe.crop = crop;
             if let Some(h) = &st.vibe.handle {

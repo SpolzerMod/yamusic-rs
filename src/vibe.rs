@@ -21,10 +21,13 @@ use std::time::{Duration, Instant};
 
 use crate::output::{TAP, TAP_LEN};
 
+#[cfg(windows)]
+mod gpu;
+
 /// Сторона холста: `desktopSizePx` оригинала. Браузер растягивает его на 250% ширины блока.
 const SIZE: usize = 650;
 /// Сторона холста, которую считает процессор: вчетверо меньше пикселей.
-pub const RES: usize = SIZE / 2;
+const RES: usize = crate::config::WAVE_MIN_RESOLUTION as usize;
 /// `desktopScale`: во сколько раз сцена меньше холста.
 const SCALE: f32 = 0.35;
 /// Частота тикера воркера.
@@ -577,9 +580,10 @@ struct Renderer {
     painted: [usize; 4],
 }
 
-/// Кадр: закрашенный прямоугольник холста (x, y, ширина, высота в пикселях [`RES`]) и его
+/// Кадр: закрашенный прямоугольник холста (x, y, ширина, высота в пикселях) и его
 /// пиксели с умноженной альфой.
 pub struct Frame {
+    pub resolution: usize,
     pub rect: [usize; 4],
     pub pixels: SharedPixelBuffer<Rgba8Pixel>,
 }
@@ -599,6 +603,34 @@ struct Layer {
     sin_t: f32,
     c1: [f32; 3],
     dc: [f32; 3],
+}
+
+fn frame_layers(u: &Uniforms) -> [Layer; 3] {
+    let time = u.time;
+    let mut layers = [Layer::default(); 3];
+    for (i, l) in layers.iter_mut().enumerate() {
+        let fi = i as f32;
+        let like = u.react[i];
+        let audio = u.audio[i];
+        let offset = CIRCLE_OFFSET_BASE + CIRCLE_OFFSET_STEP * fi;
+        let (s, c) = (time * ROTATION[i][2]).sin_cos();
+        let strength = like.max(audio);
+        *l = Layer {
+            radius: CIRCLE_RADIUS_BASE - CIRCLE_RADIUS_STEP * fi,
+            width: CIRCLE_WIDTH_BASE - CIRCLE_WIDTH_STEP * fi,
+            spark_k: SPARK_STRENGTH_BASE - SPARK_STRENGTH_STEP * fi,
+            like,
+            react_k: like.max(audio * 0.6) * 50.0,
+            strength_base: 0.15 * (1.0 + 1.5 * (-(time * 2.0 + offset * 0.5).sin() * 0.5)) + 0.3 * strength,
+            offset,
+            scale: 1.0 - like * 0.5,
+            shift: [ROTATION[i][0] * c - ROTATION[i][1] * s, ROTATION[i][0] * s + ROTATION[i][1] * c],
+            sin_t: (time + offset).sin(),
+            c1: u.colors[i],
+            dc: [u.colors[i + 3][0] - u.colors[i][0], u.colors[i + 3][1] - u.colors[i][1], u.colors[i + 3][2] - u.colors[i][2]],
+        };
+    }
+    layers
 }
 
 impl Renderer {
@@ -638,7 +670,7 @@ impl Renderer {
     fn frame(&mut self, u: &Uniforms, circles: usize, opacity: f32, crop: [usize; 4]) -> Frame {
         let [x0, y0, x1, y1] = self.render(u, circles, opacity, crop);
         if x1 <= x0 || y1 <= y0 {
-            return Frame { rect: [0, 0, 1, 1], pixels: SharedPixelBuffer::new(1, 1) };
+            return Frame { resolution: self.res, rect: [0, 0, 1, 1], pixels: SharedPixelBuffer::new(1, 1) };
         }
         let res = self.res;
         let (x0, y0) = (x0.saturating_sub(2), y0.saturating_sub(2));
@@ -649,7 +681,7 @@ impl Renderer {
             let at = (y0 + row) * res + x0;
             line.copy_from_slice(&self.canvas[at..at + w]);
         }
-        Frame { rect: [x0, y0, w, h], pixels }
+        Frame { resolution: self.res, rect: [x0, y0, w, h], pixels }
     }
 
     /// Шум круга `which` (0 — общий) в точке пикселя, билинейно по узлам сетки.
@@ -701,29 +733,7 @@ impl Renderer {
             g.fill(f32::NAN);
         }
 
-        let mut layers = [Layer::default(); 3];
-        for (i, l) in layers.iter_mut().enumerate() {
-            let fi = i as f32;
-            let like = u.react[i];
-            let audio = u.audio[i];
-            let offset = CIRCLE_OFFSET_BASE + CIRCLE_OFFSET_STEP * fi;
-            let (s, c) = (time * ROTATION[i][2]).sin_cos();
-            let strength = like.max(audio);
-            *l = Layer {
-                radius: CIRCLE_RADIUS_BASE - CIRCLE_RADIUS_STEP * fi,
-                width: CIRCLE_WIDTH_BASE - CIRCLE_WIDTH_STEP * fi,
-                spark_k: SPARK_STRENGTH_BASE - SPARK_STRENGTH_STEP * fi,
-                like,
-                react_k: like.max(audio * 0.6) * 50.0,
-                strength_base: 0.15 * (1.0 + 1.5 * (-(time * 2.0 + offset * 0.5).sin() * 0.5)) + 0.3 * strength,
-                offset,
-                scale: 1.0 - like * 0.5,
-                shift: [ROTATION[i][0] * c - ROTATION[i][1] * s, ROTATION[i][0] * s + ROTATION[i][1] * c],
-                sin_t: (time + offset).sin(),
-                c1: u.colors[i],
-                dc: [u.colors[i + 3][0] - u.colors[i][0], u.colors[i + 3][1] - u.colors[i][1], u.colors[i + 3][2] - u.colors[i][2]],
-            };
-        }
+        let layers = frame_layers(u);
         let circles = circles.min(3);
         let [x0, y0, x1, y1] = crop.map(|v| v.min(res));
 
@@ -805,15 +815,16 @@ pub enum Msg {
     Playing(bool),
     Like,
     Palette(Palette),
-    /// Видимая часть холста в пикселях [`RES`]: x0, y0, x1, y1.
-    Crop([usize; 4]),
+    /// Видимая часть холста в долях его стороны: x0, y0, x1, y1.
+    Crop([f32; 4]),
+    Resolution(usize),
 }
 
 /// Что поток анимации сообщает интерфейсу.
 pub enum Event {
     Frame(Frame),
     /// Кадры не успевают даже с двумя кругами: дальше показывать неподвижную картинку.
-    Fallback,
+    Fallback { resolution: usize },
 }
 
 #[derive(Clone)]
@@ -842,13 +853,23 @@ impl Vibe {
     }
 }
 
+fn crop_pixels([x0, y0, x1, y1]: [f32; 4], resolution: usize) -> [usize; 4] {
+    let side = resolution as f32;
+    let lo = |v: f32| (v * side - 2.0).clamp(0.0, side) as usize;
+    let hi = |v: f32| (v * side + 2.0).clamp(0.0, side).ceil() as usize;
+    [lo(x0), lo(y0), hi(x1), hi(y1)]
+}
+
 fn run(rx: Receiver<Msg>, busy: Arc<AtomicBool>, emit: impl Fn(Event)) {
     let mut rng = Rng::new();
     let mut state = State::new(&mut rng);
     let mut renderer: Option<Renderer> = None;
+    #[cfg(windows)]
+    let (mut gpu, mut gpu_tried) = (None::<gpu::GpuWave>, false);
     let (mut mounted, mut visible, mut playing) = (false, true, false);
     let mut palette: Option<Palette> = None;
-    let mut crop = [0, 0, RES, RES];
+    let mut crop = [0.0, 0.0, 1.0, 1.0];
+    let mut resolution = RES;
     let mut circles = 3;
     let mut fallback = false;
     // Пятно на паузе пришло к покою и последний кадр уже отдан: новых не нужно.
@@ -908,6 +929,8 @@ fn run(rx: Receiver<Msg>, busy: Arc<AtomicBool>, emit: impl Fn(Event)) {
                     if !on {
                         // Таблицы и холст — около 1 МБ: без страницы волны они не нужны.
                         renderer = None;
+                        #[cfg(windows)]
+                        if let Some(gpu) = &mut gpu { gpu.release_buffers(); }
                     }
                     mounted = on;
                 }
@@ -926,6 +949,18 @@ fn run(rx: Receiver<Msg>, busy: Arc<AtomicBool>, emit: impl Fn(Event)) {
                     state.colors.update(p);
                 }
                 Msg::Crop(c) => crop = c,
+                Msg::Resolution(side) => {
+                    let side = side.clamp(RES, crate::config::WAVE_MAX_RESOLUTION as usize);
+                    if side != resolution {
+                        resolution = side;
+                        renderer = None;
+                        #[cfg(windows)]
+                        if let Some(gpu) = &mut gpu { gpu.release_buffers(); }
+                        fallback = false;
+                        circles = 3;
+                        (spent, frames, slow) = (Duration::ZERO, 0, 0);
+                    }
+                }
             }
             continue;
         }
@@ -948,7 +983,34 @@ fn run(rx: Receiver<Msg>, busy: Arc<AtomicBool>, emit: impl Fn(Event)) {
         }
         let fade = (now.duration_since(shown_at).as_secs_f32() * 1000.0 / FADE_MS).min(1.0);
         let opacity = OPACITY * cubic_bezier(0.42, 0.0, 0.58, 1.0, fade);
-        let frame = renderer.get_or_insert_with(|| Renderer::new(RES)).frame(&state.uniforms(), circles, opacity, crop);
+        let uniforms = state.uniforms();
+        let crop = crop_pixels(crop, resolution);
+        #[cfg(windows)]
+        let accelerated = {
+            if !gpu_tried {
+                gpu_tried = true;
+                match gpu::GpuWave::new() {
+                    Ok(wave) => gpu = Some(wave),
+                    Err(error) => crate::config::log(format!("vibe: использование CPU ({error})")),
+                }
+            }
+            match gpu.as_mut().map(|gpu| gpu.frame(&uniforms, circles, opacity, resolution, crop)) {
+                Some(Ok(frame)) => Some(frame),
+                Some(Err(error)) => {
+                    crate::config::log(format!("vibe: переключение на CPU ({error})"));
+                    gpu = None;
+                    (spent, frames, slow) = (Duration::ZERO, 0, 0);
+                    None
+                }
+                None => None,
+            }
+        };
+        let mut render_cpu = || renderer.get_or_insert_with(|| Renderer::new(resolution))
+            .frame(&uniforms, circles, opacity, crop);
+        #[cfg(windows)]
+        let frame = accelerated.unwrap_or_else(&mut render_cpu);
+        #[cfg(not(windows))]
+        let frame = render_cpu();
         emit(Event::Frame(frame));
         // На паузе пятно доходит до покоя и замирает: у оригинала оно и дальше медленно
         // плывёт, но ради этого окно пришлось бы перерисовывать без конца.
@@ -972,7 +1034,7 @@ fn run(rx: Receiver<Msg>, busy: Arc<AtomicBool>, emit: impl Fn(Event)) {
                 } else {
                     fallback = true;
                     renderer = None;
-                    emit(Event::Fallback);
+                    emit(Event::Fallback { resolution });
                 }
             }
         }
